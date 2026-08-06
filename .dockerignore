@@ -1,0 +1,15 @@
+# Keep the build context small and, more importantly, keep local state out of the
+# image layers. The .go* directories below are the sandbox's GOCACHE/GOPATH and can
+# be hundreds of megabytes.
+.git
+.gitignore
+.gocache
+.gopath
+.gotmp
+dart-cache
+design
+docs
+*.md
+Dockerfile
+.dockerignore
+deploy

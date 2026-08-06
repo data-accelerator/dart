@@ -1,0 +1,19 @@
+# Go build/test cache dirs (kept inside workspace for sandboxed runs)
+/.gocache/
+/.gopath/
+/.gotmp/
+/.toolchain/
+
+# Binaries
+/bin/
+*.test
+*.out
+
+# Editor/OS
+.DS_Store
+
+# Local experiment rig (deploy/local-cluster.sh)
+.dart-local/
+
+# Working design notes, kept out of the repository
+/design/

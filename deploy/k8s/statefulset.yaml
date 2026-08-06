@@ -1,0 +1,137 @@
+# DART as a 3-replica StatefulSet: the verification shape.
+#
+# Why a StatefulSet and not the DaemonSet, when the DaemonSet is the production
+# shape? Because a StatefulSet gives a *fixed replica count*, which is what lets a
+# test assert an exact number: "all three converged" and "origin fetches stayed near
+# 64 blocks" are checkable, whereas a DaemonSet's size depends on the cluster.
+#
+# Membership is discovered here exactly as it is in production — seeded from the
+# headless Service below, then completed by roster exchange — so verify.sh exercises
+# the real mechanism rather than a hand-written peer list. Substituting a static
+# -peers list would make the "sees 3 members" check meaningless, since it would only
+# be reading back its own configuration.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dart-peers
+  labels: {app: dart-verify}
+spec:
+  clusterIP: None
+  # Give each pod a DNS name as soon as it is created rather than when it becomes
+  # ready. Without this, three pods starting together would all resolve the seed
+  # name to nothing and each would begin from an empty seed set.
+  publishNotReadyAddresses: true
+  selector: {app: dart-verify}
+  ports:
+    - {name: peer, port: 19146, targetPort: peer}
+    - {name: client, port: 19145, targetPort: client}
+    - {name: admin, port: 19147, targetPort: admin}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dart
+  labels: {app: dart-verify}
+spec:
+  serviceName: dart-peers
+  replicas: 3
+  # Bring all three up at once: they are peers, not a primary/replica chain, and
+  # each is useful before the others exist.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels: {app: dart-verify}
+  template:
+    metadata:
+      labels: {app: dart-verify}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      # Spread across nodes where possible, so a peer hit is a real network hop and
+      # the verification is not accidentally testing loopback.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels: {app: dart-verify}
+      containers:
+        - name: dart
+          image: dart:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/dart"]
+          args:
+            - -listen=:19145
+            - -prefix=dart
+            - -peer-listen=:19146
+            - -admin=:19147
+            - -cache-dir=/var/cache/dart
+            # These three are all deliberately far below the defaults (1GiB cache,
+            # 256MiB chunks, 4MiB blocks), and the granularity is load-bearing
+            # rather than just fast.
+            #
+            # Chunk size decides how many *owners* a test object has. verify.sh's
+            # fixture is 64MiB, which at the default 256MiB would be a single
+            # chunk and therefore a single owner: every block would belong to one
+            # node, the fan-out tree would have no structure to exercise, and the
+            # owned/borrowed budget split would barely be touched. At 8MiB the same
+            # object spans 8 chunks, HRW spreads them across the 3 replicas, and
+            # each node ends up owner of some chunks and borrower of others.
+            #
+            # This costs no fidelity: chunk-index arithmetic, per-chunk placement
+            # and per-chunk tree construction are the same code at any size. Only
+            # throughput and memory behaviour depend on the absolute figures, and
+            # those are not what verify.sh measures.
+            #
+            # A small cache likewise makes admission and eviction observable
+            # instead of hiding behind headroom.
+            - -cache-size=256MiB
+            - -block-size=1MiB
+            - -chunk-size=8MiB
+            # The pod name is a stable identity for the lifetime of the ordinal,
+            # which is what HRW needs. Never the pod IP: an identity that changes on
+            # restart reshuffles the whole keyspace.
+            - -self-id=$(POD_NAME)
+            # Discover peers the same way production does: resolve the headless
+            # Service for addresses, then exchange rosters to learn identities.
+            - -discover=dns:dart-peers.$(POD_NAMESPACE).svc.cluster.local:19146
+            # -peer-listen is a wildcard; a peer told to dial 0.0.0.0 would dial
+            # itself.
+            - -peer-advertise=$(POD_IP):19146
+            # Fast enough that a test does not spend long waiting to converge.
+            - -discover-interval=1s
+            - -fanout=2
+            - -reader-tree
+            - -hedge
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef: {fieldPath: metadata.name}
+            - name: POD_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.podIP}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            - name: GOMEMLIMIT
+              value: "400MiB"
+          ports:
+            - {name: client, containerPort: 19145}
+            - {name: peer, containerPort: 19146}
+            - {name: admin, containerPort: 19147}
+          readinessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 3
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/dart}
+      volumes:
+        - name: cache
+          emptyDir:
+            sizeLimit: 512Mi

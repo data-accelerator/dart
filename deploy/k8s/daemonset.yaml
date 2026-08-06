@@ -1,0 +1,126 @@
+# DART as a per-node cache: the production shape.
+#
+# One instance per node, reachable by node-local clients (containerd, overlaybd)
+# over hostPort, so the client-facing hop never leaves the node.
+#
+# Peers are discovered, not configured: each instance resolves the headless Service
+# below for seed addresses, then exchanges rosters with those peers over its own
+# peer port to learn their stable identities and everyone else they know. That is
+# what makes a DaemonSet workable — the set of nodes is not known when the manifest
+# is written.
+#
+# There is deliberately no ServiceAccount, Role or RoleBinding: DART does not talk
+# to the Kubernetes API at all, so it needs no RBAC. Discovery uses DNS, which works
+# here and equally well outside Kubernetes.
+apiVersion: v1
+kind: Service
+metadata:
+  name: dart
+  labels: {app: dart}
+spec:
+  # Headless: resolving this name yields the individual pod addresses, which is
+  # exactly what -discover=dns: consumes. A ClusterIP would return one virtual
+  # address and hide the peers.
+  clusterIP: None
+  # Publish addresses before pods pass their readiness probe. Without this, a whole
+  # cluster starting at once would resolve to nothing and every node would begin
+  # from an empty seed set.
+  publishNotReadyAddresses: true
+  selector: {app: dart}
+  ports:
+    - {name: peer, port: 19146, targetPort: peer}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dart
+  labels: {app: dart}
+spec:
+  selector:
+    matchLabels: {app: dart}
+  updateStrategy:
+    # Never run two instances on one node: they would contend for the cache
+    # directory, and the loser fails to start on the flock (by design — see
+    # store.LockDir). Delete-then-create is the safe order here.
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata:
+      labels: {app: dart}
+    spec:
+      # The cache holds only public-by-construction bytes keyed by digest, but the
+      # process still needs no privileges of any kind.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the emptyDir writable by the non-root user.
+        fsGroup: 65532
+      # Tolerate everything: a node-local cache is only useful if it is actually on
+      # every node, including tainted ones.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: dart
+          image: dart:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            # Passthrough front end for overlaybd: /dart/<full upstream URL>.
+            - -listen=:19145
+            - -prefix=dart
+            # Registry mirror front end for containerd, on the same listener.
+            - -registry=https://registry-1.docker.io
+            - -peer-listen=:19146
+            - -admin=:19147
+            - -cache-dir=/var/cache/dart
+            - -cache-size=8GiB
+            - -mem-size=512MiB
+            # Stable identity. Never the pod IP: HRW keys must survive a restart,
+            # or every restart reshuffles the whole keyspace.
+            - -self-id=$(NODE_NAME)
+            # Seed from the headless Service above. DNS yields addresses only, so
+            # identities come from the roster exchange that follows.
+            - -discover=dns:dart.$(POD_NAMESPACE).svc.cluster.local:19146
+            # What to tell peers to dial. -peer-listen is a wildcard, and a peer
+            # told to connect to 0.0.0.0 would dial itself.
+            - -peer-advertise=$(POD_IP):19146
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            - name: POD_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.podIP}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            # Keep the Go heap under the container limit. The block cache is a
+            # fixed-size arena outside the heap, so this bounds the rest.
+            - name: GOMEMLIMIT
+              value: "1500MiB"
+          ports:
+            # hostPort keeps node-local clients on the node.
+            - {name: client, containerPort: 19145, hostPort: 19145}
+            - {name: peer, containerPort: 19146}
+            - {name: admin, containerPort: 19147}
+          readinessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 200m, memory: 1Gi}
+            limits: {memory: 2Gi}
+          volumeMounts:
+            - {name: cache, mountPath: /var/cache/dart}
+      volumes:
+        # emptyDir, not hostPath, and that is deliberate: the block index lives only
+        # in memory, so a restarted instance rebuilds the arena empty anyway
+        # (store opens it O_TRUNC). hostPath would buy no persistence — its only
+        # real use is pinning the cache to a specific fast disk, which then also
+        # needs the directory to be writable by uid 65532.
+        - name: cache
+          emptyDir:
+            sizeLimit: 10Gi

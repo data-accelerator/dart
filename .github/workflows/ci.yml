@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref: CI here is cheap but not free, and a
+# stale run's result is never interesting.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: vet + test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The module targets go 1.22; test that floor and a current toolchain, so
+        # neither a regression against the declared minimum nor a break on new
+        # Go goes unnoticed.
+        go: ['1.22', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          # --porcelain rather than `git diff`, so an untracked go.sum appearing
+          # (the first dependency being added) is caught too.
+          changed=$(git status --porcelain -- go.mod go.sum)
+          if [ -n "$changed" ]; then
+            echo "go mod tidy changed the module files:"
+            echo "$changed"
+            git diff -- go.mod go.sum
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # The determinism-sensitive packages carry golden values and shuffle
+      # invariance tests, so a plain run matters as much as the race run.
+      - name: test
+        run: go test ./... -count=1
+
+      - name: test -race
+        run: go test ./... -race -count=1
+
+      - name: test -cover
+        run: go test ./... -cover -count=1
+
+  cross-build:
+    name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      # DART is deployed as a container on both architectures, so both must at
+      # least compile on every change.
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+        run: go build ./cmd/dart
+
+  image:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build only: publishing is a separate, credentialed decision. This just
+      # keeps the Dockerfile from rotting.
+      #
+      # SKIP_TESTS=1 because the Dockerfile runs vet+test inside the build stage
+      # and the test job above already covers that on Go 1.22 (the version the
+      # build stage pins) -- running them again here would only double the wait.
+      - name: build image
+        run: docker build --build-arg SKIP_TESTS=1 -t dart:ci .
