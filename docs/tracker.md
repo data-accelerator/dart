@@ -4,7 +4,7 @@ The per-file **active reader set** `S`: which nodes are currently reading a give
 object. The distribution tree is built over `S` instead of over all members.
 
 - Source: `internal/tracker/tracker.go`, `internal/tracker/client.go`
-- Tests: `internal/tracker/tracker_test.go`
+- Tests: `internal/tracker/tracker_test.go`, `internal/tracker/eviction_test.go`
 - Import path: `github.com/data-accelerator/dart/internal/tracker`
 
 ## 1. Overview
@@ -43,7 +43,7 @@ independently. This package therefore holds no placement logic.
 ### 3.1 `Registry`
 
 ```go
-func NewRegistry(Options) *Registry           // Options{Tick, LeaseTTL, Now}
+func NewRegistry(Options) *Registry           // Options{Tick, LeaseTTL, IdleGrace, Now}
 func (r *Registry) Join(file, node string, ttl time.Duration) JoinResponse
 func (r *Registry) Leave(file, node string)
 func (r *Registry) Readers(file string) ([]string, uint64)
@@ -57,9 +57,15 @@ func (r *Registry) Files() int
 - `Leave` drops a lease immediately; the frozen set updates on the next tick.
   Dropping the last reader forgets the file entirely.
 - `Readers` returns a **copy**; `Files` is a diagnostic count.
+- **Idle eviction**: a file with no live leases (readers vanished without a
+  `Leave`) and no `Join`/`Readers` activity for `IdleGrace` is forgotten, so a
+  many-file workload cannot grow the registry without bound. Sweeps are lazy —
+  driven by registry activity, at most one O(files) scan per tick — because an
+  idle registry grows nothing. Eviction is safe: a later `Join` simply
+  recreates the entry (at the price of an `epochS` reset).
 - Defaults: `DefaultTick = 3s`, `DefaultLeaseTTL = 2 * DefaultTick` (a reader that
-  renews once per tick is never dropped spuriously). `Options.Now` injects a clock
-  for tests.
+  renews once per tick is never dropped spuriously),
+  `DefaultIdleGrace = 1m`. `Options.Now` injects a clock for tests.
 
 ### 3.2 HTTP
 
@@ -112,7 +118,7 @@ back to all Ready members.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **88.2%** of statements.
+- **Coverage**: **89.5%** of statements.
 - **Reproduce**:
 
 ```bash
@@ -135,6 +141,10 @@ go test ./internal/tracker/ -race -count=1
 | `TestHTTPBadRequests` | 405 / bad JSON / missing fields |
 | `TestClientTrackerDown` | unreachable tracker surfaces an error |
 | `TestConcurrent` | concurrent join/read/leave (`-race`) |
+| `TestIdleEvictionAfterGrace` | a file with vanished readers is forgotten past the grace, kept within it |
+| `TestIdleEvictionKeepsQueriedFiles` | querying counts as activity: a queried file is never evicted |
+| `TestRejoinAfterEviction` | a Join after eviction recreates the entry and re-publishes immediately |
+| `TestIdleEvictionDefaultGrace` | zero `IdleGrace` selects `DefaultIdleGrace` |
 
 Engine-side (in `internal/engine`):
 
@@ -154,5 +164,6 @@ Engine-side (in `internal/engine`):
 - **No append-only mode**: the design's option to add new readers as leaves and
   only rebalance on a tick boundary is not implemented; every tick may reshape the
   tree tail.
-- **Memory**: a tracker holds one entry per (file, reader) with no cap; a cap plus
-  eviction of idle files would harden it against many-file workloads.
+- **Memory**: bounded by **idle eviction** (§3.1): a file with no live leases
+  and no activity for `IdleGrace` is forgotten. There is deliberately no hard
+  file cap — a hard cap would evict genuinely active files under load.

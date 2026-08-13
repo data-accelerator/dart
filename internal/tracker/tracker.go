@@ -32,6 +32,9 @@ import (
 const (
 	DefaultTick     = 3 * time.Second
 	DefaultLeaseTTL = 2 * DefaultTick
+	// DefaultIdleGrace is how long an empty, unqueried file entry is kept
+	// before idle eviction forgets it.
+	DefaultIdleGrace = time.Minute
 )
 
 // JoinRequest is a reader announcing (or refreshing) interest in a file.
@@ -67,15 +70,23 @@ type fileState struct {
 	frozen []string          // set published to readers, recomputed on a tick
 	epoch  uint64            // bumped when frozen changes
 	nextAt time.Time         // when the next recompute is due
+	// lastActivity is the last Join/Readers for this file; it drives idle
+	// eviction (see Registry.sweepLocked).
+	lastActivity time.Time
 }
 
 // Registry tracks reader sets for many files. It is safe for concurrent use.
 type Registry struct {
 	tick  time.Duration
 	ttl   time.Duration
+	grace time.Duration
 	now   func() time.Time // injectable clock for tests
 	mu    sync.Mutex
 	files map[string]*fileState
+	// nextSweep bounds idle eviction to at most once per tick, amortized over
+	// registry activity (no background goroutine: an idle registry grows
+	// nothing, so there is nothing to sweep while nothing calls).
+	nextSweep time.Time
 }
 
 // Options configures a Registry. Zero values select the defaults.
@@ -84,6 +95,10 @@ type Options struct {
 	Tick time.Duration
 	// LeaseTTL is the default lease granted to a reader.
 	LeaseTTL time.Duration
+	// IdleGrace is how long a file with no live leases and no activity is kept
+	// before the registry forgets it. The grace absorbs join/leave churn;
+	// forgetting is cheap (a later Join simply recreates the entry).
+	IdleGrace time.Duration
 	// Now overrides the clock (tests).
 	Now func() time.Time
 }
@@ -93,6 +108,7 @@ func NewRegistry(opt Options) *Registry {
 	r := &Registry{
 		tick:  opt.Tick,
 		ttl:   opt.LeaseTTL,
+		grace: opt.IdleGrace,
 		now:   opt.Now,
 		files: make(map[string]*fileState),
 	}
@@ -101,6 +117,9 @@ func NewRegistry(opt Options) *Registry {
 	}
 	if r.ttl <= 0 {
 		r.ttl = DefaultLeaseTTL
+	}
+	if r.grace <= 0 {
+		r.grace = DefaultIdleGrace
 	}
 	if r.now == nil {
 		r.now = time.Now
@@ -118,11 +137,13 @@ func (r *Registry) Join(file, node string, ttl time.Duration) JoinResponse {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.sweepLocked(now)
 	fs := r.files[file]
 	if fs == nil {
 		fs = &fileState{leases: make(map[string]*lease)}
 		r.files[file] = fs
 	}
+	fs.lastActivity = now
 	if l := fs.leases[node]; l != nil {
 		l.expireAt = now.Add(ttl)
 	} else {
@@ -155,10 +176,12 @@ func (r *Registry) Readers(file string) ([]string, uint64) {
 	now := r.now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.sweepLocked(now)
 	fs := r.files[file]
 	if fs == nil {
 		return nil, 0
 	}
+	fs.lastActivity = now
 	r.refreshLocked(fs, now)
 	return append([]string(nil), fs.frozen...), fs.epoch
 }
@@ -167,7 +190,32 @@ func (r *Registry) Readers(file string) ([]string, uint64) {
 func (r *Registry) Files() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.sweepLocked(r.now())
 	return len(r.files)
+}
+
+// sweepLocked forgets files that have no live leases and have seen no activity
+// for longer than the idle grace, bounding memory for many-file workloads.
+// Expired leases are dropped first so a file whose readers simply vanished
+// (no Leave) counts as empty. Sweeps run at most once per tick and are driven
+// by registry activity; a totally idle tracker is only asked to forget files
+// the next time anyone talks to it, which costs one O(files) scan per tick at
+// most. Caller must hold r.mu.
+func (r *Registry) sweepLocked(now time.Time) {
+	if now.Before(r.nextSweep) {
+		return
+	}
+	r.nextSweep = now.Add(r.tick)
+	for f, fs := range r.files {
+		for node, l := range fs.leases {
+			if !l.expireAt.After(now) {
+				delete(fs.leases, node)
+			}
+		}
+		if len(fs.leases) == 0 && now.Sub(fs.lastActivity) > r.grace {
+			delete(r.files, f)
+		}
+	}
 }
 
 // refreshLocked recomputes the frozen set if the tick is due, dropping expired
