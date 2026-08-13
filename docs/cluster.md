@@ -15,7 +15,8 @@ This package models the resulting membership as an immutable snapshot (`View`)
 and exposes it to the placement/distribution layers. It deliberately contains no
 Kubernetes code: a pluggable `Provider` supplies Views, so the core is testable
 and usable without a cluster (`StaticProvider`). A Kubernetes EndpointSlice
-provider is a future addition (see §8).
+seeder ships as the separate `providers/k8s` module (see [k8s.md](./k8s.md)),
+keeping `client-go` out of this module.
 
 ## 2. Concepts
 
@@ -248,13 +249,14 @@ go test ./internal/cluster/ -cover -count=1
 
 ## 8. Limitations & TODO
 
-- **Kubernetes provider**: an EndpointSlice-watch `Provider` (the production
-  source of truth) is not yet implemented; it will pull in `client-go` and apply
-  the `Joining/Ready/Suspect/Leaving` state machine (suspect timeout ~30s) and
-  weight hysteresis (lagged weight updates to avoid ownership thrash).
+- **Kubernetes seeder**: implemented as the separate `providers/k8s` module
+  (EndpointSlice watch → seed addresses; see [k8s.md](./k8s.md)). It is a
+  `Seeder`, not a `Provider`: identity learning, the state machine and removal
+  hysteresis stay here in `DynamicProvider`, unchanged across platforms.
 - **Weight hysteresis**: `View` stores weights verbatim; smoothing/hysteresis is
-  a provider-level concern (to be added with the K8s provider), not part of the
-  immutable snapshot.
+  a provider-level concern (all members currently self-report weight 1, and the
+  k8s seeder does not read weights from Kubernetes metadata yet), not part of
+  the immutable snapshot.
 - **Conflicting address reports are resolved by arrival order**: one `Refresh`
   asks both the seeds and the already-known peers, concurrently, and `Learn`
   takes the newest report for an ID unconditionally. If two live endpoints claim

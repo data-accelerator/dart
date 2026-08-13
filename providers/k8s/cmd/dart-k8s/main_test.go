@@ -2,13 +2,10 @@ package main
 
 import "testing"
 
-// TestSchemes guards the wiring contract: the plain dart binary must register
-// exactly the dependency-free schemes. Anything beyond that (k8s) belongs to a
-// variant binary, so this list changing accidentally would either break
-// existing -discover=dns: deployments or silently grow the main module's
-// dependency graph.
+// TestSchemes guards the wiring contract of this variant: the dependency-free
+// schemes plus the EndpointSlice scheme, and nothing else.
 func TestSchemes(t *testing.T) {
-	want := []string{"dns", "static"}
+	want := []string{"dns", "static", "k8s"}
 	if len(schemes) != len(want) {
 		t.Fatalf("schemes = %v, want names %v", schemes, want)
 	}

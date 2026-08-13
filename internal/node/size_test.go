@@ -1,4 +1,4 @@
-package main
+package node
 
 import (
 	"flag"
@@ -132,7 +132,7 @@ func TestSizeFlagsAcceptedByDart(t *testing.T) {
 		"-cache-size=8GiB", "-mem-size=512MiB",
 		"-block-size=1MiB", "-chunk-size=8MiB",
 	}
-	cfg, err := parseFlags(args, io.Discard)
+	cfg, err := parseFlags(args, io.Discard, nil)
 	if err != nil {
 		t.Fatalf("parseFlags(%v): %v", args, err)
 	}

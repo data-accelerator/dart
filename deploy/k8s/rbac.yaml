@@ -1,0 +1,48 @@
+# RBAC for the dart-k8s image variant (providers/k8s/cmd/dart-k8s) — and only
+# for that variant.
+#
+# The plain dart image discovers peers over DNS and talks to no Kubernetes API,
+# so the DaemonSet in daemonset.yaml deliberately ships no ServiceAccount. The
+# dart-k8s variant watches EndpointSlices of its own headless Service instead
+# (-discover=k8s:<namespace>/<service>), which needs exactly one namespaced
+# permission, granted below. Nothing else is required: DART never writes to the
+# API, so a Role (not a ClusterRole) scoped to the deployment's own namespace is
+# the whole privilege.
+#
+# Usage: apply this file, then set on the DaemonSet/StatefulSet pod template
+#
+#   serviceAccountName: dart
+#
+# and run the dart-k8s image with -discover=k8s:dart-system/dart (adjust the
+# namespace to where the manifests are applied).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dart
+  labels: {app: dart}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dart-endpointslices
+  labels: {app: dart}
+rules:
+  # EndpointSlices carry the ready/not-ready endpoint conditions the seeder
+  # reads; Pods or Endpoints would not (the Endpoints API is deprecated for
+  # this) and are not needed.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dart-endpointslices
+  labels: {app: dart}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dart-endpointslices
+subjects:
+  - kind: ServiceAccount
+    name: dart

@@ -18,7 +18,9 @@ This directory holds DART's **official documentation** (tracked in git). It targ
 | [tracker.md](./tracker.md) | `internal/tracker` — per-file active reader set (leases, tick freeze) | Implemented, tests passing |
 | [registry.md](./registry.md) | `internal/registry` — container registry pull-through mirror (OverlayBD/containerd path) | Implemented, tests passing |
 | [observability.md](./observability.md) | `internal/metrics` + `internal/admin` — Prometheus exporter, admin endpoints | Implemented, tests passing |
+| [node.md](./node.md) | `internal/node` — node assembly: flags, store/engine wiring, discovery-scheme dispatch | Implemented, tests passing |
 | [dart.md](./dart.md) | `cmd/dart` — the node binary: registry mirror + OverlayBD prefix API, P2P, admin | Implemented, tests passing |
+| [k8s.md](./k8s.md) | `providers/k8s` (separate module) — EndpointSlice-watch discovery; the `dart-k8s` variant | Implemented, tests passing |
 
 (Register one row here for every new package.)
 

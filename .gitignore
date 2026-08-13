@@ -17,3 +17,8 @@
 
 # Working design notes, kept out of the repository
 /design/
+
+# Local multi-module workspace files: providers/k8s pins its sibling dependency
+# with a replace directive, so a go.work is only ever a local convenience.
+/go.work
+/go.work.sum

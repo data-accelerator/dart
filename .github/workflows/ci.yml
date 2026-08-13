@@ -74,6 +74,58 @@ jobs:
       - name: test -cover
         run: go test ./... -cover -count=1
 
+  test-k8s-provider:
+    # The EndpointSlice discovery plugin is a separate module (so its client-go
+    # tree never enters the main module's go.sum) and needs its own job: the
+    # root-module commands above skip nested modules by design.
+    name: k8s provider module (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.22', 'stable']
+    defaults:
+      run:
+        working-directory: providers/k8s
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          check-latest: true
+
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          changed=$(git status --porcelain -- providers/k8s/go.mod providers/k8s/go.sum)
+          if [ -n "$changed" ]; then
+            echo "go mod tidy changed the plugin module files:"
+            echo "$changed"
+            git diff -- providers/k8s/go.mod providers/k8s/go.sum
+            exit 1
+          fi
+        working-directory: .
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test -race -cover
+        run: go test ./... -race -cover -count=1
+
+      - name: main module stays dependency-free
+        # The whole point of the multi-module layout: regressions here mean a
+        # plugin dependency leaked into the main module.
+        run: |
+          if [ -s go.sum ]; then
+            echo "main module grew a go.sum; plugin dependencies must stay in providers/"
+            exit 1
+          fi
+        working-directory: .
+
   cross-build:
     name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
@@ -113,3 +165,8 @@ jobs:
       # build stage pins) -- running them again here would only double the wait.
       - name: build image
         run: docker build --build-arg SKIP_TESTS=1 -t dart:ci .
+
+      # The variant is a separate target (see the Dockerfile); keep it building
+      # too, since it is what deploy/k8s/rbac.yaml ships with.
+      - name: build dart-k8s image
+        run: docker build --target dart-k8s --build-arg SKIP_TESTS=1 -t dart-k8s:ci .

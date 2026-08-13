@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify a DART deployment on a real Kubernetes cluster.
 #
-#   deploy/verify.sh [-n namespace] [-i image]
+#   deploy/verify.sh [-n namespace] [-i image] [-p dns|k8s]
 #
 # This exists because some properties cannot be established by unit tests: that
 # the image actually runs unprivileged with no shell, that the probes and admin
@@ -9,20 +9,31 @@
 # concurrent demand for one block collapses to few origin fetches rather than one
 # per instance.
 #
+# -p selects the discovery provider under test: "dns" (default; the plain dart
+# image) or "k8s" (the dart-k8s image variant, EndpointSlice watch; applies
+# rbac.yaml and points -discover at the k8s scheme). Every check below is
+# provider-agnostic — that is the point: convergence is identical either way.
+#
 # It is intentionally assertive rather than informational: every check either
 # passes or fails the run, so it is usable in CI.
 set -euo pipefail
 
 NS=dart-verify
 IMAGE=dart:dev
-while getopts "n:i:h" opt; do
+PROVIDER=dns
+while getopts "n:i:p:h" opt; do
   case $opt in
     n) NS=$OPTARG ;;
     i) IMAGE=$OPTARG ;;
-    h) sed -n '2,12p' "$0"; exit 0 ;;
+    p) PROVIDER=$OPTARG ;;
+    h) sed -n '2,16p' "$0"; exit 0 ;;
     *) exit 2 ;;
   esac
 done
+case $PROVIDER in
+  dns|k8s) ;;
+  *) echo "unknown provider '$PROVIDER' (want dns or k8s)" >&2; exit 2 ;;
+esac
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 PASS=0; FAIL=0
@@ -62,11 +73,20 @@ via_origin() {
 
 trap 'echo; echo "--- recent dart logs ---"; k logs -l app=dart-verify --tail=30 --prefix 2>/dev/null || true' ERR
 
-step "Deploying to namespace $NS (image $IMAGE)"
+step "Deploying to namespace $NS (image $IMAGE, discovery $PROVIDER)"
 kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 k apply -f "$HERE/k8s/test-fixtures.yaml" >/dev/null
 # Substitute the image without needing kustomize or envsubst.
-sed "s#image: dart:dev#image: ${IMAGE}#" "$HERE/k8s/statefulset.yaml" | k apply -f - >/dev/null
+manifest=$(sed "s#image: dart:dev#image: ${IMAGE}#" "$HERE/k8s/statefulset.yaml")
+if [ "$PROVIDER" = k8s ]; then
+  # The k8s scheme watches EndpointSlices, which needs the namespaced RBAC and a
+  # service account, and its spec names the Service rather than a DNS name.
+  k apply -f "$HERE/k8s/rbac.yaml" >/dev/null
+  manifest=$(printf '%s\n' "$manifest" | sed \
+    -e 's#-discover=dns:dart-peers\.\$(POD_NAMESPACE)\.svc\.cluster\.local:19146#-discover=k8s:$(POD_NAMESPACE)/dart-peers#' \
+    -e 's#^    spec:$#    spec:\n      serviceAccountName: dart#')
+fi
+printf '%s\n' "$manifest" | k apply -f - >/dev/null
 
 step "Waiting for readiness"
 k wait --for=condition=ready pod/dart-toolbox --timeout=120s >/dev/null

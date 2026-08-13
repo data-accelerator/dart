@@ -6,9 +6,10 @@ registry pull-through mirror, the OverlayBD prefix API, and an admin/metrics
 plane. Configured without peers or discovery it degrades to a single-node caching
 proxy.
 
-- Source: `cmd/dart/main.go`
-- Tests: `cmd/dart/main_test.go`
+- Source: `cmd/dart/main.go` (a thin shell; all assembly lives in `internal/node` — see [node.md](./node.md))
+- Tests: `cmd/dart/main_test.go` (scheme wiring); the behavioral tests live in `internal/node`
 - Build: `go build ./cmd/dart`
+- Variant: `dart-k8s` (`providers/k8s/cmd/dart-k8s`) adds EndpointSlice discovery — see [k8s.md](./k8s.md)
 
 ## 1. Overview
 
@@ -39,7 +40,7 @@ dart [flags]
 | `-self-id` | `""` | this node's cluster ID (required with `-peers`) |
 | `-peer-listen` | `:9000` | peer block-server listen address (P2P mode) |
 | `-peers` | `""` | fixed membership: comma-separated `id@host:port` (incl. self). Mutually exclusive with `-discover` |
-| `-discover` | `""` | **maintain** membership by discovery: `dns:<name>:<port>` (a headless Service) or `static:<a>,<b>,...` |
+| `-discover` | `""` | **maintain** membership by discovery: `<scheme>:<spec>` — `dns:<name>:<port>` (a headless Service), `static:<a>,<b>,...`, or a bare address list; the `dart-k8s` variant adds `k8s:<namespace>/<service>[/<port>]` |
 | `-peer-advertise` | `""` | `host:port` peers should dial; defaults to `-peer-listen`, substituting `POD_IP`/`DART_ADVERTISE_HOST`/hostname when the host is a wildcard |
 | `-discover-interval` | `5s` | how often to re-resolve seeds and re-exchange rosters |
 | `-forget-after` | `60s` | how long a member must be unseen **and** unreachable before removal |
@@ -141,22 +142,27 @@ Two timings matter and are asymmetric on purpose:
 `:19146` and `0.0.0.0:19146` name every interface, and a peer told to dial `0.0.0.0`
 would dial itself.
 
+The scheme set is a property of the binary: `dart` ships `dns` and `static`
+(plus the bare-list shorthand), and the `dart-k8s` variant adds `k8s`, which
+watches EndpointSlices instead of polling DNS — same convergence afterwards,
+but immediate and readiness-aware (see [k8s.md](./k8s.md)). `-discover`'s help
+text lists exactly what the running binary was linked with.
+
 
 ## 4. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **75.4%** of statements. The uncovered code is the blocking
-  serve loop, signal handling, and `main` (integration-level, validated by a
-  manual run/preview); the testable logic — flag parsing, size parsing, origin
-  resolution (incl. the `//` preservation), handler construction, and an end-to-end
-  prefix-passthrough round trip — is covered.
+- **Coverage**: the behavioral coverage moved to `internal/node` (**77.0%**) with
+  the code; what remains here is `main` and the scheme table, guarded by
+  `TestSchemes`. The test list below therefore describes tests that now live in
+  `internal/node` (`node_test.go`, `discover_test.go`, `size_test.go`).
 - **Note**: tests use `t.TempDir()`; in the sandbox export `TMPDIR=$PWD/.gotmp`.
 - **Reproduce**:
 
 ```bash
 export TMPDIR=$PWD/.gotmp   # plus the cache dirs from docs/README.md
-go test ./cmd/dart/ -v -count=1
-go test ./cmd/dart/ -race -count=1
+go test ./cmd/dart/ ./internal/node/ -v -count=1
+go test ./cmd/dart/ ./internal/node/ -race -count=1
 ```
 
 ### Test list (property each guards)
@@ -190,8 +196,10 @@ go test ./cmd/dart/ -race -count=1
   (`-breaker-failures`/`-breaker-cooldown`) stops re-dialing a sick peer and lets
   routing walk further up the tree around it. Missing: `splice`-level zero copy,
   and hedging on the streaming relay path.
-- **Static membership only**: `-peers` is a fixed list; the Kubernetes
-  EndpointSlice provider (dynamic membership) is future work.
+- **Discovery schemes**: `-peers` fixes membership; `-discover` maintains it via
+  a scheme — `dns` and `static` in this binary, `k8s` (EndpointSlice watch) in
+  the `dart-k8s` variant (see [k8s.md](./k8s.md)). Schemes are registered by the
+  binary, so the plain `dart` build keeps an empty `go.sum`.
 - **Registry mirror and prefix API coexist**: `-registry` adds a Registry v2
   pull-through mirror on `/v2/` (blobs cached by digest, manifests always passed
   through — see docs/registry.md) for containerd, while `-prefix` keeps serving
