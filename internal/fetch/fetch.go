@@ -26,6 +26,14 @@ import (
 type Range struct {
 	Data  []byte
 	Total int64
+	// RangeIgnored reports that the origin answered a ranged request with 200
+	// and a full body, i.e. it does not honor Range. The Data window was sliced
+	// out of the stream without buffering the whole object (see Fetch). Total
+	// comes from Content-Length and is -1 when the response was chunked.
+	//
+	// Callers that fetch per-block should treat this as a signal to stop: every
+	// further block request to this origin would pull the whole object again.
+	RangeIgnored bool
 	// Coalesced reports that these bytes came from a fetch another caller had
 	// already started, so nothing crossed the network on this caller's behalf.
 	//
@@ -102,9 +110,13 @@ type HTTPFetcher struct {
 var _ Fetcher = (*HTTPFetcher)(nil)
 
 // Fetch issues a GET with a Range header (unless start < 0) and returns the
-// body. It accepts 206 (partial) and 200 (full). If the origin ignores the
-// Range and returns 200, the requested sub-range is sliced out of the full
-// body. Any other status is an error.
+// body. It accepts 206 (partial) and 200 (full).
+//
+// A 200 to a ranged request means the origin ignored the Range (or, for an
+// object store such as OSS, that the range ran past end-of-file): the window is
+// sliced out of the stream without buffering the whole object — bytes before
+// start are discarded, at most end-start+1 are read, the rest of the response
+// is aborted — and Range.RangeIgnored is set. Any other status is an error.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (Range, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -133,7 +145,19 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return Range{}, &StatusError{Code: resp.StatusCode, URL: Redact(url), Status: resp.Status}
 	}
-	body, err := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK && ranged {
+		return sliceIgnoredRange(resp, url, start, end)
+	}
+
+	// A 206 is bounded by the requested window (read one byte past it so an
+	// over-long body is caught by the length check below rather than silently
+	// truncated); a non-ranged 200 is read in full.
+	var bodyReader io.Reader = resp.Body
+	if ranged {
+		bodyReader = io.LimitReader(resp.Body, end-start+2)
+	}
+	body, err := io.ReadAll(bodyReader)
 	if err != nil {
 		return Range{}, fmt.Errorf("fetch: %s: read body: %w", Redact(url), err)
 	}
@@ -145,21 +169,8 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	}
 	switch resp.StatusCode {
 	case http.StatusOK:
-		// The origin ignored the Range (or the range covered the whole object)
-		// and returned the full body. This is exactly what an object store such
-		// as OSS does when the requested range runs past end-of-file, so it is a
-		// normal case, not an error: slice out the requested window ourselves.
+		// Non-ranged request answered in full.
 		total = int64(len(body))
-		if ranged {
-			if start >= total {
-				return Range{}, fmt.Errorf("fetch: %s: range start %d beyond size %d", Redact(url), start, total)
-			}
-			e := end
-			if e >= total {
-				e = total - 1
-			}
-			body = body[start : e+1]
-		}
 	case http.StatusPartialContent:
 		// A 206 is trusted as-is (not re-sliced), so it MUST be exactly the window
 		// we asked for. An origin or intermediary that returns a different length,
@@ -177,6 +188,25 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 		}
 	}
 	return Range{Data: body, Total: total}, nil
+}
+
+// sliceIgnoredRange extracts the window [start, end] from a 200 full-body
+// response without buffering the whole object: skip to the window, read only
+// the window, and let Body.Close abort the rest. The total is taken from
+// Content-Length (-1 when the response is chunked).
+func sliceIgnoredRange(resp *http.Response, url string, start, end int64) (Range, error) {
+	if resp.ContentLength >= 0 && start >= resp.ContentLength {
+		return Range{}, fmt.Errorf("fetch: %s: range start %d beyond size %d", Redact(url), start, resp.ContentLength)
+	}
+	if _, err := io.CopyN(io.Discard, resp.Body, start); err != nil {
+		// A body that ends before start puts the range beyond the object.
+		return Range{}, fmt.Errorf("fetch: %s: range start %d beyond body: %w", Redact(url), start, err)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
+	if err != nil {
+		return Range{}, fmt.Errorf("fetch: %s: read body: %w", Redact(url), err)
+	}
+	return Range{Data: data, Total: resp.ContentLength, RangeIgnored: true}, nil
 }
 
 // totalFromContentRange parses the total size from a Content-Range value such
@@ -233,6 +263,42 @@ func FetchBlock(ctx context.Context, f Fetcher, url string, blockSize, blockInde
 	return f.Fetch(ctx, url, start, end)
 }
 
+// Opener is implemented by fetchers that can open a raw streaming response
+// from an origin. It serves callers that proxy a response verbatim instead of
+// fetching a block — the fallback for an origin that does not honor Range.
+type Opener interface {
+	// Open issues a GET for url and returns the live response; the caller
+	// reads and closes Body. Any status is returned as-is: the caller is
+	// proxying and forwards whatever the origin said.
+	Open(ctx context.Context, url string, header http.Header) (*http.Response, error)
+}
+
+var _ Opener = (*HTTPFetcher)(nil)
+
+// Open implements Opener. The fetcher's Header is applied first, then the
+// per-request header (e.g. the client's Range).
+func (f *HTTPFetcher) Open(ctx context.Context, url string, header http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	for k, vs := range f.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	client := f.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	return client.Do(req)
+}
+
 // Coalescing wraps a Fetcher so that concurrent fetches for the same
 // (url, start, end) share a single origin request (singleflight).
 //
@@ -257,6 +323,7 @@ type Coalescing struct {
 }
 
 var _ Fetcher = (*Coalescing)(nil)
+var _ Opener = (*Coalescing)(nil)
 
 // identity returns the deduplication identity for url.
 func (c *Coalescing) identity(url string) string {
@@ -303,6 +370,16 @@ func (c *Coalescing) Fetch(ctx context.Context, url string, start, end int64) (R
 	case res := <-ch:
 		return res.r, res.err
 	}
+}
+
+// Open implements Opener by delegating to the inner fetcher. Passthrough
+// traffic is deliberately not coalesced: nothing from it is cached, so sharing
+// a flight would only couple unrelated clients' failure modes.
+func (c *Coalescing) Open(ctx context.Context, url string, header http.Header) (*http.Response, error) {
+	if o, ok := c.F.(Opener); ok {
+		return o.Open(ctx, url, header)
+	}
+	return nil, errors.New("fetch: inner fetcher does not support streaming open")
 }
 
 // refused reports whether err is an origin authorization refusal, i.e. the

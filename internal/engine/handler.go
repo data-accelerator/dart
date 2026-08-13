@@ -36,6 +36,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "origin error: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	if h.E.RangeUnsupported(url) {
+		// The origin ignores Range, so the block layer cannot serve it: proxy
+		// the request verbatim instead (per-block fetches would each pull the
+		// whole object, and no block could be safely cached for reuse).
+		if err := h.E.ServePassthrough(r.Context(), w, r, url); err != nil {
+			http.Error(w, "origin error: "+err.Error(), http.StatusBadGateway)
+		}
+		return
+	}
 
 	start, end, isRange, ok := parseRange(r.Header.Get("Range"), size)
 	if !ok {

@@ -118,7 +118,19 @@ type Engine struct {
 	rs            map[string]*readerSet
 
 	mu    sync.Mutex
-	sizes map[string]int64 // objectID -> object size (bytes)
+	sizes map[string]sizeMeta // objectID -> probe result
+
+	// opener streams verbatim origin responses for the passthrough fallback
+	// (Range-ignoring origins); nil when the fetcher cannot stream.
+	opener fetch.Opener
+}
+
+// sizeMeta caches what the size probe learned about an object: its size, and
+// whether the origin honors Range at all. A noRange object must be proxied
+// verbatim — a per-block fetch would pull the whole object per block.
+type sizeMeta struct {
+	size    int64
+	noRange bool
 }
 
 // New validates opt and constructs an Engine.
@@ -143,7 +155,7 @@ func New(opt Options) (*Engine, error) {
 		selfID:  opt.SelfID,
 		fanout:  opt.Fanout,
 		mx:      opt.Metrics,
-		sizes:   make(map[string]int64),
+		sizes:   make(map[string]sizeMeta),
 
 		replicas:      opt.Replicas,
 		hedgeEnabled:  opt.Hedge,
@@ -153,6 +165,7 @@ func New(opt Options) (*Engine, error) {
 		trackerReg:    opt.TrackerRegistry,
 		rs:            make(map[string]*readerSet),
 	}
+	e.opener, _ = opt.Fetcher.(fetch.Opener)
 	if e.fanout < 1 {
 		e.fanout = 2
 	}
@@ -165,14 +178,15 @@ func New(opt Options) (*Engine, error) {
 
 // Size returns the total size of the object at url, probing origin once and
 // caching the result by object identity. The probe fetches a single byte and
-// reads the total from the response (Content-Range, or the full length if the
-// origin ignores Range).
+// reads the total from the response (Content-Range, or Content-Length if the
+// origin ignores Range). A probe that reveals a Range-ignoring origin also
+// marks the object for passthrough (see RangeUnsupported).
 func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	oid, _ := chunk.ObjectID(url)
 	e.mu.Lock()
-	if sz, ok := e.sizes[oid]; ok {
+	if sm, ok := e.sizes[oid]; ok {
 		e.mu.Unlock()
-		return sz, nil
+		return sm.size, nil
 	}
 	e.mu.Unlock()
 
@@ -188,9 +202,23 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 		sz = int64(len(r.Data)) // origin did not reveal a total
 	}
 	e.mu.Lock()
-	e.sizes[oid] = sz
+	e.sizes[oid] = sizeMeta{size: sz, noRange: r.RangeIgnored}
 	e.mu.Unlock()
 	return sz, nil
+}
+
+// RangeUnsupported reports whether the origin serving url is known to ignore
+// Range requests, as learned by the Size probe (so Size must have been called
+// first). Such objects are proxied verbatim (ServePassthrough): a per-block
+// fetch would pull the whole object per block.
+//
+// The mark is process-local and never expires: an origin does not grow Range
+// support for an existing object, and a restart re-probes anyway.
+func (e *Engine) RangeUnsupported(url string) bool {
+	oid, _ := chunk.ObjectID(url)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.sizes[oid].noRange
 }
 
 // ErrRangeNotSatisfiable is returned by Serve for a start beyond the object.

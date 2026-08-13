@@ -30,15 +30,18 @@ range) so it can be tested in isolation with `httptest`.
 ### 3.1 `type Range` / `type Fetcher`
 
 ```go
-type Range struct { Data []byte; Total int64 }
+type Range struct { Data []byte; Total int64; RangeIgnored bool; Coalesced bool }
 type Fetcher interface {
     Fetch(ctx context.Context, url string, start, end int64) (Range, error)
 }
 ```
 
 A negative `start` requests the whole object (no `Range` header). `Total` is the
-full object size when the origin reveals it (from `Content-Range`, or the body
-length on a full `200`), else -1.
+full object size when the origin reveals it (from `Content-Range`, or
+`Content-Length` on a `200`), else -1. `RangeIgnored` is set when a ranged
+request was answered with a `200` full body — the origin does not honor Range,
+and every further per-block fetch to it would pull the whole object again (the
+engine uses this to switch to verbatim proxying; see docs/engine.md §3.9).
 
 ### 3.2 `type HTTPFetcher`
 
@@ -60,26 +63,43 @@ type HTTPFetcher struct {
   or the wrong offset would otherwise have its bytes cached under the block's
   key, and the block cache is write-once per key, so that corruption would be
   permanent. `Content-Range` is also parsed for `Total`.
-- If the origin **ignores** the Range and returns `200`, the full body is read
-  and the requested sub-range is **sliced out** (so Range-less origins still
-  work); `Total` is the full length. This is also what an object store such as
-  OSS returns when the requested range runs past end-of-file, so it is a normal
+- If the origin **ignores** the Range and returns `200`, the window is sliced
+  out of the stream **without buffering the whole object**: bytes before `start`
+  are discarded, at most `end-start+1` are read, and the rest of the response is
+  aborted. `Range.RangeIgnored` is set, and `Total` comes from `Content-Length`
+  (-1 on a chunked response). This is also what an object store such as OSS
+  returns when the requested range runs past end-of-file, so it is a normal
   path, not an error.
 - Any other status is an error; a range `start` beyond the object size is an
   error.
 
-### 3.3 `func FetchBlock(ctx, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error)`
+### 3.3 `type Opener` / `HTTPFetcher.Open`
+
+```go
+type Opener interface {
+    Open(ctx context.Context, url string, header http.Header) (*http.Response, error)
+}
+```
+
+`Open` issues a GET and returns the **live** response for the caller to stream
+and close; the fetcher's `Header` is applied first, then the per-request
+`header` (e.g. the client's `Range`). Any status is returned as-is — the caller
+is proxying verbatim. This backs the engine's passthrough fallback for
+Range-ignoring origins. Time complexity is O(1); no body bytes are buffered.
+
+### 3.4 `func FetchBlock(ctx, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error)`
 
 Fetches one block: `start = blockIndex*blockSize`, `end = start+blockSize-1`.
 When `size > 0`, the tail block's end is clamped to `size-1`; when `size <= 0`
 (unknown), the natural block range is requested and `Range.Total` may reveal the
 size.
 
-### 3.4 `type Coalescing`
+### 3.5 `type Coalescing`
 
 ```go
 type Coalescing struct { F Fetcher /* ... */ }
 func (c *Coalescing) Fetch(ctx, url string, start, end int64) (Range, error)
+func (c *Coalescing) Open(ctx, url string, header http.Header) (*http.Response, error)
 ```
 
 Wraps a `Fetcher` with singleflight keyed by `(url, start, end)`: concurrent
@@ -89,13 +109,18 @@ still completes for the other waiters (desirable for a cache). Each caller's own
 `ctx` only bounds how long that caller waits (a cancelled caller returns
 `ctx.Err()`).
 
+`Open` implements `Opener` by delegating to the inner fetcher (erroring when it
+cannot stream). Passthrough traffic is deliberately **not** coalesced: nothing
+from it is cached, so sharing a flight would only couple unrelated clients'
+failure modes.
+
 ```go
 c := &fetch.Coalescing{F: &fetch.HTTPFetcher{Header: authHeader}}
 r, err := fetch.FetchBlock(ctx, c, originURL, blockSize, blockIdx, size)
 // then: store.Put(blockKey, r.Data)
 ```
 
-### 3.5 Presigned upstreams: `Coalescing.Key`, `Redact`, `StatusError`
+### 3.6 Presigned upstreams: `Coalescing.Key`, `Redact`, `StatusError`
 
 ```go
 type Coalescing struct {
@@ -140,15 +165,17 @@ bucket), and that changes three things:
 ## 4. Invariants & Guarantees
 
 1. **Correct range bytes**: on 206 the body is the requested range; on a
-   range-ignored 200 the body is sliced to the requested range.
+   range-ignored 200 the window is sliced out of the stream (bytes before
+   `start` discarded, at most `end-start+1` read) — the full body is never
+   buffered.
 2. **Coalescing**: N concurrent `Coalescing.Fetch` for the same key ⇒ exactly 1
    call to the underlying `Fetcher`; all callers receive the same result. The one
    exception is an authorization refusal (401/403), where each joiner re-fetches
-   once with its own credential (§3.5).
+   once with its own credential (§3.6).
 3. **Cancellation isolation**: a caller cancelling its `ctx` neither aborts the
    shared fetch nor affects other callers.
 4. **Total discovery**: `Total` reflects the object size whenever the origin
-   provides it (Content-Range or a full 200).
+   provides it (Content-Range, or Content-Length on a 200).
 5. **A credential authorizes a fetch, not a cache hit.** This package is only
    consulted on a miss, so a signature is verified by the origin exactly once per
    block — the first time it is fetched. Afterwards the block is served from cache
@@ -174,7 +201,7 @@ bucket), and that changes three things:
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **96.5%** of statements. The remaining uncovered lines are rare
+- **Coverage**: **93.1%** of statements. The remaining uncovered lines are rare
   I/O-error branches (e.g. a mid-body read error) that need fault injection.
 - **Reproduce**:
 
@@ -192,6 +219,11 @@ go test ./internal/fetch/ -cover -count=1
 | `TestHTTPFetcherRange` | 206 range returns exact bytes + Total |
 | `TestHTTPFetcherFullObject` | negative start fetches the whole object |
 | `TestHTTPFetcherRangeIgnored` | 200 (Range ignored) sliced to requested range |
+| `TestHTTPFetcherRangeIgnoredMarked` | 200 to a ranged request sets `RangeIgnored`; Total from Content-Length |
+| `TestHTTPFetcherRangeIgnoredChunked` | chunked 200 ⇒ Total -1, window still sliced |
+| `TestHTTPFetcherRangeIgnoredBoundedRead` | an unbounded 200 body is not read in full (window only, then abort) |
+| `TestOpenPassthrough` | Open forwards Range, preserves status/ETag, streams the body; 404 as-is |
+| `TestCoalescingOpen` | Open delegates to the inner fetcher; clear error when it cannot stream |
 | `TestHTTPFetcherStatusError` | non-2xx is an error |
 | `TestHTTPFetcherConnError` | transport error surfaces |
 | `TestHTTPFetcherRangeBeyondSize` | range start past object size is an error |
@@ -217,9 +249,10 @@ go test ./internal/fetch/ -cover -count=1
   (it knows the access pattern); not implemented here.
 - **miss → fetch → store wiring**: the orchestration that combines
   `chunk`+`hashring`+`store`+peer+this package is a future `engine`/serve layer.
-- **Whole-object 200**: a Range-ignoring origin causes a full-body read into
-  memory; acceptable when `FetchBlock` bounds the request, but large 200
-  responses should eventually stream rather than buffer.
+- **Range-ignoring origins**: handled at two levels. `Fetch` bounds a 200
+  response to the requested window (no full-body buffering) and marks it via
+  `RangeIgnored`; the engine uses the mark to stop per-block fetches entirely
+  and proxy such objects verbatim (see docs/engine.md §3.9).
 - **`Range.Coalesced`**: set when a caller rode along on a fetch another caller had
   already started, so no bytes crossed the network on its behalf. Wire-byte metrics
   must skip such a result; hit-ratio counters should still count the read. Without

@@ -35,6 +35,9 @@ type Metrics struct {
 	// is deliberately not rate limited.
 	failover *metrics.Counter
 
+	// Passthrough: requests proxied verbatim because the origin ignores Range.
+	passthrough *metrics.Counter
+
 	// Latency of a block fetch, by source.
 	peerLatency   *metrics.Histogram
 	originLatency *metrics.Histogram
@@ -75,6 +78,10 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 
 		failover: r.NewCounter("dart_peer_failover_total",
 			"definite peer failures escalated to the next ancestor"),
+
+		passthrough: r.NewCounter("dart_passthrough_total",
+			"requests proxied verbatim, bypassing cache and P2P",
+			metrics.LabelPair{Name: "reason", Value: "range_unsupported"}),
 
 		peerLatency: r.NewHistogram("dart_block_fetch_seconds",
 			"block fetch latency by source", blockLatencyBounds,
@@ -124,6 +131,19 @@ func (m *Metrics) recordClientBytes(n int) {
 		return
 	}
 	m.clientBytes.Add(int64(n))
+}
+
+// recordPassthrough counts a verbatim-proxied request and its bytes. The
+// bytes count as both client-served and origin-pulled — they crossed both
+// wires and none of them came from (or landed in) the cache — but not as any
+// block source: no block was fetched.
+func (m *Metrics) recordPassthrough(n int64) {
+	if m == nil {
+		return
+	}
+	m.passthrough.Inc()
+	m.clientBytes.Add(n)
+	m.originBytes.Add(n)
 }
 
 func (m *Metrics) recordRelay(served bool) {

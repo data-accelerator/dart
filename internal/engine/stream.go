@@ -88,6 +88,13 @@ func (e *Engine) PeerStreamSource() peer.StreamSource {
 		if err != nil {
 			return 0, false, asRelayError(err)
 		}
+		if e.RangeUnsupported(req.URL) {
+			// Blocks cannot be fetched piecemeal from this origin; decline, so the
+			// requester falls back to its own (passthrough) origin path instead of
+			// this node pulling the whole object per block on its behalf.
+			e.mx.recordRelay(false)
+			return 0, false, nil
+		}
 		oid, _ := chunk.ObjectID(req.URL)
 		data, err := e.block(ctx, req.URL, oid, size, int64(req.Key.Block), req.Hop)
 		if err != nil {

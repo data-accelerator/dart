@@ -71,7 +71,9 @@ only when `Cluster`, `Peer`, and `SelfID` are all set.
 
 Returns the object's total size, probing origin once (a `bytes=0-0` fetch) and
 caching the result by object identity (`chunk.ObjectID`). For immutable
-content-addressed objects the size is permanently valid.
+content-addressed objects the size is permanently valid. The probe also
+records whether the origin honored the Range: a `200` answer marks the object
+Range-unsupported (see §3.9).
 
 ### 3.3 `func (e *Engine) Serve(ctx, w io.Writer, url string, start, end int64) error`
 
@@ -116,6 +118,10 @@ type Handler struct {
   Content-Length guarantees a **non-chunked** response even though the body is
   streamed block by block (a requirement of the client plane, not an optimization).
 - `HEAD` returns headers with no body.
+- If `Size` marked the object **Range-unsupported** (the origin ignores
+  `Range`), the request is instead proxied verbatim via `ServePassthrough` —
+  no blocks are fetched, nothing is cached, and the peer plane is not
+  consulted (§3.9).
 
 `NewStaticHandler` serves every request from one fixed origin (single-origin /
 testing). Real multi-mode resolvers (registry mirror, forward proxy, overlaybd
@@ -208,6 +214,44 @@ actually going away.
 `RegisterStoreMetrics` and `RegisterPeerMetrics` additionally export cache
 occupancy and open-circuit counts (see docs/observability.md).
 
+### 3.9 Range-unsupported origins: `RangeUnsupported` / `ServePassthrough`
+
+```go
+func (e *Engine) RangeUnsupported(url string) bool
+func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r *http.Request, url string) error
+```
+
+An origin that ignores `Range` cannot be served through the block layer: every
+per-block fetch would pull the whole object, and a block so fetched could never
+be safely cached for a *different* range. When the `Size` probe (a `bytes=0-0`
+GET) is answered with `200` instead of `206`, the object is marked
+Range-unsupported (process-local, never expires — a restart re-probes), and
+`Handler` then serves every request for it with `ServePassthrough`:
+
+- the client's `Range` header is forwarded, and the origin's status, entity
+  headers (`Content-Type`/`Content-Length`/`Content-Range`/`ETag`/
+  `Last-Modified`/`Cache-Control`/`Accept-Ranges`) and body are streamed back
+  **verbatim** — the client sees exactly what talking to the origin directly
+  would produce;
+- nothing is cached, nothing is routed through P2P, and passthrough traffic is
+  not coalesced;
+- a `HEAD` is served from an upstream GET (a presigned URL is signed for GET
+  alone), forwarding headers with an empty body;
+- an error is reported (as a clean `502`) only before the response is
+  committed; afterwards a failure can only truncate the body.
+
+`ServePassthrough` streams through the fetcher's `fetch.Opener` interface
+(`HTTPFetcher` and `Coalescing` implement it); with a fetcher that cannot
+stream it fails cleanly instead of falling back to per-block pulls. On the
+peer plane, a relay that has marked an object Range-unsupported **declines**
+relay requests for it (`held=false`), so the requester uses its own
+passthrough path rather than this node pulling the whole object per block on
+its behalf.
+
+Metrics: `dart_passthrough_total{reason="range_unsupported"}` counts proxied
+requests; their bytes are counted as both `client` and `origin_in` wire bytes
+(they crossed both wires) but not as any block source.
+
 ## 4. Invariants & Guarantees
 
 1. **Correct bytes**: `Serve` returns exactly `content[start:end+1]`, across
@@ -235,7 +279,7 @@ occupancy and open-circuit counts (see docs/observability.md).
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **82.4%** of statements. Uncovered lines are mostly rare I/O
+- **Coverage**: **84.1%** of statements. Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error, Size fallback when the
   origin reveals no total).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
@@ -296,6 +340,13 @@ go test ./internal/engine/ -cover -count=1
 | `TestHedgeSameAddressNotRaced` | no pointless duplicate when there is no distinct backup |
 | **`TestFailoverNotRateLimited`** | **with the hedge budget drained, a dead parent still escalates to the grandparent instead of falling to origin** |
 | `TestFailoverDoesNotDoubleLaunch` | an in-flight hedge is not launched a second time when the primary then fails |
+| `TestHandlerPassthroughForRangeBlindOrigin` | a 200-probe origin is proxied verbatim: 2 origin hits (probe+GET), then 1; nothing cached |
+| `TestPassthroughForwardsRangeVerbatim` | the client's Range is forwarded; the origin's 200 full body is returned as-is |
+| `TestPassthroughHEAD` | HEAD proxied via an upstream GET; Content-Length forwarded, empty body |
+| `TestRangeCapableOriginNotMarked` | a 206-capable origin is never marked or passthrough-ed |
+| `TestPassthroughCountsMetrics` | `dart_passthrough_total` increments; bytes count as client+origin wire bytes, not as any block source |
+| `TestPassthroughUnavailableWithoutOpener` | a non-streaming fetcher fails the passthrough cleanly with 502 |
+| `TestRelayDeclinesRangeBlindOrigin` | a relay declines (held=false) a block of a Range-unsupported object |
 
 ## 8. Limitations & TODO
 
@@ -312,6 +363,9 @@ go test ./internal/engine/ -cover -count=1
 - **Hedging covers `Get`, not `Stream`**: the cut-through relay path
   (`relayFromParent`) is bounded by `peer.Client.Timeout` but does not yet race a
   duplicate, because a hedged stream would need the two bodies reconciled.
+- **Range-unsupported origins are proxied, not cached** (§3.9): nothing about
+  them is learned beyond the mark itself (no TTL, no re-probe until restart),
+  and their traffic bypasses the P2P tree entirely.
 - **Readahead**: `Serve` fetches covering blocks sequentially; parallel
   fan-out and prefetch of subsequent blocks are future work.
 - **Streaming vs buffering**: blocks are fetched whole into memory (bounded by

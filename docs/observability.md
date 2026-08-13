@@ -59,6 +59,7 @@ and safe for concurrent use, since it runs on the scrape path.
 | `dart_block_fetch_seconds` | histogram | `source=peer\|origin` | block fetch latency |
 | `dart_hedge_total` | counter | `event=fired\|primary_won\|backup_won` | tail-latency hedges: duplicates launched, and which contender served the block |
 | `dart_peer_failover_total` | counter | — | definite peer failures escalated to the next ancestor (not rate limited, unlike hedges) |
+| `dart_passthrough_total` | counter | `reason=range_unsupported` | requests proxied verbatim to origin, bypassing cache and P2P (Range-ignoring origin; see docs/engine.md §3.9) |
 | `dart_peer_circuits_open` | gauge | — | peers whose circuit is currently open |
 | `dart_store_blocks` | gauge | `class=owned\|borrowed\|mem` | cached blocks per cache class |
 | `dart_store_slots` | gauge | `class=owned\|borrowed\|mem` | capacity in blocks per cache class |
