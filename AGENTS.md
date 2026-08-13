@@ -32,16 +32,25 @@ internal/tracker/    per-file active reader set the tree is built over
 internal/registry/   Registry v2 pull-through mirror + token auth
 internal/metrics/    dependency-free Prometheus exporter
 internal/admin/      admin/diagnostic endpoints
-cmd/dart/            the node binary
+internal/node/       node assembly (flags, wiring, discovery-scheme dispatch)
+cmd/dart/            the node binary (thin shell over internal/node)
+providers/k8s/       SEPARATE MODULE: EndpointSlice discovery (client-go) +
+                     cmd/dart-k8s; keeps the main module dependency-free
 deploy/              Kubernetes manifests + local multi-node rig
+  helm/dart/         chart for the DaemonSet shape (discovery.mode=dns|k8s)
+  fluid/             Fluid ThinRuntimeProfile + Dataset samples
 docs/                official, git-tracked documentation (English)
 .gitignore           excludes Go cache dirs and the untracked design/ notes
 go.mod               module github.com/data-accelerator/dart (go 1.22)
 ```
 
 Every package above is implemented with tests and a `docs/<pkg>.md`. Deliberately
-absent for now: a Kubernetes-native discovery provider (see `docs/cluster.md` §8),
-Helm/Fluid packaging, and a `dartctl` CLI.
+absent for now: Helm/Fluid packaging (see the plan's W4) and a `dartctl` CLI.
+
+The multi-module rule: the main module's go.sum stays empty. External
+dependencies (client-go today) live only in `providers/<name>/` modules, which
+pin the sibling main module with `replace ../..` and are wired into binaries by
+explicit `node.Run(..., schemes...)` registration — never `init()`.
 
 ## Documentation
 

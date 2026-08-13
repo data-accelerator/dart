@@ -1,0 +1,72 @@
+# Sample Dataset + ThinRuntime on the "dart-http" profile
+# (thinruntimeprofile.yaml). Applying this makes Fluid:
+#
+#   1. create a fuse DaemonSet from the profile (one mount pod per node that
+#      has an application pod scheduled),
+#   2. bind a PersistentVolume + PersistentVolumeClaim both named after the
+#      Dataset ("dart-demo" below), which application pods then mount.
+#
+# Prerequisites: see the header of thinruntimeprofile.yaml — Fluid >= 1.1
+# with ThinRuntime support, and DART on every node at hostPort 19145.
+#
+# The Dataset and its ThinRuntime must share a name; that is how Fluid pairs
+# them.
+apiVersion: data.fluid.io/v1alpha1
+kind: Dataset
+metadata:
+  name: dart-demo
+spec:
+  mounts:
+    # Any HTTP(S) origin whose artifacts are read by exact path. The fuse
+    # container from the profile prefixes this with the node-local DART
+    # endpoint, so every read flows through the cache.
+    - mountPoint: https://registry-1.docker.io
+      name: upstream
+      # DART is a read-only cache end to end; declare it so Fluid never
+      # attempts a write path.
+      readOnly: true
+      shared: false
+      # Origins needing credentials pass them as encryptOptions; the fuse
+      # container then has to consume them (the sample rclone command does
+      # not — public artifacts only):
+      #
+      # encryptOptions:
+      #   - name: token
+      #     valueFrom:
+      #       secretKeyRef: {name: origin-secret, key: token}
+---
+apiVersion: data.fluid.io/v1alpha1
+kind: ThinRuntime
+metadata:
+  name: dart-demo
+spec:
+  profileName: dart-http
+---
+# Consuming pod: mount the PVC named after the Dataset. It becomes Bound
+# once the fuse mount is up.
+#
+#   apiVersion: v1
+#   kind: Pod
+#   metadata: {name: demo}
+#   spec:
+#     containers:
+#       - name: app
+#         image: busybox
+#         command: ["sh", "-c", "ls /data/v2/library/alpine/blobs/ && sleep 3600"]
+#         volumeMounts:
+#           - {name: data, mountPath: /data, readOnly: true}
+#     volumes:
+#       - name: data
+#         persistentVolumeClaim:
+#           claimName: dart-demo
+#           readOnly: true
+#
+# Verify after applying:
+#
+#   kubectl get dataset dart-demo          # PHASE should reach Bound
+#   kubectl get thinruntime dart-demo
+#   kubectl get pvc dart-demo
+#
+# and on the DART side, the admin plane shows origin offload accumulating:
+#
+#   curl -s http://<node>:19147/metrics | grep dart_block_source_total

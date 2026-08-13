@@ -1,0 +1,45 @@
+{{- if eq (include "dart.rbacNeeded" .) "true" -}}
+# RBAC for the dart-k8s image variant — created automatically in
+# discovery.mode=k8s, or on demand via rbac.create=true.
+#
+# The dart-k8s variant watches EndpointSlices of its own headless Service
+# (-discover=k8s:<namespace>/<service>), which needs exactly one namespaced
+# permission, granted below. Nothing else: DART never writes to the API, so a
+# Role (not a ClusterRole) scoped to the release namespace is the whole
+# privilege. The plain dart image (dns mode) talks to no Kubernetes API and
+# gets no ServiceAccount at all.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dart.serviceAccountName" . }}
+  labels:
+    {{- include "dart.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "dart.fullname" . }}-endpointslices
+  labels:
+    {{- include "dart.labels" . | nindent 4 }}
+rules:
+  # EndpointSlices carry the ready/not-ready endpoint conditions the seeder
+  # reads; Pods or Endpoints would not (the Endpoints API is deprecated for
+  # this) and are not needed.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dart.fullname" . }}-endpointslices
+  labels:
+    {{- include "dart.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dart.fullname" . }}-endpointslices
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dart.serviceAccountName" . }}
+{{- end }}

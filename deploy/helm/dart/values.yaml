@@ -1,0 +1,101 @@
+# DART per-node cache, one DaemonSet instance per node.
+#
+# The defaults mirror deploy/k8s/daemonset.yaml, the verified production
+# shape. The comments here are the reference documentation for each knob;
+# keep them in sync with templates/.
+
+image:
+  # repository is used as-is for discovery.mode=dns and gets a "-k8s" suffix
+  # appended for discovery.mode=k8s (the Dockerfile's dart-k8s target), so the
+  # default values below resolve to "dart:dev" and "dart-k8s:dev" respectively.
+  # Point this at your registry for production (e.g. ghcr.io/acme/dart).
+  repository: dart
+  tag: dev
+  pullPolicy: IfNotPresent
+
+discovery:
+  # How instances find each other:
+  #
+  #   dns  (default) — resolve the chart's headless Service for seed
+  #        addresses, then learn stable identities by roster exchange. Talks
+  #        to no Kubernetes API, so it needs no RBAC and works anywhere DNS
+  #        does.
+  #   k8s — watch the EndpointSlices of the headless Service instead
+  #        (-discover=k8s:<namespace>/<service>). Readiness-aware and
+  #        immediate, but requires the dart-k8s image (selected
+  #        automatically) and EndpointSlice get/list/watch permission, which
+  #        the chart creates automatically in this mode.
+  mode: dns
+
+rbac:
+  # Create the ServiceAccount + Role (EndpointSlice get/list/watch) +
+  # RoleBinding even in dns mode. Ignored in k8s mode, where they are always
+  # created because the variant cannot run without them. There is no reason
+  # to set this true unless another workload reuses the account.
+  create: false
+
+# Listen ports. The client port is also published as a hostPort by default so
+# node-local clients (containerd, overlaybd) never leave the node.
+ports:
+  client: 19145
+  peer: 19146
+  admin: 19147
+
+# Publish ports.client as a hostPort. Set false if the port conflicts with
+# something on the node and clients reach DART some other way.
+hostPort: true
+
+# URL prefix of the passthrough front end: /dart/<full upstream URL>.
+clientPrefix: dart
+
+# Upstream of the registry pull-through mirror front end (containerd path),
+# served on the same client listener. Empty string disables the mirror.
+registryUpstream: https://registry-1.docker.io
+
+cache:
+  dir: /var/cache/dart
+  # -cache-size: bytes the disk arena may hold, split between owned shards and
+  # borrowed hot copies.
+  size: 8GiB
+  # -mem-size: the in-memory hot tier. 0 disables it.
+  memSize: 512MiB
+  # Cap on the emptyDir backing the arena. Should exceed size with headroom
+  # for arena metadata; the node kills the pod if the volume outgrows this.
+  emptyDirSizeLimit: 10Gi
+
+# Keep the Go heap under the container limit. The block cache is a fixed-size
+# arena outside the heap, so this bounds the rest. Keep it comfortably below
+# resources.limits.memory.
+gomemlimit: 1500MiB
+
+resources:
+  requests: {cpu: 200m, memory: 1Gi}
+  limits: {memory: 2Gi}
+
+# Extra CLI flags appended verbatim (e.g. ["-fanout=4", "-hedge=false"]).
+# See docs/dart.md for the full flag list; the chart only templates the
+# operational subset above.
+extraArgs: []
+
+# Never run two instances on one node: they would contend for the cache
+# directory, and the loser fails to start on the flock (store.LockDir).
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate: {maxUnavailable: 1}
+
+# A node-local cache is only useful if it is actually on every node,
+# including tainted ones.
+tolerations:
+  - operator: Exists
+
+nodeSelector: {}
+affinity: {}
+
+# e.g. prometheus.io/scrape: "true" + prometheus.io/port: "19147" to have
+# Prometheus scrape the admin plane directly off the pods.
+podAnnotations: {}
+
+# Override the resource name prefix (Service, DaemonSet, RBAC). The default
+# is the chart name ("dart"). Keep it stable across upgrades: the headless
+# Service name is what peers dial.
+fullnameOverride: ""

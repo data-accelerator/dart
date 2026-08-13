@@ -1,0 +1,87 @@
+# Fluid ThinRuntimeProfile "dart-http": mount an HTTP origin through the
+# node-local DART cache, cluster-wide, defined once by an administrator.
+#
+# What this is and is not
+# -----------------------
+# DART is an HTTP cache proxy, not a filesystem. Fluid's ThinRuntime model
+# expects the fuse container to mount the Dataset's data source as a POSIX
+# filesystem, so this profile's fuse container is a generic read-only
+# HTTP-to-FUSE adapter (rclone's http backend) whose requests are routed
+# through the DART instance on the same node:
+#
+#   app → FUSE mount → rclone (http backend) → http://$NODE_IP:19145/dart/<origin>/
+#         → DART P2P cache → origin (on miss only)
+#
+# ThinRuntime is the orchestration carrier here: Fluid turns the Dataset into
+# a PVC any pod can mount, and the caching/dedup/fan-out all happen inside
+# DART. The fuse image is interchangeable — anything that can serve a
+# read-only mount from plain HTTP works; the only load-bearing choice is
+# pointing it at the node-local DART endpoint.
+#
+# Prerequisites
+# -------------
+#   - Fluid >= 0.9.0 with ThinRuntime support installed in the cluster
+#     (the thinruntime-controller; this profile assumes Fluid >= 1.1, which
+#     injects the runtime config at /etc/fluid/config/config.json).
+#   - DART deployed per node with its client port on hostPort 19145 —
+#     `helm install dart deploy/helm/dart` or deploy/k8s/daemonset.yaml.
+#   - A fuse image providing a POSIX sh, sed, and an HTTP-capable mount tool;
+#     rclone/rclone qualifies and is used below.
+#
+# Limitations (inherent to the http backend, not to DART)
+# -------------------------------------------------------
+#   - Read-only, and directory listing is only as good as the origin's
+#     autoindex HTML (registries and package origins don't serve one). Use
+#     this for known-path reads — image blobs, package tarballs, repo
+#     metadata fetched by exact URL — which is precisely the artifact-load
+#     traffic DART accelerates.
+#   - The sed-based config parsing below expects simple string values in
+#     config.json; origins whose URLs contain escaped quotes need a real JSON
+#     parser in the image (e.g. jq) instead.
+apiVersion: data.fluid.io/v1alpha1
+kind: ThinRuntimeProfile
+metadata:
+  name: dart-http
+spec:
+  # Suffix of the FUSE device type Fluid registers for this profile. Any
+  # non-empty string works for a thin runtime; "fuse" is the convention.
+  fileSystemType: fuse
+  fuse:
+    image: rclone/rclone
+    imageTag: "1.68"
+    imagePullPolicy: IfNotPresent
+    env:
+      # The fuse pod reaches DART over the node it runs on. hostIP (not the
+      # pod's own IP) matches DART's hostPort publishing.
+      - name: NODE_IP
+        valueFrom:
+          fieldRef: {fieldPath: status.hostIP}
+      # DART's client listener as published by the DaemonSet/helm chart.
+      - name: DART_PORT
+        value: "19145"
+      - name: DART_PREFIX
+        value: dart
+    command:
+      - sh
+      - -c
+      - |
+        set -eu
+        CFG=/etc/fluid/config/config.json
+        # Fluid >= 1.1 injects {"targetPath": "...", "mounts": [{"mountPoint":
+        # "...", ...}]}. The first mount is the origin to accelerate.
+        TARGET=$(sed -n 's/.*"targetPath":[ ]*"\([^"]*\)".*/\1/p' "$CFG" | head -n1)
+        ORIGIN=$(sed -n 's/.*"mountPoint":[ ]*"\([^"]*\)".*/\1/p' "$CFG" | head -n1)
+        [ -n "$TARGET" ] && [ -n "$ORIGIN" ] || { echo "bad fluid config:"; cat "$CFG"; exit 1; }
+        # DART's passthrough front end serves /<prefix>/<full upstream URL>,
+        # so prefixing the origin with the node-local endpoint routes every
+        # read through the cache.
+        BASE="http://${NODE_IP}:${DART_PORT}/${DART_PREFIX}/${ORIGIN}"
+        case "$BASE" in */) ;; *) BASE="$BASE/" ;; esac
+        exec rclone mount ":http,url=${BASE}" "$TARGET" \
+          --read-only \
+          --vfs-cache-mode off \
+          --contimeout 5s --timeout 60s --retries 2 --low-level-retries 3 \
+          --allow-non-empty
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {memory: 256Mi}

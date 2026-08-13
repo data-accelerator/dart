@@ -1,0 +1,120 @@
+{{- if not (has .Values.discovery.mode (list "dns" "k8s")) -}}
+{{- fail (printf "discovery.mode %q is not supported (want dns or k8s)" .Values.discovery.mode) -}}
+{{- end -}}
+# The production shape: one instance per node, reachable by node-local
+# clients over hostPort, so the client-facing hop never leaves the node.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "dart.fullname" . }}
+  labels:
+    {{- include "dart.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "dart.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dart.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # The cache holds only public-by-construction bytes keyed by digest,
+      # but the process still needs no privileges of any kind.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Makes the emptyDir writable by the non-root user.
+        fsGroup: 65532
+      {{- if eq (include "dart.rbacNeeded" .) "true" }}
+      serviceAccountName: {{ include "dart.serviceAccountName" . }}
+      {{- end }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dart
+          image: {{ include "dart.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            # Passthrough front end for overlaybd: /<prefix>/<full upstream URL>.
+            - -listen=:{{ .Values.ports.client }}
+            - -prefix={{ .Values.clientPrefix }}
+            {{- if .Values.registryUpstream }}
+            # Registry mirror front end for containerd, on the same listener.
+            - -registry={{ .Values.registryUpstream }}
+            {{- end }}
+            - -peer-listen=:{{ .Values.ports.peer }}
+            - -admin=:{{ .Values.ports.admin }}
+            - -cache-dir={{ .Values.cache.dir }}
+            - -cache-size={{ .Values.cache.size }}
+            - -mem-size={{ .Values.cache.memSize }}
+            # Stable identity. Never the pod IP: HRW keys must survive a
+            # restart, or every restart reshuffles the whole keyspace.
+            - -self-id=$(NODE_NAME)
+            # Seed from the headless Service (dns mode, identities come from
+            # the roster exchange that follows) or watch its EndpointSlices
+            # (k8s mode).
+            - {{ include "dart.discoverArg" . | quote }}
+            # What to tell peers to dial. -peer-listen is a wildcard, and a
+            # peer told to connect to 0.0.0.0 would dial itself.
+            - -peer-advertise=$(POD_IP):{{ .Values.ports.peer }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            - name: POD_IP
+              valueFrom:
+                fieldRef: {fieldPath: status.podIP}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            # Keep the Go heap under the container limit. The block cache is
+            # a fixed-size arena outside the heap, so this bounds the rest.
+            - name: GOMEMLIMIT
+              value: {{ .Values.gomemlimit | quote }}
+          ports:
+            - name: client
+              containerPort: {{ .Values.ports.client }}
+              {{- if .Values.hostPort }}
+              # hostPort keeps node-local clients on the node.
+              hostPort: {{ .Values.ports.client }}
+              {{- end }}
+            - {name: peer, containerPort: {{ .Values.ports.peer }} }
+            - {name: admin, containerPort: {{ .Values.ports.admin }} }
+          readinessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: cache, mountPath: {{ .Values.cache.dir }} }
+      volumes:
+        # emptyDir, not hostPath, and that is deliberate: the block index
+        # lives only in memory, so a restarted instance rebuilds the arena
+        # empty anyway (store opens it O_TRUNC). hostPath would buy no
+        # persistence — its only real use is pinning the cache to a specific
+        # fast disk, which then also needs to be writable by uid 65532.
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.cache.emptyDirSizeLimit }}

@@ -22,11 +22,13 @@ data: container image layers, model weights, datasets, package archives.
                   ...   ...
 ```
 
-> ### Status: working, but not yet production-ready
+> ### Status: working, validated on a live cluster; hardening in progress
 >
-> The data path and peer discovery are implemented and tested (340 tests,
-> race-clean). What has **not** happened yet is a run on a live Kubernetes cluster:
-> the image and manifests are written but unverified there. See [Roadmap](#roadmap).
+> The data path and peer discovery are implemented and tested (390 tests,
+> race-clean), and the image and manifests have been verified on a live
+> Kubernetes cluster (`deploy/verify.sh`). What remains before calling it
+> production-ready is throughput work toward the 100 Gbps-per-node target and
+> operational hardening. See [Roadmap](#roadmap).
 
 ## Why
 
@@ -189,7 +191,8 @@ Three nodes each read the whole object; the origin transferred it once.
 
 ## Kubernetes
 
-Manifests are in [`deploy/k8s/`](./deploy/k8s), and
+Manifests are in [`deploy/k8s/`](./deploy/k8s), a Helm chart packages the
+production shape in [`deploy/helm/dart/`](./deploy/helm/dart), and
 [`deploy/verify.sh`](./deploy/verify.sh) asserts on a live cluster the things unit
 tests cannot: that the image runs unprivileged, that peer hits happen across a real
 network hop, and that origin fetches stay bounded as instances multiply.
@@ -202,15 +205,42 @@ deploy/verify.sh -i dart:dev
 - `daemonset.yaml` — the production shape: one instance per node, reachable by
   node-local clients over `hostPort`, discovering peers through the headless
   Service.
-- `statefulset.yaml` — a fixed-membership shape using an explicit `-peers` list,
-  useful for reproducing a precise topology.
+- `statefulset.yaml` — the verification shape: a fixed three replicas (a
+  DaemonSet's size depends on the cluster) so `verify.sh` can assert exact
+  membership and fetch counts. Discovery is the same DNS-plus-roster
+  mechanism as production.
+- `rbac.yaml` — only for the `dart-k8s` image variant (see below).
 
-DART needs **no RBAC and never contacts the Kubernetes API**. It is deliberately not
-built on a Kubernetes-specific discovery mechanism, so it can also run where
-Kubernetes is considered too heavy.
+The chart mirrors `daemonset.yaml`; one value selects the discovery
+mechanism — and, for `k8s`, the image variant and its RBAC automatically:
 
-> These manifests and the script have **not yet been run on a live cluster** — they
-> are written but unverified. Reports welcome.
+```sh
+helm install dart deploy/helm/dart                            # DNS discovery, no RBAC
+helm install dart deploy/helm/dart --set discovery.mode=k8s   # EndpointSlice watch
+```
+
+`deploy/helm/dart/values.yaml` documents the tunables (cache sizing, ports,
+resources, registry upstream).
+
+The default `dart` image needs **no RBAC and never contacts the Kubernetes API** —
+discovery is DNS plus roster exchange, so it runs where Kubernetes specifics are
+unavailable. Operators who want immediate, readiness-aware discovery can instead
+use the **`dart-k8s` variant** (`docker build --target dart-k8s`), which watches
+EndpointSlices via `-discover=k8s:<namespace>/<service>`; it is a separate module
+(`providers/k8s`, documented in [`docs/k8s.md`](./docs/k8s.md)) so the client-go
+dependency never enters the main build.
+
+### Fluid (dataset-level orchestration)
+
+[`deploy/fluid/`](./deploy/fluid) carries a `ThinRuntimeProfile` and a sample
+`Dataset`/`ThinRuntime` pair that put DART behind
+[Fluid](https://github.com/fluid-cloudnative/fluid)'s thin-runtime
+orchestration: application pods mount a PVC, and the profile's fuse
+container (a read-only HTTP-to-FUSE adapter) serves it from the DART
+instance on the same node, so artifact reads are cached and P2P-shared
+cluster-wide. Prerequisites — Fluid ≥ 1.1 with ThinRuntime support and DART
+on every node at `hostPort` 19145 — and the known-path-read limitation of
+HTTP-backed mounts are documented in the files' headers.
 
 ## Documentation
 
@@ -234,13 +264,17 @@ plane, registry mirror with private-registry authentication, presigned
 object-storage upstreams.
 
 …and peer discovery: DNS seeding via a headless Service plus roster exchange over
-the existing peer connections, with asymmetric add/remove timing.
+the existing peer connections, with asymmetric add/remove timing — or, in the
+`dart-k8s` variant, an EndpointSlice watch feeding the same convergence.
+
+Packaging: a multi-stage distroless image (plus the `dart-k8s` variant), raw
+manifests and a Helm chart for the per-node DaemonSet shape, and Fluid
+thin-runtime samples for dataset-level orchestration.
 
 Next:
 
-1. Verify the container image and manifests on a live cluster.
-2. Policy engine: per-origin rules, mutability classification.
-3. Throughput work toward the 100 Gbps-per-node target (`sendfile`/`splice` are
+1. Policy engine: per-origin rules, mutability classification.
+2. Throughput work toward the 100 Gbps-per-node target (`sendfile`/`splice` are
    already viable on the current data path; this is measurement and tuning).
 
 Not planned: writable caching, cross-region cache coherence, membership consensus.

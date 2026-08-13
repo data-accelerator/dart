@@ -1,0 +1,23 @@
+# Headless Service: resolving this name yields the individual pod addresses,
+# which is exactly what -discover=dns: consumes (and what the EndpointSlice
+# watch in -discover=k8s: mode selects on). A ClusterIP would return one
+# virtual address and hide the peers.
+#
+# Only the peer port is published: node-local clients use the hostPort, and
+# the admin plane is scraped straight off the pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dart.fullname" . }}
+  labels:
+    {{- include "dart.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  # Publish addresses before pods pass their readiness probe. Without this, a
+  # whole cluster starting at once would resolve to nothing and every node
+  # would begin from an empty seed set.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "dart.selectorLabels" . | nindent 4 }}
+  ports:
+    - {name: peer, port: {{ .Values.ports.peer }}, targetPort: peer}

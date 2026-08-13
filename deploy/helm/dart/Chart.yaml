@@ -1,0 +1,13 @@
+apiVersion: v2
+name: dart
+description: >-
+  DART (DADI Accelerated Resource Transfer): a per-node, read-only P2P cache
+  for artifact loads (container images, npm, pypi, yum, oss). Deploys one
+  DaemonSet instance per node; peers are discovered over DNS (default, no
+  RBAC) or an EndpointSlice watch (discovery.mode=k8s, the dart-k8s image
+  variant, RBAC created automatically).
+type: application
+# version is the chart version; bump it on every chart change.
+version: 0.1.0
+# appVersion tracks the DART image tag the chart defaults to.
+appVersion: "dev"
