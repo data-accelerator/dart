@@ -69,7 +69,11 @@ type HTTPFetcher struct {
   aborted. `Range.RangeIgnored` is set, and `Total` comes from `Content-Length`
   (-1 on a chunked response). This is also what an object store such as OSS
   returns when the requested range runs past end-of-file, so it is a normal
-  path, not an error.
+  path, not an error. **A short window here is not an error either**: asking
+  `bytes=900-999` of a 950-byte object yields 50 bytes with `RangeIgnored`
+  set. Callers must honor that flag — bytes sliced from a Range-ignored 200
+  describe only the requested window of *this* response; the engine never
+  caches them (see docs/engine.md §3.9).
 - Any other status is an error; a range `start` beyond the object size is an
   error.
 
@@ -90,9 +94,13 @@ Range-ignoring origins. Time complexity is O(1); no body bytes are buffered.
 ### 3.4 `func FetchBlock(ctx, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error)`
 
 Fetches one block: `start = blockIndex*blockSize`, `end = start+blockSize-1`.
-When `size > 0`, the tail block's end is clamped to `size-1`; when `size <= 0`
-(unknown), the natural block range is requested and `Range.Total` may reveal the
-size.
+When `size > 0`, the tail block's end is clamped to `size-1`, and a block index
+wholly past the object (`start >= size`) is a caller bug and an **error** — it
+must never degrade into a full-object GET. When `size <= 0` (unknown), the
+natural block range is requested and `Range.Total` may reveal the size; an
+RFC-clamped 206 on the tail block (`Content-Range` shows `end = total-1` below
+the requested end, body length matching) is accepted, so the unknown-size flow
+covers the final block too. Any other length mismatch stays a hard error.
 
 ### 3.5 `type Coalescing`
 
@@ -266,6 +274,13 @@ go test ./internal/fetch/ -cover -count=1
 | `TestFlightContextBoundsStalledOrigin` | a ctx-respecting but stalled flight fails all waiters within `MaxFlight` |
 | `TestJoinerRetrySkippedWhenCallerGone` | a cancelled joiner does not fire a refusal retry |
 | `TestAbandonedWaitersReleasedAtDeadline` | a waiter abandoned with a stuck leader is released at the flight deadline even with no later caller |
+| `TestHTTPFetcher206ShortBody` | a 206 shorter than the window is an error (no silent cache poisoning) |
+| `TestHTTPFetcher206WrongOffset` | a 206 at the wrong offset is an error |
+| `TestStartFromContentRange` | Content-Range start parsing incl. rejects |
+| `TestCoalescedResultIsMarked` | joined callers see Coalesced=true; the leader does not |
+| `TestUncontendedFetchNotMarkedCoalesced` | an uncontended fetch is not marked coalesced |
+| `TestFetchBlockPastEndErrors` | a block wholly past the object (or an inverted range) errors without contacting origin |
+| `TestFetchBlockUnknownSizeTailBlock` | an RFC-clamped 206 on the tail block is accepted and reveals Total |
 
 ## 8. Limitations & TODO
 

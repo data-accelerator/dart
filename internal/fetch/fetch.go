@@ -135,7 +135,12 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 			req.Header.Add(k, v)
 		}
 	}
-	ranged := start >= 0 && end >= start
+	if start >= 0 && end < start {
+		// An inverted window used to degrade silently to a full-object GET —
+		// a caller bug becoming a whole-object transfer. Reject it loudly.
+		return Range{}, fmt.Errorf("fetch: %s: invalid range %d-%d (end before start)", Redact(url), start, end)
+	}
+	ranged := start >= 0
 	if ranged {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	}
@@ -188,7 +193,20 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 		// origin states it, the start offset before returning the bytes.
 		if ranged {
 			if want := end - start + 1; int64(len(body)) != want {
-				return Range{}, fmt.Errorf("fetch: %s: 206 returned %d bytes, requested %d", Redact(url), len(body), want)
+				// RFC 7233 §4.2 lets the origin clamp the end to the object
+				// size. Accept a clamped answer when Content-Range proves it:
+				// same start, revealed total, end clamped to total-1, and the
+				// body length matches the clamped window exactly. This is what
+				// makes the unknown-size flow able to fetch the tail block.
+				// Anything else stays a hard error (wrong bytes under a
+				// write-once key would be a permanent cache mismatch).
+				s, sok := startFromContentRange(cr)
+				e, eok := endFromContentRange(cr)
+				clamped := sok && eok && total > 0 && s == start && e == total-1 && e < end &&
+					int64(len(body)) == e-s+1
+				if !clamped {
+					return Range{}, fmt.Errorf("fetch: %s: 206 returned %d bytes, requested %d", Redact(url), len(body), want)
+				}
 			}
 			if s, ok := startFromContentRange(cr); ok && s != start {
 				return Range{}, fmt.Errorf("fetch: %s: 206 Content-Range start %d, requested %d", Redact(url), s, start)
@@ -242,6 +260,28 @@ func totalFromContentRange(v string) int64 {
 }
 
 // startFromContentRange parses the start offset from a Content-Range value such
+// endFromContentRange parses the inclusive end offset from a Content-Range
+// value such as "bytes 0-99/12345"; ok is false on any parse error.
+func endFromContentRange(v string) (int64, bool) {
+	rest, found := strings.CutPrefix(strings.TrimSpace(v), "bytes ")
+	if !found {
+		return 0, false
+	}
+	rangePart, _, found := strings.Cut(rest, "/")
+	if !found {
+		return 0, false
+	}
+	_, endStr, found := strings.Cut(rangePart, "-")
+	if !found {
+		return 0, false
+	}
+	e, err := strconv.ParseInt(strings.TrimSpace(endStr), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return e, true
+}
+
 // as "bytes 0-99/12345"; ok is false on any parse error (including a header with
 // no byte range, e.g. "bytes */12345").
 func startFromContentRange(v string) (int64, bool) {
@@ -271,8 +311,16 @@ func startFromContentRange(v string) (int64, bool) {
 func FetchBlock(ctx context.Context, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error) {
 	start := blockIndex * blockSize
 	end := start + blockSize - 1
-	if size > 0 && end > size-1 {
-		end = size - 1
+	if size > 0 {
+		if start >= size {
+			// The block lies wholly past the probed end of the object: a
+			// caller bug (bad block index). Error rather than clamp to an
+			// inverted range (which Fetch rejects) — fail one frame earlier.
+			return Range{}, fmt.Errorf("fetch: %s: block %d starts at %d, past object size %d", Redact(url), blockIndex, start, size)
+		}
+		if end > size-1 {
+			end = size - 1
+		}
 	}
 	return f.Fetch(ctx, url, start, end)
 }
