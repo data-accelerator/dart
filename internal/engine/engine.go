@@ -20,6 +20,8 @@
 package engine
 
 import (
+	"net/http"
+
 	"context"
 	"errors"
 	"fmt"
@@ -202,6 +204,16 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	// is inside the signature), so HEAD would return 403. See fetch.Fetcher.
 	r, err := e.fetcher.Fetch(ctx, url, 0, 0)
 	if err != nil {
+		// bytes=0-0 is satisfiable for every non-empty object (RFC 7233), so a
+		// 416 to the probe means the object is empty: cache size 0 and let the
+		// handler serve a valid empty 200.
+		var se *fetch.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusRequestedRangeNotSatisfiable {
+			e.mu.Lock()
+			e.sizes[oid] = sizeMeta{size: 0}
+			e.mu.Unlock()
+			return 0, nil
+		}
 		return 0, err
 	}
 	if r.Total < 0 && !r.RangeIgnored {
@@ -309,6 +321,14 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		return nil, fmt.Errorf("engine: origin returned %d bytes for block %d, want %d", len(r.Data), blockIndex, want)
 	}
 	e.mx.recordOrigin(len(r.Data), time.Since(originStart), r.Coalesced)
+	if r.RangeIgnored {
+		// The origin answered the ranged request with a whole-object 200 and we
+		// sliced the window out of it. Serving those bytes is fine, but caching
+		// them is not: a Range-blind origin pays a full object per block, and
+		// such objects are meant for the passthrough path (§3.9). This is
+		// defense in depth — callers already decline via RangeUnsupported.
+		return r.Data, nil
+	}
 	e.putBlock(key, r.Data, ck)
 	return r.Data, nil
 }
@@ -415,6 +435,13 @@ func (e *Engine) PeerSource() peer.Source {
 		size, err := e.Size(ctx, req.URL)
 		if err != nil {
 			return nil, false, asRelayError(err)
+		}
+		if e.RangeUnsupported(req.URL) {
+			// Same decline as the streaming source: blocks cannot be fetched
+			// piecemeal from this origin, so decline rather than pulling the
+			// whole object per block (and caching fragments of it).
+			e.mx.recordRelay(false)
+			return nil, false, nil
 		}
 		oid, _ := chunk.ObjectID(req.URL)
 		data, err := e.block(ctx, req.URL, oid, size, int64(req.Key.Block), req.Hop)

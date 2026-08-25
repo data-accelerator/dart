@@ -179,7 +179,10 @@ func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req pe
 		go func() {
 			start := time.Now()
 			data, held, err := e.peer.Get(ctx, addr, req)
-			if err == nil {
+			if err == nil && held {
+				// Only a real fetch informs the latency estimate: a fast 404
+				// miss would otherwise collapse the p99 to the floor and arm
+				// hedges a few milliseconds into genuine fetches.
 				e.latency.Observe(time.Since(start))
 			}
 			results <- peerResult{data: data, held: held, err: err, from: addr}
@@ -194,6 +197,7 @@ func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req pe
 	// Arm the speculative hedge only if the estimator has data and the rate limit
 	// allows it. Failover below does not consult either.
 	var timerC <-chan time.Time
+	hedgeFired := false
 	if backupUsable {
 		if delay, ok := e.hedgeDelay(); ok && e.hedges.allow() {
 			timer := time.NewTimer(delay)
@@ -210,13 +214,20 @@ func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req pe
 			if !backupLaunched {
 				launch(backup)
 				backupLaunched = true
+				hedgeFired = true
 				contenders++
 				e.mx.recordHedge()
 			}
 		case r := <-results:
 			contenders--
 			if r.err == nil && r.held {
-				e.mx.recordHedgeWin(r.from == primary)
+				// Hedge-win metrics only mean something when a hedge actually
+				// fired; recording a win for every fetch (or for a failover)
+				// makes the prescribed backup_won/fired comparison
+				// uninterpretable exactly when hedging is off.
+				if hedgeFired {
+					e.mx.recordHedgeWin(r.from == primary)
+				}
 				return r.data, true
 			}
 			// Definite failure: fail over now, regardless of the hedge budget.
