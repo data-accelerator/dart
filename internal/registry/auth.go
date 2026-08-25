@@ -29,9 +29,9 @@ import (
 // credential through the read path, for two reasons. First, no signature
 // changes: the same transport serves both the cached blob fetches (via
 // fetch.HTTPFetcher's client) and the mirror's pass-through proxy. Second, and
-// decisively, fetch.Coalescing runs a shared fetch on a background context, so a
-// request-scoped credential carried in the context would be silently dropped for
-// every deduplicated caller.
+// decisively, fetch.Coalescing runs a shared fetch on a bounded background
+// context, so a request-scoped credential carried in the context would be
+// silently dropped for every deduplicated caller.
 //
 // The credential is therefore a property of the *upstream*, configured once,
 // which is how a pull-through cache normally authenticates.
