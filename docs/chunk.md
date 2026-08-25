@@ -90,6 +90,14 @@ Deterministic 64-bit key: FNV-1a over `(namespace, 0x1F, objectID, 0x1F,
 big-endian chunkIndex)` then fmix64. Feeds `hashring.Rank` to pick owner and
 replicas. **Part of the wire protocol** — see §6.
 
+**Field exclusion**: the `0x1F` separator must never appear inside a field, or
+the serialization is not injective (`("a","b␟c")` would collide with
+`("a␟b","c")`). Enforced on both sides: a namespace containing `0x1F` is
+rejected at engine construction, and derived object identities have `0x1F`
+stripped (a URL can smuggle one in via a percent-encoded `%1F` in the path).
+Note that cross-field collisions are the only case: within one namespace the
+fixed 8-byte chunk-index suffix forces equal objectIDs anyway.
+
 ### 3.5 `func ObjectID(rawURL string) (id string, contentAddressed bool)`
 
 Derives the caching identity of a blob URL, preferring content addressing:
@@ -141,6 +149,8 @@ which costs dedup but cannot conflate anything.
 **The query is always excluded.** That is load-bearing rather than tidy: a
 presigned signature differs on every request, so including it would give one
 object a new identity each time — and would also leak a credential into the key.
+This holds for the raw fallback too (scheme/host-less or unparsable input): the
+query and fragment are cut at the first `?`/`#` before the identity is derived.
 
 ## 4. Invariants & Guarantees
 
@@ -204,6 +214,8 @@ go test ./internal/chunk/ -cover -count=1
 | `TestObjectIDQueryNeverInIdentity` | different signatures give the same identity |
 | `TestObjectIDCaseNormalization` | digest and host are lower-cased |
 | `TestObjectID` | digest extraction, lower-casing, query stripping, host:port not a digest, fallbacks |
+| `TestObjectIDFallbackStripsQueryAndFragment` | the raw fallback cuts query/fragment too: signatures never move identity |
+| `TestObjectIDNeverContainsSeparator` | a %1F-decoded separator never lands in a derived identity |
 | `TestIsDigest` | digest-shape recognition incl. rejects (bad hex, short, uppercase algo) |
 
 ## 8. Limitations & TODO

@@ -81,15 +81,28 @@ func fmix64(z uint64) uint64 {
 
 // score returns the weighted Rendezvous Hashing score of node for key; higher
 // wins. It uses the standard weighted-HRW formula score = weight / -ln(u),
-// where u is a hash-derived value kept strictly inside the open interval (0,1)
-// to avoid the ln(1)=0 and ln(0)=-inf edge cases. Larger hash -> u closer to 1
-// -> -ln(u) closer to 0 -> larger score, so weight scales ownership share.
+// where u is a hash-derived value kept inside (0,1) to avoid the ln(1)=0 and
+// ln(0)=-inf edge cases. Larger hash -> u closer to 1 -> -ln(u) closer to 0 ->
+// larger score, so weight scales ownership share.
+//
+// Rounding honesty: float64(h) cannot represent the top 1024 uint64 values
+// exactly; for h in [2^64-2^10, 2^64) it rounds to 2^64, making u exactly 1.0
+// and score -Inf (probability ~5.5e-17 per key-node pair). This is benign:
+// -Inf simply sorts last, ties still break by ID, so the total order and the
+// input-order independence hold. A strictly-inside-(0,1) construction would be
+// a breaking change (epoch bump, golden regeneration) to fix a 1-in-10^16
+// placement nudge; not worth it.
+//
+// NaN needs no guard: weights arrive via JSON (which cannot represent NaN or
+// ±Inf — marshal errors, unmarshal rejects) or are hardcoded; see A4 of
+// docs/design-assumptions.md.
 func score(key uint64, n Node) float64 {
 	w := n.Weight
 	if w <= 0 {
 		w = 1
 	}
-	// (h + 0.5) / 2^64 is in (0,1) for every uint64 h.
+	// (h + 0.5) / 2^64 is inside (0,1) except for the 1024 largest h, where
+	// float64 rounding makes u exactly 1.0 and score -Inf (see above).
 	u := (float64(Hash64(key, n.ID)) + 0.5) / two64
 	return w / -math.Log(u)
 }

@@ -38,6 +38,7 @@ func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster
 			continue // unusable: an identity with no address cannot be dialed
 		}
 		w := m.Weight
+		// NaN cannot arrive here (JSON cannot represent it; A4).
 		if w <= 0 {
 			w = 1
 		}

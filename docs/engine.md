@@ -383,6 +383,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestReaderSetCacheFollowsGrantedLease` | the reader-set cache renews at half the granted lease, never lapsing mid-read |
 | `TestStreamRelayParentErrorFallsBackToOrigin` | an open-circuit/errored parent is skipped to origin, not propagated as a 500 |
 | `TestEmptyObjectGetServes200` | empty object: 200 empty on both paths; a Range request stays 416 |
+| `TestNamespaceWithSeparatorRejected` | a namespace containing the chunk-key separator fails engine construction |
 | `TestHedgeFallsBackWhenBothMiss` | both contenders 404 → ok=false → origin |
 | `TestHedgeTargetsPickParentAndGrandparent` | primary=parent, backup=grandparent/root; root has no upstream; non-member asks the owner |
 | `TestHedgeTargetsSkipsOpenCircuit` | an open parent is skipped and the grandparent promoted; all-open yields no target |

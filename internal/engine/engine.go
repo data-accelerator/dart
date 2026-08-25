@@ -21,6 +21,7 @@ package engine
 
 import (
 	"net/http"
+	"strings"
 
 	"context"
 	"errors"
@@ -146,6 +147,11 @@ func New(opt Options) (*Engine, error) {
 	ns := opt.Namespace
 	if ns == "" {
 		ns = "dart"
+	}
+	// The namespace is a ChunkKey field: containing the 0x1F separator would
+	// make chunk-key serialization non-injective (see docs/chunk.md §3.4).
+	if strings.IndexByte(ns, chunk.UnitSep) >= 0 {
+		return nil, errors.New("engine: Namespace must not contain the chunk-key separator (0x1F)")
 	}
 	e := &Engine{
 		cfg:     opt.Chunk,
