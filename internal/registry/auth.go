@@ -99,9 +99,23 @@ type AuthTransport struct {
 	// Creds maps host (as it appears in URL.Host) to a credential.
 	Creds map[string]Credential
 
-	mu     sync.Mutex
-	tokens map[string]*cachedToken // challenge key -> token
+	mu       sync.Mutex
+	tokens   map[string]*cachedToken // tokenKey -> token
+	inflight map[string]*tokenCall   // tokenKey -> in-flight exchange
 }
+
+// tokenCall is one in-flight token exchange; followers wait on done and share
+// the result (singleflight: N concurrent cold pulls cost one exchange).
+type tokenCall struct {
+	done      chan struct{}
+	value     string
+	expiresAt time.Time
+	err       error
+}
+
+// maxCachedTokens bounds the token cache; past it, expired entries are swept
+// before storing (a node's distinct repositories are few, so the sweep is rare).
+const maxCachedTokens = 1024
 
 // cachedToken is a bearer token with its expiry.
 type cachedToken struct {
@@ -141,16 +155,37 @@ func (a *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// Attach a cached token if we already hold one for this repository, so the
-	// steady state costs no extra round trip.
+	// steady state costs no extra round trip. A client-supplied Authorization
+	// always wins: the client credential is the caller's own identity, and
+	// silently replacing it with the operator's would misattribute the pull
+	// (and leak the operator token where the client meant its own).
+	clientAuth := req.Header.Get("Authorization")
 	first := cloneRequest(req)
 	scope := scopeFor(req.URL.Path)
-	if tok, ok := a.cachedToken(tokenKey(req.URL.Host, scope)); ok {
-		first.Header.Set("Authorization", "Bearer "+tok)
+	key := tokenKey(req.URL.Host, scope)
+	usedCached := false
+	if clientAuth == "" {
+		if tok, ok := a.cachedToken(key); ok {
+			first.Header.Set("Authorization", "Bearer "+tok)
+			usedCached = true
+		}
 	}
 
 	resp, err := a.base().RoundTrip(first)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
 		return resp, err
+	}
+
+	if usedCached {
+		// The cached token was just rejected: drop it, or the shared exchange's
+		// cache double-check would hand the same dead token back.
+		a.dropToken(key)
+	}
+
+	if clientAuth != "" {
+		// The client's own credential was rejected: hand the 401 back rather
+		// than substituting the operator credential (precedence above).
+		return resp, nil
 	}
 
 	// The registry wants credentials. Satisfy the challenge and retry once.
@@ -162,6 +197,9 @@ func (a *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// authenticate.
 		return resp, nil
 	}
+	// Drain before closing so the connection can be reused; a 401 body is
+	// small, but an undrained close tears the connection down every time.
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	resp.Body.Close()
 
 	retry := cloneRequest(req)
@@ -191,11 +229,12 @@ func (a *AuthTransport) authorize(ctx context.Context, ch challenge, cred Creden
 	if ch.scope == "" {
 		ch.scope = scope
 	}
-	tok, expiry, err := a.fetchToken(ctx, ch, cred)
+	key := tokenKey(host, scope)
+	tok, expiry, err := a.fetchTokenShared(ctx, key, ch, cred)
 	if err != nil {
 		return "", err
 	}
-	a.storeToken(tokenKey(host, scope), tok, expiry)
+	a.storeToken(key, tok, expiry)
 	return "Bearer " + tok, nil
 }
 
@@ -274,7 +313,64 @@ func (a *AuthTransport) storeToken(key, value string, expiresAt time.Time) {
 	if a.tokens == nil {
 		a.tokens = make(map[string]*cachedToken)
 	}
+	if len(a.tokens) >= maxCachedTokens {
+		// Sweep expired entries first; if everything is somehow still valid,
+		// drop the whole map — tokens are re-fetched on demand, and an
+		// unbounded map is worse than a rare extra exchange.
+		now := time.Now()
+		for k, tok := range a.tokens {
+			if !tok.valid(now) {
+				delete(a.tokens, k)
+			}
+		}
+		if len(a.tokens) >= maxCachedTokens {
+			a.tokens = make(map[string]*cachedToken)
+		}
+	}
 	a.tokens[key] = &cachedToken{value: value, expiresAt: expiresAt}
+}
+
+// dropToken removes a cached token (it was rejected by the registry).
+func (a *AuthTransport) dropToken(key string) {
+	a.mu.Lock()
+	delete(a.tokens, key)
+	a.mu.Unlock()
+}
+
+// fetchTokenShared singleflights the exchange per cache key: concurrent cold
+// pulls of one repository share one token endpoint round trip. The first
+// caller leads; followers wait for its result.
+func (a *AuthTransport) fetchTokenShared(ctx context.Context, key string, ch challenge, cred Credential) (string, time.Time, error) {
+	a.mu.Lock()
+	// Double-check the cache: a sibling request may have completed the exchange
+	// (and left the cache warm) between our first attempt and now.
+	if tok := a.tokens[key]; tok.valid(time.Now()) {
+		a.mu.Unlock()
+		return tok.value, tok.expiresAt, nil
+	}
+	if c, ok := a.inflight[key]; ok {
+		a.mu.Unlock()
+		select {
+		case <-c.done:
+			return c.value, c.expiresAt, c.err
+		case <-ctx.Done():
+			return "", time.Time{}, ctx.Err()
+		}
+	}
+	c := &tokenCall{done: make(chan struct{})}
+	if a.inflight == nil {
+		a.inflight = make(map[string]*tokenCall)
+	}
+	a.inflight[key] = c
+	a.mu.Unlock()
+
+	c.value, c.expiresAt, c.err = a.fetchToken(ctx, ch, cred)
+
+	a.mu.Lock()
+	delete(a.inflight, key)
+	a.mu.Unlock()
+	close(c.done)
+	return c.value, c.expiresAt, c.err
 }
 
 func tokenKey(host, scope string) string { return host + "|" + scope }

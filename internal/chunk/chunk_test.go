@@ -186,13 +186,13 @@ func TestIsDigest(t *testing.T) {
 	good := []string{"sha256:" + strings.Repeat("a", 64), "sha512:" + strings.Repeat("f", 128), "md5x:" + strings.Repeat("0", 32)}
 	bad := []string{"", "sha256:", ":abcabcabcabcabcabcabcabcabcabcab", "sha256:xyz", "localhost:5000", "sha256:" + strings.Repeat("a", 31), "SHA256:" + strings.Repeat("a", 64)}
 	for _, s := range good {
-		if !isDigest(s) {
-			t.Errorf("isDigest(%q) = false, want true", s)
+		if !IsDigest(s) {
+			t.Errorf("IsDigest(%q) = false, want true", s)
 		}
 	}
 	for _, s := range bad {
-		if isDigest(s) {
-			t.Errorf("isDigest(%q) = true, want false", s)
+		if IsDigest(s) {
+			t.Errorf("IsDigest(%q) = true, want false", s)
 		}
 	}
 }

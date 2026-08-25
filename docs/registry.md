@@ -106,7 +106,9 @@ func BlobDigest(path string) (string, bool)
    blob reaches the upstream on every request.
 2. **Byte-exact blobs**: blob bodies come from the engine, so they are exactly the
    upstream bytes; `Range` is honored and responses are `Content-Length` framed
-   (never chunked).
+   (never chunked) **on the block-served path**. An upstream that ignores
+   `Range` is proxied verbatim via the engine's passthrough, which forwards the
+   upstream's own framing — chunked included (see docs/engine.md §3.9).
 3. **Digest dedup**: two upstreams or repositories serving the same digest share
    one cache entry. (The digest is trusted as the content's name — ingest does
    not verify bytes against it; see the trust assumption in §2.)
@@ -246,6 +248,10 @@ asserted.
 | `TestPingPassesThrough` | `/v2/` reaches the upstream |
 | `TestProxySetsUpstreamHost` | the upstream sees its own `Host`, not the mirror's |
 | `TestProxyForwardsAuthorization` | client credentials reach the upstream on the pass-through path |
+| `TestClientAuthorizationTakesPrecedence` | a client's own Authorization is never overwritten/substituted by the operator credential |
+| `TestConcurrentColdRequestsShareOneExchange` | token exchange is singleflighted per repository |
+| `TestExpiredTokensPurged` | the token cache sweeps expired entries and stays bounded |
+| `TestPercentEncodedPathReachesUpstreamVerbatim` | a %3F in a repository name is never decoded into a query |
 | `TestPullOnly` | POST/PUT/PATCH/DELETE → `405` with `Allow`, and never reach the upstream |
 | `TestNonV2PathRejected` | non-registry paths → `404` |
 | `TestUpstreamPathPrefixPreserved` | an upstream subpath is prepended |
@@ -285,7 +291,11 @@ In `cmd/dart`:
 - **No per-request credential**: authentication is per upstream, not per client.
   A client-supplied token is forwarded on the **pass-through** path but not used
   for a cached blob fetch, which is inherent to sharing a coalesced fetch and a
-  digest-keyed cache between callers (see §5).
+  digest-keyed cache between callers (see §5). **Precedence is explicit**: when
+  a request carries its own `Authorization`, the transport neither overwrites
+  it with a cached operator token nor substitutes the operator credential after
+  a 401 — the client's credential reaches the upstream verbatim and its
+  rejection is returned as-is.
 - **Credentials are plaintext in the file**: `-registry-auth` reads a JSON file;
   protect it with file permissions. There is no integration with a secret store
   or with Docker's own `config.json` / credential helpers.

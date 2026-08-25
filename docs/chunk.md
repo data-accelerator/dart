@@ -98,6 +98,13 @@ stripped (a URL can smuggle one in via a percent-encoded `%1F` in the path).
 Note that cross-field collisions are the only case: within one namespace the
 fixed 8-byte chunk-index suffix forces equal objectIDs anyway.
 
+### 3.4.1 `func IsDigest(s string) bool`
+
+The shared digest recognizer (`<algorithm>:<hex>`, lowercase alnum algorithm,
+≥ 32 hex chars). `ObjectIDLayout` uses it, and the registry mirror's
+cacheability check is exactly this function — a path is cacheable precisely
+when it is content-addressed.
+
 ### 3.5 `func ObjectID(rawURL string) (id string, contentAddressed bool)`
 
 Derives the caching identity of a blob URL, preferring content addressing:
