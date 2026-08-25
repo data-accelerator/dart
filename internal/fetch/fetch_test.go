@@ -665,3 +665,137 @@ func TestUncontendedFetchNotMarkedCoalesced(t *testing.T) {
 		t.Error("an uncontended fetch was marked coalesced; its bytes would go uncounted")
 	}
 }
+
+// TestStaleFlightEvictedAfterMaxFlight pins issue #4: a flight whose leader
+// hangs forever (ignoring context, as a pathological Fetcher might) used to
+// pin its key permanently — every later fetch of the same key joined the dead
+// flight and failed on its own timeout. After MaxFlight a new call must evict
+// the stale flight and lead a replacement.
+func TestStaleFlightEvictedAfterMaxFlight(t *testing.T) {
+	var calls int64
+	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
+		if atomic.AddInt64(&calls, 1) == 1 {
+			select {} // stalled leader: never returns, ignores ctx
+		}
+		return Range{Data: blob(8), Total: 8}, nil
+	})
+	c := &Coalescing{F: f, MaxFlight: 50 * time.Millisecond}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := c.Fetch(ctx, "u", 0, 7); err == nil {
+		t.Fatal("first caller: want its own ctx deadline, got nil")
+	}
+	time.Sleep(100 * time.Millisecond) // push the flight past its deadline
+
+	r, err := c.Fetch(context.Background(), "u", 0, 7)
+	if err != nil || len(r.Data) != 8 {
+		t.Fatalf("replacement flight: err=%v len=%d", err, len(r.Data))
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("underlying calls = %d, want 2 (stale flight evicted and replaced)", got)
+	}
+}
+
+// TestLateStaleLeaderKeepsReplacement: when a stale flight is evicted, its
+// leader's late completion must not delete the replacement flight's entry —
+// otherwise the key flaps between flights.
+func TestLateStaleLeaderKeepsReplacement(t *testing.T) {
+	var calls int64
+	gate1 := make(chan struct{})
+	gate2 := make(chan struct{})
+	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
+		switch atomic.AddInt64(&calls, 1) {
+		case 1:
+			<-gate1
+		case 2:
+			<-gate2
+		}
+		return Range{Data: blob(8), Total: 8}, nil
+	})
+	c := &Coalescing{F: f, MaxFlight: 100 * time.Millisecond}
+
+	first := make(chan error, 1)
+	go func() { _, err := c.Fetch(context.Background(), "u", 0, 7); first <- err }()
+	time.Sleep(20 * time.Millisecond)  // let flight 1 establish
+	time.Sleep(110 * time.Millisecond) // push it past its deadline
+
+	second := make(chan error, 1)
+	go func() { _, err := c.Fetch(context.Background(), "u", 0, 7); second <- err }()
+	time.Sleep(20 * time.Millisecond) // flight 2 (replacement) is now in flight
+
+	close(gate1) // stale leader finishes late...
+	time.Sleep(20 * time.Millisecond)
+
+	// ...and a third caller must still join flight 2 (well within its own
+	// deadline), not lead a flight 3.
+	third := make(chan error, 1)
+	go func() { _, err := c.Fetch(context.Background(), "u", 0, 7); third <- err }()
+	time.Sleep(20 * time.Millisecond)
+	close(gate2)
+
+	for i, ch := range []chan error{first, second, third} {
+		if err := <-ch; err != nil {
+			t.Fatalf("caller %d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("underlying calls = %d, want 2 (late stale leader must not evict the replacement)", got)
+	}
+}
+
+// TestFlightContextBoundsStalledOrigin: even a ctx-respecting fetcher used to
+// run on context.Background() with no bound. The flight context now expires at
+// MaxFlight, so a stalled origin fails every waiter within the bound.
+func TestFlightContextBoundsStalledOrigin(t *testing.T) {
+	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
+		<-ctx.Done()
+		return Range{}, ctx.Err()
+	})
+	c := &Coalescing{F: f, MaxFlight: 50 * time.Millisecond}
+
+	start := time.Now()
+	if _, err := c.Fetch(context.Background(), "u", 0, 7); err == nil {
+		t.Fatal("want the flight deadline error, got nil")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("flight took %v; MaxFlight did not bound the stall", elapsed)
+	}
+}
+
+// TestJoinerRetrySkippedWhenCallerGone pins the joiner half of issue #4: a
+// caller whose context was cancelled while waiting must not fire a fresh
+// origin fetch when the shared flight comes back refused — the retry serves
+// only that caller, and the caller is gone.
+func TestJoinerRetrySkippedWhenCallerGone(t *testing.T) {
+	var calls int64
+	gate := make(chan struct{})
+	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
+		atomic.AddInt64(&calls, 1)
+		<-gate
+		return Range{}, &StatusError{Code: http.StatusUnauthorized}
+	})
+	c := &Coalescing{F: f}
+
+	leader := make(chan error, 1)
+	go func() { _, err := c.Fetch(context.Background(), "u", 0, 7); leader <- err }()
+	time.Sleep(20 * time.Millisecond) // flight established
+
+	joinerCtx, cancelJoiner := context.WithCancel(context.Background())
+	joiner := make(chan error, 1)
+	go func() { _, err := c.Fetch(joinerCtx, "u", 0, 7); joiner <- err }()
+	time.Sleep(20 * time.Millisecond) // joiner attached to the flight
+
+	cancelJoiner() // the joiner goes away...
+	close(gate)    // ...then the flight comes back refused
+	if err := <-leader; err == nil {
+		t.Fatal("leader: want the 401 refusal")
+	}
+	if err := <-joiner; err == nil {
+		t.Fatal("joiner: want ctx.Canceled")
+	}
+	time.Sleep(50 * time.Millisecond) // let any mistaken retry fire
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("underlying calls = %d, want 1 (a gone caller must not retry)", got)
+	}
+}

@@ -107,6 +107,11 @@ The exact path the roster server is mounted on (no trailing slash, so a
   different scheme sets do not interfere.
 - One `-cache-dir` still means one node (the store lock predates this package;
   see dart.md §5).
+- **The origin HTTP client is bounded**: the transport requires response headers
+  within 30s (an origin that accepts and goes silent must fail, not hang), and
+  each coalesced flight is bounded by `fetch.MaxFlight` (default 10m). The body
+  itself has no whole-request timeout — whole-object passthrough streams may
+  legitimately run long.
 
 ## 5. Concurrency & Call Permissions
 

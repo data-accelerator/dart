@@ -331,14 +331,21 @@ func build(cfg config) (*node, error) {
 	// mirror's pass-through proxy AND the engine's blob fetches. The credential is
 	// a property of the upstream rather than of a request, because a coalesced
 	// fetch is shared between callers (see internal/registry/auth.go).
-	var upstreamRT http.RoundTripper
+	// The origin transport gets the same style of bounds the peer transport has
+	// (internal/peer): an origin that accepts a connection and then goes silent
+	// must fail, not hang a coalesced flight until MaxFlight. Response headers
+	// must arrive promptly; the body may stream arbitrarily long (whole-object
+	// passthrough), so there is deliberately no whole-request timeout here.
+	upstreamBase := http.DefaultTransport.(*http.Transport).Clone()
+	upstreamBase.ResponseHeaderTimeout = 30 * time.Second
+	var upstreamRT http.RoundTripper = upstreamBase
 	if cfg.registryAuth != "" {
 		creds, err := registry.LoadCredentials(cfg.registryAuth)
 		if err != nil {
 			closer.Close()
 			return nil, err
 		}
-		upstreamRT = registry.NewAuthTransport(nil, creds)
+		upstreamRT = registry.NewAuthTransport(upstreamBase, creds)
 	}
 
 	// Object identity: how a digest is recovered from an upstream URL. It feeds
