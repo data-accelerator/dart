@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -142,10 +143,10 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	// of them would tell an operator that the other is disabled.
 	mode := "prefix passthrough (/" + strings.Trim(cfg.prefix, "/") + "/<upstream-url>)"
 	if cfg.origin != "" {
-		mode = "fixed origin " + cfg.origin
+		mode = "fixed origin " + redactURLUserinfo(cfg.origin)
 	}
 	if cfg.registry != "" {
-		mode += " + registry mirror " + cfg.registry
+		mode += " + registry mirror " + redactURLUserinfo(cfg.registry)
 	}
 	p2p := "off"
 	if n.peer != nil {
@@ -549,4 +550,16 @@ func resolver(origin, prefix string) func(*http.Request) (string, error) {
 		}
 		return up, nil
 	}
+}
+
+// redactURLUserinfo strips any userinfo from a URL for display: the startup
+// banner goes to stdout (container logs), and a credential embedded in
+// -origin/-registry must not be printed there.
+func redactURLUserinfo(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	u.User = nil
+	return u.String()
 }

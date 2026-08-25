@@ -532,3 +532,16 @@ func TestBuildAdmin(t *testing.T) {
 		t.Error("empty -admin should disable the admin handler")
 	}
 }
+
+// TestRedactURLUserinfo pins issue #7: the startup banner goes to stdout
+// (container logs), so a credential embedded in -origin/-registry must never
+// be printed.
+func TestRedactURLUserinfo(t *testing.T) {
+	got := redactURLUserinfo("https://ci:secret-token@reg.example.com")
+	if strings.Contains(got, "secret-token") || strings.Contains(got, "ci@") {
+		t.Fatalf("redactURLUserinfo leaked credential: %q", got)
+	}
+	if got := redactURLUserinfo("https://reg.example.com"); got != "https://reg.example.com" {
+		t.Fatalf("redactURLUserinfo(no creds) = %q", got)
+	}
+}

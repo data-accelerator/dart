@@ -112,6 +112,9 @@ The exact path the roster server is mounted on (no trailing slash, so a
   each coalesced flight is bounded by `fetch.MaxFlight` (default 10m). The body
   itself has no whole-request timeout — whole-object passthrough streams may
   legitimately run long.
+- **The startup banner never prints credentials**: userinfo embedded in
+  `-origin`/`-registry` is stripped before the banner is written to stdout
+  (container logs).
 
 ## 5. Concurrency & Call Permissions
 
@@ -157,6 +160,7 @@ the extraction:
 | `TestUnregisteredK8sSpecDoesNotMatch` | `k8s:` without the scheme never reaches Kubernetes code (static fallback) |
 | `TestSchemeUsage` | help text lists registered schemes, historical text when none |
 | `TestRunPrintsVersion` | `-version` prints the version passed to `Run` |
+| `TestRedactURLUserinfo` | the startup banner strips URL userinfo (no credentials in logs) |
 | `TestBuildKeepsSeederForLifecycle` | the built node retains its seeder and its optional `Run(ctx)` stays assertable |
 | `TestSchemes` (in `cmd/dart` and `providers/k8s/cmd/dart-k8s`) | each binary wires exactly its intended scheme set |
 
