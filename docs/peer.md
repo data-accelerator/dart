@@ -34,7 +34,9 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
 - Responses: `200` + block bytes (with `X-DART-Node`; `Content-Length` when
   the source knows the size up front, chunked otherwise — e.g. on the
   cut-through relay path), `404` if the peer cannot provide the block, `400`
-  for a malformed path, `405` for non-GET, `500` on a source error.
+  for a malformed path, `405` for non-GET, `500` on a source error, and `502` +
+  `X-DART-Upstream-Status: <origin code>` when a relay's origin fetch was
+  refused (§3.6 — the peer is fine; the caller's credential is not).
 - The path has no embedded URLs, so it is parsed from `URL.Path` (no `//` trap).
 
 ## 3. Public API
@@ -104,7 +106,7 @@ data path stays zero-copy-friendly).
 ```go
 srv := &peer.Server{NodeID: myID, Src: peer.StoreSource(myStore)} // mount on the peer port
 c := peer.NewClient()
-data, held, err := c.Get(ctx, ownerAddr, store.BlockKey{Chunk: ck, Block: bi})
+data, held, err := c.Get(ctx, ownerAddr, peer.BlockRequest{Key: store.BlockKey{Chunk: ck, Block: bi}})
 ```
 
 ### 3.4 Streaming (cut-through): `StreamSource`, `StreamServer`, `Client.Stream`
@@ -164,6 +166,24 @@ the circuit, a probe failure re-opens it and restarts the cooldown.
 block") and blocks legitimately 404 all the time in a distributed cache — counting
 them would trip the breaker on perfectly healthy peers.
 
+**Caller cancellation is not a failure either.** When the caller's own context
+is aborted (a hedging loser, a client disconnect mid-body), `Get`/`Stream`
+record *answered*, not a failure: the peer demonstrably responded, and charging
+it would open circuits on healthy peers. (The half-open probe slot must also be
+released, which recording answered does.) Our own per-request timeout firing
+while the caller is still waiting still counts as a soft failure — the peer was
+genuinely slow.
+
+**The cooldown starts when the circuit opens**, not when the last in-flight
+request dies: a late failure arriving while already open does not restamp
+`openedAt`, so a trickle of late completions cannot pin the circuit open. Only
+the Closed→Open threshold transition and a failed half-open probe stamp it.
+
+**The peer map is bounded.** Past 4096 tracked addresses, entries that carry no
+information (closed, zero failures, no probes in flight) are swept before a new
+entry is created; entries with state are never evicted, so a sick peer's circuit
+cannot silently reset.
+
 Failures are split by how conclusive they are, which `Client` classifies
 automatically:
 
@@ -183,6 +203,13 @@ Defaults: `DefaultFailureThreshold` 5, `DefaultBreakerCooldown` 5s,
 `DefaultHalfOpenProbes` 1. `Options.Now` injects a clock for tests. The engine
 additionally uses `Healthy` to route *around* an open peer when choosing a tree
 parent (see docs/engine.md §3.8).
+
+Idle-pool sizing (`MaxIdleConns` 512 global / `MaxIdleConnsPerHost` 32): the
+global cap holds ~16 fully-idle peers' worth. Past that, global pressure evicts
+the oldest idle connections — the cost is a re-dial (~1 RTT), never a failure.
+Per-peer idle counts are far below 32 in practice and `IdleConnTimeout` reaps
+them anyway, so the cap is deliberately not scaled to cluster size (which a leaf
+transport constructor does not know).
 
 ### 3.6 Upstream refusal vs peer fault: `HeaderUpstreamStatus`
 
@@ -259,9 +286,12 @@ doubles as the health probe that restores the data path.
 2. **Held-vs-error distinction**: `Client.Get` returns `held=false, err=nil` for
    a miss and `err!=nil` only for transport/protocol failures — callers can fall
    back to the next candidate or origin without conflating the two.
-3. **No routing**: the server serves only what its local source holds; it never
-   recursively fetches on a requester's behalf (that is the tree/owner's job,
-   added later).
+3. **StoreSource does no routing**: a plain `StoreSource` serves only what the
+   local store holds and never fetches on a requester's behalf. Routing exists
+   one layer up: the engine may wrap the source in a relay-capable one (§3.6)
+   that fetches from its own parent/origin when the block is missing — that is
+   opt-in per node, bounded by `X-DART-Hop`, and reports refusals as 502 +
+   `X-DART-Upstream-Status` rather than as peer faults.
 
 ## 5. Concurrency & Call Permissions
 
@@ -316,6 +346,9 @@ go test ./internal/peer/ -race -count=1
 | `TestBreakerSuccessResetsFailures` | intermittent failures never accumulate into an open circuit |
 | `TestBreakerHalfOpenRecovery` | cooldown → half-open admits one probe → success closes |
 | `TestBreakerHalfOpenFailureReopens` | a failed probe re-opens and restarts the cooldown |
+| `TestLateFailureDoesNotExtendCooldown` | a failure arriving while open does not slide the cooldown; a failed probe does |
+| `TestBreakerSweepsCleanEntries` | the peer map is bounded: clean entries are swept past the cap, dirty ones kept |
+| `TestCallerCancelNotChargedToPeer` | a caller-aborted read records answered, not a soft failure |
 | `TestBreakerIsolatesPeers` | one sick peer does not affect others |
 | `TestBreakerDefaultsAndStateNames` / `TestBreakerConcurrent` | defaults; concurrency (`-race`) |
 | **`TestClientBreakerShortCircuits`** | **an open circuit stops dialing entirely (server sees no further requests)** |

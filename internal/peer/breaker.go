@@ -111,11 +111,20 @@ func NewBreaker(opt BreakerOptions) *Breaker {
 	return b
 }
 
+// maxTrackedPeers bounds the peer map; past it, information-free entries
+// (closed, no failures, no probes in flight) are swept before a new entry is
+// created. Entries with state are never evicted: a sick peer's circuit must
+// not silently reset.
+const maxTrackedPeers = 4096
+
 // entryLocked returns (creating if needed) the peer's circuit, first applying any
 // due open -> half-open transition. Caller must hold b.mu.
 func (b *Breaker) entryLocked(addr string) *breakerEntry {
 	e := b.peers[addr]
 	if e == nil {
+		if len(b.peers) >= maxTrackedPeers {
+			b.sweepLocked()
+		}
 		e = &breakerEntry{state: BreakerClosed}
 		b.peers[addr] = e
 	}
@@ -124,6 +133,17 @@ func (b *Breaker) entryLocked(addr string) *breakerEntry {
 		e.inFlight = 0
 	}
 	return e
+}
+
+// sweepLocked drops entries that carry no information: a closed circuit with
+// zero consecutive failures and no probes outstanding is behaviorally
+// identical to never having seen the peer. Caller must hold b.mu.
+func (b *Breaker) sweepLocked() {
+	for addr, e := range b.peers {
+		if e.state == BreakerClosed && e.failures == 0 && e.inFlight == 0 {
+			delete(b.peers, addr)
+		}
+	}
 }
 
 // Allow reports whether a request to addr may proceed. When it returns true in
@@ -171,10 +191,18 @@ func (b *Breaker) RecordFailure(addr string) {
 		e.inFlight--
 	}
 	e.failures++
-	if e.state == BreakerHalfOpen || e.failures >= b.threshold {
+	switch {
+	case e.state == BreakerHalfOpen:
+		// A failed probe re-opens with a fresh cooldown.
+		e.state = BreakerOpen
+		e.openedAt = b.now()
+	case e.state != BreakerOpen && e.failures >= b.threshold:
 		e.state = BreakerOpen
 		e.openedAt = b.now()
 	}
+	// A failure that arrives while already Open (a late in-flight request dying)
+	// must NOT restamp openedAt: the cooldown starts when the circuit opens,
+	// otherwise a steady trickle of late completions pins it open forever.
 }
 
 // RecordHardFailure reports that addr could not be reached at all (the dial
@@ -194,8 +222,11 @@ func (b *Breaker) RecordHardFailure(addr string) {
 		e.inFlight--
 	}
 	e.failures++
-	e.state = BreakerOpen
-	e.openedAt = b.now()
+	if e.state != BreakerOpen {
+		e.state = BreakerOpen
+		e.openedAt = b.now()
+	}
+	// Already open: keep the original openedAt (see RecordFailure).
 }
 
 // State returns addr's current circuit state, applying any due transition.
