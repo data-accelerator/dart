@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	neturl "net/url"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -850,6 +851,13 @@ func TestTransportErrorRedactsCredentials(t *testing.T) {
 		t.Fatal("Fetch: want a transport error")
 	} else if s := err.Error(); strings.Contains(s, "SECRET123") || strings.Contains(s, "user") && strings.Contains(s, "ss@") {
 		t.Fatalf("Fetch error leaks credentials: %v", err)
+	} else {
+		// Redaction must not break the error chain: callers may still match
+		// *url.Error and unwrap to the dial failure.
+		var ue *neturl.Error
+		if !errors.As(err, &ue) || ue.Unwrap() == nil {
+			t.Fatalf("redacted error lost the *url.Error chain: %T %[1]v", err)
+		}
 	}
 	if _, err := f.Open(context.Background(), url, nil); err == nil {
 		t.Fatal("Open: want a transport error")
