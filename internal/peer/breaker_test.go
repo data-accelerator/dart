@@ -3,8 +3,10 @@ package peer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -300,5 +302,92 @@ func TestClientBreakerRecovers(t *testing.T) {
 	}
 	if s := c.Breaker.State(addr); s != BreakerClosed {
 		t.Errorf("state = %v after recovery, want closed", s)
+	}
+}
+
+// TestLateFailureDoesNotExtendCooldown pins issue #9 (P3): a failure that
+// arrives while the circuit is already open — a late in-flight request dying —
+// used to restamp openedAt, sliding the cooldown. A steady trickle of late
+// completions could pin the circuit open forever. The cooldown must start when
+// the circuit opens, not when the last in-flight request dies.
+func TestLateFailureDoesNotExtendCooldown(t *testing.T) {
+	clk := newBrkClock()
+	b := NewBreaker(BreakerOptions{FailureThreshold: 1, Cooldown: 5 * time.Second, Now: clk.now})
+
+	b.RecordFailure("p") // opens at t0
+	clk.advance(4 * time.Second)
+	b.RecordFailure("p") // late failure while open: must not restamp
+	clk.advance(time.Second + time.Millisecond)
+	if !b.Allow("p") {
+		t.Fatal("cooldown must be measured from the open, not from a late failure")
+	}
+	// A failed half-open probe DOES start a fresh cooldown.
+	b.RecordFailure("p")
+	if b.Allow("p") {
+		t.Fatal("a failed half-open probe must re-open with a fresh cooldown")
+	}
+	clk.advance(5*time.Second + time.Millisecond)
+	if !b.Allow("p") {
+		t.Fatal("after the fresh cooldown a new probe must be allowed")
+	}
+}
+
+// TestBreakerSweepsCleanEntries pins issue #9 (P4): the peer map used to grow
+// without bound (every address ever seen, never deleted). Past the cap,
+// information-free entries (closed, no failures, no probes) are swept; entries
+// with state are preserved.
+func TestBreakerSweepsCleanEntries(t *testing.T) {
+	b := NewBreaker(BreakerOptions{FailureThreshold: 3, Cooldown: time.Minute})
+	// One dirty entry that must survive sweeping.
+	for i := 0; i < 3; i++ {
+		b.RecordFailure("sick-peer")
+	}
+	// Churn more distinct clean peers than the cap.
+	for i := 0; i < maxTrackedPeers+100; i++ {
+		b.Allow(fmt.Sprintf("peer-%d", i))
+	}
+	b.mu.Lock()
+	n := len(b.peers)
+	b.mu.Unlock()
+	if n > maxTrackedPeers {
+		t.Fatalf("peers map = %d entries, want <= %d (clean entries must be swept)", n, maxTrackedPeers)
+	}
+	if b.State("sick-peer") != BreakerOpen {
+		t.Fatal("a dirty entry must never be swept")
+	}
+}
+
+// TestCallerCancelNotChargedToPeer pins issue #9 (P2a): a caller-aborted read
+// (hedging loser, client disconnect) used to record a soft failure against the
+// healthy peer — one cancel with FailureThreshold 1 opened the circuit. Caller
+// cancellation is not a peer failure and must not count.
+func TestCallerCancelNotChargedToPeer(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte{1}) // drip one byte, then stall
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	c := NewClient()
+	c.Breaker = NewBreaker(BreakerOptions{FailureThreshold: 1, Cooldown: time.Minute})
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.Get(ctx, addr, BlockRequest{Key: store.BlockKey{Chunk: 1, Block: 0}})
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond) // the drip arrived; body read is stalled
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("Get should return after caller cancel")
+	}
+	if st := c.Breaker.State(addr); st != BreakerClosed {
+		t.Fatalf("caller cancel opened the circuit: state = %v", st)
 	}
 }

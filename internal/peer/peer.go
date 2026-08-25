@@ -204,7 +204,13 @@ func NewTransport(dial, responseHeader time.Duration) *http.Transport {
 		d.Timeout = dial
 	}
 	t := &http.Transport{
-		DialContext:         d.DialContext,
+		DialContext: d.DialContext,
+		// Idle-pool sizing: 512 global / 32 per host. The global cap holds
+		// ~16 fully-idle peers' worth; past that, global pressure evicts the
+		// oldest idle connections, costing a re-dial (~1 RTT) rather than a
+		// failure. That is deliberate: idle counts per peer are far below 32 in
+		// practice, IdleConnTimeout reaps them anyway, and a per-peer-scaled
+		// global cap would need cluster size plumbed into a leaf constructor.
 		MaxIdleConns:        512,
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
@@ -313,6 +319,7 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 	if err := c.allow(addr); err != nil {
 		return nil, false, err
 	}
+	caller := ctx // caller cancellation is not a peer failure (see below)
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, blockURL(addr, req.Key), nil)
@@ -331,7 +338,14 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 	}
 	resp, err := client.Do(hreq)
 	if err != nil {
-		c.record(addr, classify(err))
+		// A caller-aborted request (hedging loser, client disconnect) is not a
+		// peer failure; charge nothing. The peer did answer if it got that far,
+		// and recording answered also releases a half-open probe slot.
+		if caller.Err() != nil {
+			c.record(addr, outcomeAnswered)
+		} else {
+			c.record(addr, classify(err))
+		}
 		return nil, false, err
 	}
 	defer resp.Body.Close()
@@ -339,7 +353,11 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 	case http.StatusOK:
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			c.record(addr, outcomeSoftFail)
+			if caller.Err() != nil {
+				c.record(addr, outcomeAnswered) // we aborted; the peer is fine
+			} else {
+				c.record(addr, outcomeSoftFail)
+			}
 			return nil, false, fmt.Errorf("peer %s: read body: %w", addr, err)
 		}
 		c.record(addr, outcomeAnswered)

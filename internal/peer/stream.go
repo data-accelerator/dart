@@ -167,6 +167,7 @@ func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io
 	if err := c.allow(addr); err != nil {
 		return 0, false, err
 	}
+	caller := ctx // caller cancellation is not a peer failure (see Get)
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, blockURL(addr, req.Key), nil)
@@ -185,7 +186,11 @@ func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io
 	}
 	resp, err := client.Do(hreq)
 	if err != nil {
-		c.record(addr, classify(err))
+		if caller.Err() != nil {
+			c.record(addr, outcomeAnswered)
+		} else {
+			c.record(addr, classify(err))
+		}
 		return 0, false, err
 	}
 	defer resp.Body.Close()
@@ -193,7 +198,11 @@ func (c *Client) Stream(ctx context.Context, addr string, req BlockRequest, w io
 	case http.StatusOK:
 		n, err = io.Copy(w, resp.Body)
 		if err != nil {
-			c.record(addr, outcomeSoftFail)
+			if caller.Err() != nil {
+				c.record(addr, outcomeAnswered) // we aborted; the peer is fine
+			} else {
+				c.record(addr, outcomeSoftFail)
+			}
 			return n, true, fmt.Errorf("peer %s: stream body: %w", addr, err)
 		}
 		c.record(addr, outcomeAnswered)
