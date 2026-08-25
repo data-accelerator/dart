@@ -46,6 +46,19 @@ digest doubles as a cache key. Because `chunk.ObjectID` already prefers an
 embedded digest, the same layer pulled through different registries or
 repositories is stored **once**.
 
+> **Trust assumption (see [design-assumptions.md](./design-assumptions.md) A1
+> and A6):** the "can never serve the wrong bytes" invariant assumes an honest
+> origin. DART does **not** recompute the digest or compare it with
+> `Docker-Content-Digest` at ingest — deliberately, because hashing every byte
+> would tax the 100 Gbps data path and the origin is the trusted source of
+> truth. If a compromised origin serves wrong bytes for a digest, those bytes
+> are cached under that digest permanently (the store is write-once; eviction
+> or a wipe is the only invalidation) and re-served cluster-wide. The failure
+> is still *loud* for content-addressed clients — containerd verifies the
+> digest of what it pulled and errors — so the blast radius is a persistent
+> pull failure, never silent execution. If digest verification at ingest is
+> ever wanted, it belongs behind an explicit option, not a silent default.
+
 **Manifests are deliberately never cached.** A manifest reference is usually a
 tag, and tags are mutable — `:latest` points at different content over time.
 Caching them would pin a stale image, which surfaces to users as "my deployment
@@ -95,7 +108,8 @@ func BlobDigest(path string) (string, bool)
    upstream bytes; `Range` is honored and responses are `Content-Length` framed
    (never chunked).
 3. **Digest dedup**: two upstreams or repositories serving the same digest share
-   one cache entry.
+   one cache entry. (The digest is trusted as the content's name — ingest does
+   not verify bytes against it; see the trust assumption in §2.)
 4. **No writes**: non-`GET`/`HEAD` never reaches the upstream.
 
 ## 5. Authentication and the trust model
