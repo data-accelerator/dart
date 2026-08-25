@@ -56,16 +56,25 @@ byte-level guarantees across a mixed-geometry window are out of scope.
   converges.
 - Relied on by: docs/chunk.md, docs/engine.md, docs/peer.md.
 
-## A4. Weights are finite positive numbers
+## A4. Weights are finite; non-positive ones are normalized to 1
 
-Placement assumes `0 < weight < +Inf`. Self weight is a fixed constant, and
-the JSON wire cannot carry NaN/±Inf at all, so non-finite weights cannot
-arrive through any current path.
+Placement math assumes a **finite** weight; the score formula `w / -ln(u)`
+divides by it. Non-positive weights are *not* an error: every boundary
+normalizes `weight <= 0` to 1 (hashring's `Node.Weight` semantics, cluster's
+self/member normalization in docs/cluster.md), so placement always sees a
+positive finite number. The JSON wire additionally cannot carry NaN/±Inf at
+all, so non-finite weights cannot arrive through any current path.
 
-- **Buys**: the HRW score formula (`w / -ln(u)`) needs no validity plumbing.
-- **If violated** (a future API accepting arbitrary weights): a NaN weight
-  would void the input-order-independence invariant. Any such API must
-  validate at its boundary — the invariant is the API's job, not the ring's.
+- **Buys**: the HRW score formula needs no validity plumbing, and a config
+  typo (`weight: 0`) degrades to "average member" instead of a placement
+  anomaly.
+- **If violated** (a future API accepting arbitrary floats, bypassing
+  normalization): a NaN weight would void the input-order-independence
+  invariant. Any such API must reject non-finite values at its boundary — the
+  invariant is the API's job, not the ring's. Note cluster's epoch preserves
+  the *pre-normalization* weight verbatim (a documented wart: two byte-wise
+  different views that normalize identically produce different epochs;
+  docs/cluster.md).
 - Relied on by: docs/hashring.md §4/§6.
 
 ## A5. Operator-supplied configuration values are sane
