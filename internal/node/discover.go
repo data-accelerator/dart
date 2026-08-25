@@ -27,10 +27,10 @@ type rosterFetcher struct {
 	selfAddr string
 }
 
-func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster.Member, error) {
-	r, err := f.c.FetchRoster(ctx, addr, f.selfID, f.selfAddr)
+func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster.Member, string, error) {
+	r, responder, err := f.c.FetchRoster(ctx, addr, f.selfID, f.selfAddr)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	out := make([]cluster.Member, 0, len(r.Members))
 	for _, m := range r.Members {
@@ -45,7 +45,7 @@ func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster
 		// member as Ready and derives liveness locally.
 		out = append(out, cluster.Member{ID: m.ID, Addr: m.Addr, Weight: w})
 	}
-	return out, nil
+	return out, responder, nil
 }
 
 // rosterOf renders a provider's current membership for the wire.
