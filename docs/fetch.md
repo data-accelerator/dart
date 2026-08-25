@@ -138,7 +138,7 @@ type Coalescing struct {
     F   Fetcher
     Key func(url string) string   // dedup identity; nil = the URL itself
 }
-func Redact(rawURL string) string          // drops the query
+func Redact(rawURL string) string          // drops the query and any userinfo
 type StatusError struct{ Code int; URL, Status string }
 func (e *StatusError) Refused() bool       // 401/403
 ```
@@ -151,8 +151,12 @@ bucket), and that changes three things:
   block. Keyed by URL they would not coalesce at all and each would open its own
   origin fetch — exactly the thundering herd `Coalescing` exists to prevent. Set
   `Key` to the same content identity used for cache keys (`chunk.ObjectID`).
-- **The signature is a credential.** `Redact` strips the query, and every error
+- **The signature is a credential.** `Redact` strips the query and any
+  userinfo, and every error
   built here uses it, because these strings reach logs and HTTP responses.
+  Transport failures get the same treatment: net/http's `*url.Error` strips
+  only the userinfo *password* — never the query — so `client.Do` errors are
+  rewritten through `Redact` before they escape `Fetch`/`Open`.
 - **A refusal is not a failure of ours.** `StatusError.Refused()` marks 401/403,
   which lets the relay path report "the origin rejected the caller's credential"
   instead of looking like the relay malfunctioned (see docs/peer.md §3.5).
@@ -253,6 +257,8 @@ go test ./internal/fetch/ -cover -count=1
 | `TestCoalescingWithoutKeyUsesURL` | the default keys by URL, so distinct signatures do not coalesce |
 | `TestCoalescingKeyStillSeparatesRanges` | collapsing identity must not collapse distinct byte ranges |
 | `TestRedactStripsSignature` / `TestFetchErrorsRedactSignature` | the query is dropped, and error strings never carry a signature |
+| `TestTransportErrorRedactsCredentials` | `client.Do` failures (`Fetch` and `Open`) carry neither the query nor userinfo |
+| `TestRedactStripsUserinfo` | `Redact` drops userinfo as well as the query |
 | `TestStatusErrorRefusedClassification` | 401/403 are refusals; 404/500/502 are not |
 | `TestCoalescingCallerCancel` | caller cancel returns ctx.Err(); shared fetch still completes |
 | `TestStaleFlightEvictedAfterMaxFlight` | a never-returning leader is evicted after `MaxFlight`; a later call leads a replacement |

@@ -835,3 +835,37 @@ func TestAbandonedWaitersReleasedAtDeadline(t *testing.T) {
 		t.Fatalf("underlying calls = %d, want >= 2 (abandoned waiter must be released at the deadline)", got)
 	}
 }
+
+// TestTransportErrorRedactsCredentials pins issue #7: net/http's *url.Error
+// strips only the userinfo password — never the query — so a failed fetch of a
+// presigned URL used to leak the live signature into 502 bodies and logs.
+// Fetch and Open must both return errors whose string carries neither the
+// query nor the userinfo.
+func TestTransportErrorRedactsCredentials(t *testing.T) {
+	// Port 1 is never listening: client.Do fails before any request is sent.
+	const url = "http://user:p%40ss@127.0.0.1:1/obj?X-Sig=SECRET123&b=2"
+	f := &HTTPFetcher{}
+
+	if _, err := f.Fetch(context.Background(), url, 0, 7); err == nil {
+		t.Fatal("Fetch: want a transport error")
+	} else if s := err.Error(); strings.Contains(s, "SECRET123") || strings.Contains(s, "user") && strings.Contains(s, "ss@") {
+		t.Fatalf("Fetch error leaks credentials: %v", err)
+	}
+	if _, err := f.Open(context.Background(), url, nil); err == nil {
+		t.Fatal("Open: want a transport error")
+	} else if s := err.Error(); strings.Contains(s, "SECRET123") || strings.Contains(s, "user") && strings.Contains(s, "ss@") {
+		t.Fatalf("Open error leaks credentials: %v", err)
+	}
+}
+
+// TestRedactStripsUserinfo pins the other half of issue #7: Redact removed the
+// query but kept userinfo, which is credential material too.
+func TestRedactStripsUserinfo(t *testing.T) {
+	got := Redact("https://user:pass@host.example/path?sig=1")
+	if want := "https://host.example/path?<redacted>"; got != want {
+		t.Fatalf("Redact = %q, want %q", got, want)
+	}
+	if got := Redact("https://host.example/no-userinfo"); got != "https://host.example/no-userinfo" {
+		t.Fatalf("Redact(no creds) = %q", got)
+	}
+}

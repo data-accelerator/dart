@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,12 @@ type Range struct {
 // credential: anyone who sees it can read the object. Upstream URLs therefore
 // must never appear in output with their query intact.
 func Redact(rawURL string) string {
+	// Userinfo is credential material too: "https://user:pass@host/..." must
+	// not render either. (net/http's url.Error strips only the password.)
+	if u, err := url.Parse(rawURL); err == nil && u.User != nil {
+		u.User = nil
+		rawURL = u.String()
+	}
 	if i := strings.IndexByte(rawURL, '?'); i >= 0 {
 		return rawURL[:i] + "?<redacted>"
 	}
@@ -139,7 +146,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return Range{}, err
+		return Range{}, redactTransportErr(err)
 	}
 	defer resp.Body.Close()
 
@@ -297,7 +304,25 @@ func (f *HTTPFetcher) Open(ctx context.Context, url string, header http.Header) 
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, redactTransportErr(err)
+	}
+	return resp, nil
+}
+
+// redactTransportErr rewrites a client.Do failure so the URL it renders cannot
+// carry the query (presigned signature) or userinfo: net/http's *url.Error
+// strips only the userinfo password, and fmt-wrapping it would still print the
+// inner URL in full.
+func redactTransportErr(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		redacted := *ue
+		redacted.URL = Redact(ue.URL)
+		return &redacted
+	}
+	return err
 }
 
 // Coalescing wraps a Fetcher so that concurrent fetches for the same
