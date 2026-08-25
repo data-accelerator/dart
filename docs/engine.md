@@ -75,6 +75,12 @@ content-addressed objects the size is permanently valid. The probe also
 records whether the origin honored the Range: a `200` answer marks the object
 Range-unsupported (see §3.9).
 
+A `206` that hides the total (`Content-Range: bytes 0-0/*`) is a **probe
+failure**, not a size: block geometry is impossible without the total, and
+caching a fabricated one would poison every later read of the object (the
+cache is write-once and process-lifetime — §3.3). `Size` returns an error and
+caches nothing, so a corrected origin recovers without a restart.
+
 ### 3.3 `func (e *Engine) Serve(ctx, w io.Writer, url string, start, end int64) error`
 
 Writes the inclusive range `[start, end]` to `w`. `end` is clamped to the last
@@ -286,9 +292,8 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **84.1%** of statements. Uncovered lines are mostly rare I/O
-  error branches (short block, mid-stream write error, Size fallback when the
-  origin reveals no total).
+- **Coverage**: **85.4%** of statements. Uncovered lines are mostly rare I/O
+  error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
 - **Reproduce**:
@@ -308,6 +313,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestServeAcrossBlocksAndChunks` | a range crossing block/chunk boundaries is assembled correctly |
 | `TestServeEndClampAndBadStart` | end clamped to size; start beyond size errors |
 | `TestSize` | object size probed correctly |
+| `TestSizeHiddenTotalIsProbeFailure` | a 206 hiding the total fails loudly, caches nothing, and never fabricates a size |
 | `TestCacheHitAvoidsRefetch` | repeated identical serve makes zero origin requests |
 | `TestConcurrentServe` | overlapping concurrent reads correct and race-free |
 | `TestServeOriginError` | unreachable origin surfaces an error |
