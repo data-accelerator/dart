@@ -32,7 +32,10 @@ the latest release and to `main`; older tags are not maintained.
 ## Trust model — please read before deploying
 
 Several of DART's design decisions assume a trusted network. They are deliberate
-trade-offs, not oversights, but they determine how you must deploy it:
+trade-offs, not oversights, but they determine how you must deploy it. The full
+set of minimalist assumptions (trusted read-only origin, uniform cluster
+configuration, finite weights, ...) is documented in
+[docs/design-assumptions.md](docs/design-assumptions.md):
 
 - **The peer plane is plaintext HTTP/1.1 and unauthenticated.** Any host that can
   reach a node's peer listener can request blocks from it, and traffic between
