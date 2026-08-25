@@ -21,6 +21,7 @@ This directory holds DART's **official documentation** (tracked in git). It targ
 | [node.md](./node.md) | `internal/node` — node assembly: flags, store/engine wiring, discovery-scheme dispatch | Implemented, tests passing |
 | [dart.md](./dart.md) | `cmd/dart` — the node binary: registry mirror + OverlayBD prefix API, P2P, admin | Implemented, tests passing |
 | [k8s.md](./k8s.md) | `providers/k8s` (separate module) — EndpointSlice-watch discovery; the `dart-k8s` variant | Implemented, tests passing |
+| [design-assumptions.md](./design-assumptions.md) | cross-cutting — the minimalist assumptions every package relies on (trusted read-only origin, trusted domain, uniform config, ...) | Living contract |
 
 (Register one row here for every new package.)
 
