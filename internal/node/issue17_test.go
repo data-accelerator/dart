@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -17,7 +18,8 @@ import (
 // would dial itself. All wildcard forms must be rejected; a loopback address
 // stays valid (the local multi-node rig runs several nodes on one host).
 func TestWildcardAdvertiseRejected(t *testing.T) {
-	for _, bad := range []string{"0.0.0.0:9000", ":9000", "[::]:9000", "::1:9000"} {
+	for _, bad := range []string{"0.0.0.0:9000", ":9000", "[::]:9000", "::1:9000",
+		"0:0:0:0:0:0:0:0:9000", "[0::0]:9000"} { // IPv6 unspecified, long forms
 		if _, err := advertisedAddr(bad, "127.0.0.1:9001"); err == nil {
 			t.Errorf("advertisedAddr(%q) accepted, want a wildcard rejection", bad)
 		}
@@ -33,7 +35,7 @@ func TestWildcardAdvertiseRejected(t *testing.T) {
 // "disable the owned budget" (0) silently became "reserve 80% for it".
 // Flag parsing must fail startup; the store rejects < 0 / >= 1 too.
 func TestOwnedFractionFlagValidation(t *testing.T) {
-	for _, v := range []string{"0", "1", "1.5", "-0.5"} {
+	for _, v := range []string{"0", "1", "1.5", "-0.5", "NaN", "+Inf"} {
 		if _, err := parseFlags([]string{"-owned-fraction", v}, io.Discard, nil); err == nil {
 			t.Errorf("-owned-fraction %s accepted, want a startup error", v)
 		}
@@ -91,6 +93,27 @@ func TestDiscoveryErrorsRoutedAndThrottled(t *testing.T) {
 	if n := strings.Count(out.String(), "\n"); n != 1 {
 		t.Fatalf("51 errors produced %d lines, want 1 (throttled)", n)
 	}
+}
+
+// TestOutWriterIsSerialized pins the lockedWriter wrap: the banner, shutdown
+// lines, and throttled discovery diagnostics all share the caller's out,
+// which may not be concurrency-safe. Concurrent writers must not interleave
+// bytes within a single Write call.
+func TestOutWriterIsSerialized(t *testing.T) {
+	w := &lockedWriter{w: io.Discard}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				if _, err := w.Write([]byte("dart: discover: x\n")); err != nil {
+					t.Errorf("Write: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestEarlyListenerFailureShutsSiblings pins N1: when one server fails at

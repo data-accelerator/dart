@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 )
 
@@ -77,8 +78,9 @@ type TieredOptions struct {
 	Slots    int
 	// OwnedFraction is the share of Slots reserved for owned blocks
 	// (0 < f < 1); 0 (the zero value) means "unset" and defaults to 0.8.
-	// Negative or >= 1 values are rejected with ErrBadTieredOptions — never
-	// silently substituted. Each budget always gets at least one slot.
+	// Negative, >= 1, or non-finite values are rejected with
+	// ErrBadTieredOptions — never silently substituted. Each budget always
+	// gets at least one slot.
 	OwnedFraction float64
 }
 
@@ -106,7 +108,7 @@ func OpenTiered(opt TieredOptions) (*Tiered, error) {
 		return nil, ErrBadTieredOptions
 	}
 	f := opt.OwnedFraction
-	if f < 0 || f >= 1 {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f >= 1 {
 		// Fail loudly: silently substituting 0.8 would turn "disable the owned
 		// budget" into "reserve 80% of the cache for it" — the opposite.
 		return nil, ErrBadTieredOptions

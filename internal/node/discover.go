@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/data-accelerator/dart/internal/cluster"
 	"github.com/data-accelerator/dart/internal/peer"
@@ -104,9 +105,15 @@ func advertisedAddr(explicit, listen string) (string, error) {
 }
 
 func isWildcardHost(h string) bool {
-	switch h {
-	case "", "0.0.0.0", "::", "[::]":
+	if h == "" {
 		return true
+	}
+	// Parse rather than string-match: the IPv6 unspecified address has many
+	// spellings ("::", "[::]", "0:0:0:0:0:0:0:0", "[0::0]", ...) and every one
+	// of them advertised to a peer means "dial yourself".
+	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsUnspecified()
 	}
 	return false
 }

@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -113,7 +114,22 @@ func newThrottledLogger(out io.Writer) func(error) {
 	}
 }
 
+// lockedWriter serializes concurrent writes to the caller's out: the banner
+// and shutdown lines race the discovery diagnostics goroutine otherwise, and
+// nothing in Run's contract lets us assume out is concurrency-safe.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 func Run(args []string, out io.Writer, version string, schemes ...DiscoveryScheme) error {
+	out = &lockedWriter{w: out}
 	cfg, err := parseFlags(args, out, schemes)
 	if err != nil {
 		return err
@@ -205,7 +221,14 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 				defer wg.Done()
 				shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				errs <- s.Shutdown(shutCtx)
+				err := s.Shutdown(shutCtx)
+				if err != nil {
+					// The drain deadline expired with handlers still running
+					// (they may be touching the store the deferred closer is
+					// about to close) — force-close so nothing outlives it.
+					s.Close()
+				}
+				errs <- err
 			}(s)
 		}
 		wg.Wait()
@@ -286,7 +309,9 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	// flags actually given, so 0 can only be explicit.)
 	var badFraction bool
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "owned-fraction" && (cfg.ownedFraction <= 0 || cfg.ownedFraction >= 1) {
+		// NaN slips past <=/>= comparisons; reject non-finite explicitly.
+		if f.Name == "owned-fraction" && (math.IsNaN(cfg.ownedFraction) || math.IsInf(cfg.ownedFraction, 0) ||
+			cfg.ownedFraction <= 0 || cfg.ownedFraction >= 1) {
 			badFraction = true
 		}
 	})
