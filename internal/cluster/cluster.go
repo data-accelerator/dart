@@ -44,6 +44,21 @@ const (
 	Leaving
 )
 
+// stateRank orders lifecycle states by how authoritative the "can serve" claim
+// is, for duplicate-ID dedup in NewView: Ready > Suspect > Joining > Leaving.
+func stateRank(s State) int {
+	switch s {
+	case Ready:
+		return 3
+	case Suspect:
+		return 2
+	case Joining:
+		return 1
+	default: // Leaving and any unknown state
+		return 0
+	}
+}
+
 // String returns the canonical name of the state.
 func (s State) String() string {
 	switch s {
@@ -99,10 +114,15 @@ type View struct {
 }
 
 // NewView builds an immutable View from the given members. The input is copied
-// and canonicalized: sorted by (ID, State, Weight) and de-duplicated by ID
-// (keeping the first entry in that deterministic order), so the resulting View
-// — and its epoch — are independent of the input order. The input slice is not
-// modified.
+// and canonicalized: sorted by (ID, state rank desc, Weight) and de-duplicated
+// by ID (keeping the first entry in that deterministic order), so the resulting
+// View — and its epoch — are independent of the input order. The input slice is
+// not modified.
+//
+// Duplicate IDs are a conflicting-reports case: the rank order Ready > Suspect
+// > Joining > Leaving keeps the entry claiming the node can serve. A Joining or
+// Leaving marker must never suppress a member another source still reports as
+// Ready — placement would silently lose a serving node.
 func NewView(members []Member) *View {
 	cp := make([]Member, len(members))
 	copy(cp, members)
@@ -110,8 +130,8 @@ func NewView(members []Member) *View {
 		if cp[a].ID != cp[b].ID {
 			return cp[a].ID < cp[b].ID
 		}
-		if cp[a].State != cp[b].State {
-			return cp[a].State < cp[b].State
+		if ra, rb := stateRank(cp[a].State), stateRank(cp[b].State); ra != rb {
+			return ra > rb
 		}
 		return cp[a].Weight < cp[b].Weight
 	})

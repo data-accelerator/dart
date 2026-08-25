@@ -274,11 +274,11 @@ func (d *DynamicProvider) Learn(members ...Member) {
 		}
 		// A member's address can legitimately change — a pod is recreated with a new
 		// IP while keeping its node identity. Take the newest address, or we would
-		// keep dialing an address nobody is listening on. A new address also earns a
-		// fresh grace period, since we have not had a chance to reach it yet.
-		if t.member.Addr != m.Addr {
-			t.lastContact = now
-		}
+		// keep dialing an address nobody is listening on. But hearsay is NOT
+		// liveness evidence: the address change updates Addr only and deliberately
+		// does not touch lastContact (§3.9 of docs/cluster.md). Otherwise two
+		// survivors flip-flopping conflicting address reports about a dead node
+		// would refresh each other's memory of it forever.
 		t.member = m
 	}
 	d.mu.Unlock()
