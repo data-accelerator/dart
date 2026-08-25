@@ -421,3 +421,31 @@ func TestMirrorWithAuthTransport(t *testing.T) {
 		t.Errorf("upstream served %d more requests; the private blob was not cached", got-authed)
 	}
 }
+
+// TestAuthTransportTokenRealmIsTrustedAsDelivered pins the documented contract
+// (docs/registry.md §5): the token request goes to whatever realm the
+// upstream's 401 designates — including a *different host* — carrying the
+// operator credential verbatim. DART deliberately does not validate the realm
+// (per-vendor token topologies differ; securing the upstream path is the
+// operator's responsibility per SECURITY.md / design-assumptions A2). If that
+// behavior ever changes (e.g. realm validation is added), this test must fail.
+func TestAuthTransportTokenRealmIsTrustedAsDelivered(t *testing.T) {
+	tr := newTokenRegistry(t)
+	// The fixture's resource server and token endpoint are distinct httptest
+	// servers, so this is inherently cross-host; assert that explicitly.
+	if strings.TrimPrefix(tr.srv.URL, "http://") == strings.TrimPrefix(tr.authSrv.URL, "http://") {
+		t.Fatal("fixture must use distinct hosts for resource and realm")
+	}
+	at := NewAuthTransport(nil, tr.creds())
+
+	resp, _ := doGet(t, at, tr.srv.URL+"/v2/library/nginx/blobs/sha256:abc")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	// The realm host received the operator credential verbatim (Basic user:pass).
+	got, _ := tr.seenBasic.Load().(string)
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("user:pass"))
+	if got != want {
+		t.Fatalf("realm host received %q, want the operator credential %q", got, want)
+	}
+}

@@ -144,10 +144,21 @@ which is how a pull-through cache normally authenticates.
 
 Behavior:
 
-- **Credentials never leave their host.** They are keyed by `URL.Host` and only
-  sent to a host present in the map. This is load-bearing: registries redirect
-  blob downloads to a CDN, the transport is invoked again for that host, and
-  sending the registry credential along would leak it.
+- **Credentials are keyed by host — and are also sent to the token realm the
+  upstream names.** Resource requests carry a credential only to a host present
+  in the map: registries redirect blob downloads to a CDN, the transport is
+  invoked again for that host, and sending the registry credential along would
+  leak it. The **token exchange is different by design**: it GETs whatever
+  `realm` URL the upstream's `WWW-Authenticate` header designates, on whatever
+  host that is (e.g. `registry-1.docker.io` → `auth.docker.io`), carrying the
+  operator credential. The realm is **trusted as delivered by the upstream**;
+  DART deliberately does not validate it against an allowlist — per-vendor
+  token topologies differ, and such configuration would be a permanent
+  maintenance burden (see [design-assumptions.md](./design-assumptions.md) A2
+  and SECURITY.md). Securing the path to the upstream is the operator's
+  responsibility: a MITM on a plain-http upstream hop could steer the token
+  exchange, so plain-http upstreams belong on trusted networks only.
+  `TestAuthTransportTokenRealmIsTrustedAsDelivered` pins this behavior.
 - **Tokens are cached** per (host, repository), keyed by a scope **derived from
   the request path** rather than by the scope the registry advertised. The cache
   is consulted before any challenge is seen, so only a request-computable key
@@ -246,6 +257,7 @@ flow and derives its advertised scope per repository:
 | Test | Property guarded |
 |---|---|
 | `TestAuthTransportTokenExchange` | a `401` Bearer challenge becomes a token and a retry, transparently |
+| `TestAuthTransportTokenRealmIsTrustedAsDelivered` | the token request carries the operator credential to the realm host verbatim, cross-host, by design (§5) |
 | **`TestAuthTransportCachesToken`** | **5 requests trigger 1 token exchange** (otherwise every block pays a 401) |
 | `TestAuthTransportRefreshesRejectedToken` | a rotated/rejected token is re-fetched rather than failing the read |
 | `TestAuthTransportShortTTLNotCached` | a token expiring inside the leeway is not reused |
