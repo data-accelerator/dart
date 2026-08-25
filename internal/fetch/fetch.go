@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Range is the result of a range fetch: the bytes plus the total object size if
@@ -319,7 +320,12 @@ type Coalescing struct {
 	// Callers should set it to the same content identity used for cache keys
 	// (chunk.ObjectID).
 	Key func(url string) string
-	g   group
+	// MaxFlight bounds how long one shared flight may run before a later call
+	// for the same key abandons it and leads a replacement (see group.Do). The
+	// flight's own context also expires at this bound. Zero means
+	// DefaultMaxFlight.
+	MaxFlight time.Duration
+	g         group
 }
 
 var _ Fetcher = (*Coalescing)(nil)
@@ -331,6 +337,22 @@ func (c *Coalescing) identity(url string) string {
 		return url
 	}
 	return c.Key(url)
+}
+
+// DefaultMaxFlight bounds how long a shared flight may run before a later call
+// for the same key abandons it and leads a replacement. It must be generous:
+// a degenerate flight can carry a whole object (a Range-ignoring origin), not
+// just a block. The bound exists so a stalled origin connection — accepted,
+// then silent — cannot poison a cache key forever: the flight's context
+// expires, and the key's map entry is evicted once the deadline passes even if
+// the leader's fetcher ignores context cancellation.
+const DefaultMaxFlight = 10 * time.Minute
+
+func (c *Coalescing) maxFlight() time.Duration {
+	if c.MaxFlight > 0 {
+		return c.MaxFlight
+	}
+	return DefaultMaxFlight
 }
 
 // Fetch coalesces duplicate concurrent fetches. It returns ctx.Err() if the
@@ -352,14 +374,22 @@ func (c *Coalescing) Fetch(ctx context.Context, url string, start, end int64) (R
 	}
 	ch := make(chan result, 1)
 	go func() {
-		r, err, shared := c.g.Do(key, func() (Range, error) {
-			return c.F.Fetch(context.Background(), url, start, end)
+		r, err, shared := c.g.Do(key, c.maxFlight(), func() (Range, error) {
+			// The shared flight runs on a bounded background context: caller
+			// cancellation must not abort it (a cancelled caller's peers may
+			// still want the bytes), but a stalled origin must not pin it
+			// forever either.
+			flightCtx, cancel := context.WithTimeout(context.Background(), c.maxFlight())
+			defer cancel()
+			return c.F.Fetch(flightCtx, url, start, end)
 		})
 		r.Coalesced = shared
 		// Only a joiner retries: if we led the flight, the credential that was
-		// refused was our own and asking again would change nothing.
-		if shared && refused(err) {
-			r, err = c.F.Fetch(context.Background(), url, start, end)
+		// refused was our own and asking again would change nothing. The retry
+		// serves this caller alone, so it uses the caller's context and is
+		// skipped entirely when that caller is already gone.
+		if shared && refused(err) && ctx.Err() == nil {
+			r, err = c.F.Fetch(ctx, url, start, end)
 			r.Coalesced = false // these bytes did cross the network for us
 		}
 		ch <- result{r, err}
@@ -397,33 +427,59 @@ type group struct {
 }
 
 type call struct {
-	wg  sync.WaitGroup
-	val Range
-	err error
+	done chan struct{} // closed when the flight completes
+	val  Range
+	err  error
+	end  time.Time // deadline; zero when unbounded
 }
 
 // Do executes fn once per in-flight key. shared reports whether the result was
 // shared with a concurrent caller.
-func (g *group) Do(key string, fn func() (Range, error)) (v Range, err error, shared bool) {
-	g.mu.Lock()
-	if g.m == nil {
-		g.m = make(map[string]*call)
-	}
-	if c, ok := g.m[key]; ok {
+//
+// maxFlight bounds how long a flight may occupy its key. A joiner waits only
+// until the flight's deadline, then re-checks: if the leader overran (a stalled
+// origin, or a fetcher ignoring context), the stale entry is evicted and a
+// replacement flight led — so a dead flight releases its waiters at the
+// deadline even when nobody else ever calls. A late-finishing stale leader
+// deletes only its own entry, never the replacement's.
+func (g *group) Do(key string, maxFlight time.Duration, fn func() (Range, error)) (v Range, err error, shared bool) {
+	for {
+		g.mu.Lock()
+		if g.m == nil {
+			g.m = make(map[string]*call)
+		}
+		c, ok := g.m[key]
+		if ok && (maxFlight <= 0 || time.Now().Before(c.end)) {
+			g.mu.Unlock()
+			if maxFlight <= 0 {
+				<-c.done
+				return c.val, c.err, true
+			}
+			select {
+			case <-c.done:
+				return c.val, c.err, true
+			case <-time.After(time.Until(c.end)):
+				continue // deadline passed: evict the stale flight or join its replacement
+			}
+		}
+		if ok {
+			delete(g.m, key) // stale flight: abandon it and lead a replacement
+		}
+		c = &call{done: make(chan struct{})}
+		if maxFlight > 0 {
+			c.end = time.Now().Add(maxFlight)
+		}
+		g.m[key] = c
 		g.mu.Unlock()
-		c.wg.Wait()
-		return c.val, c.err, true
+
+		c.val, c.err = fn()
+		close(c.done)
+
+		g.mu.Lock()
+		if g.m[key] == c {
+			delete(g.m, key)
+		}
+		g.mu.Unlock()
+		return c.val, c.err, false
 	}
-	c := new(call)
-	c.wg.Add(1)
-	g.m[key] = c
-	g.mu.Unlock()
-
-	c.val, c.err = fn()
-	c.wg.Done()
-
-	g.mu.Lock()
-	delete(g.m, key)
-	g.mu.Unlock()
-	return c.val, c.err, false
 }

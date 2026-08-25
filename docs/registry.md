@@ -121,9 +121,9 @@ Two reasons, the second decisive:
 
 - no signature changes, and the *same* transport covers both the mirror's
   pass-through proxy and the engine's cached blob fetches;
-- `fetch.Coalescing` runs a shared fetch on a **background context**, so a
-  request-scoped credential carried in the context would be silently dropped for
-  every deduplicated caller.
+- `fetch.Coalescing` runs a shared fetch on a **bounded background context**, so
+  a request-scoped credential carried in the context would be silently dropped
+  for every deduplicated caller.
 
 The credential is therefore a property of the **upstream**, configured once —
 which is how a pull-through cache normally authenticates.

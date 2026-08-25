@@ -104,10 +104,21 @@ func (c *Coalescing) Open(ctx, url string, header http.Header) (*http.Response, 
 
 Wraps a `Fetcher` with singleflight keyed by `(url, start, end)`: concurrent
 identical fetches share one call to `F`. The **shared origin request runs on a
-background context**, so one caller's cancellation does not abort it — the block
-still completes for the other waiters (desirable for a cache). Each caller's own
-`ctx` only bounds how long that caller waits (a cancelled caller returns
-`ctx.Err()`).
+bounded background context** (`MaxFlight`, default 10m): one caller's
+cancellation does not abort it — the block still completes for the other
+waiters (desirable for a cache) — but a stalled origin cannot pin it forever
+either. A waiter blocked past the flight's deadline re-checks, evicts the
+stale entry, and leads a replacement (so abandoned waiters are released at
+the deadline even when no later caller ever arrives), and a late-finishing
+stale leader never deletes the replacement's entry; without the bound, one
+half-dead origin connection would poison the cache key for the process
+lifetime and leak one goroutine per abandoned waiter. Each caller's own `ctx` only bounds how long that caller
+waits (a cancelled caller returns `ctx.Err()`).
+
+A joiner whose flight was refused (401/403) retries once with its own
+credential — but only if the joiner itself is still alive: the retry serves
+that caller alone, so it uses the caller's context and is skipped when the
+caller is gone.
 
 `Open` implements `Opener` by delegating to the inner fetcher (erroring when it
 cannot stream). Passthrough traffic is deliberately **not** coalesced: nothing
@@ -173,7 +184,9 @@ bucket), and that changes three things:
    exception is an authorization refusal (401/403), where each joiner re-fetches
    once with its own credential (§3.6).
 3. **Cancellation isolation**: a caller cancelling its `ctx` neither aborts the
-   shared fetch nor affects other callers.
+   shared fetch nor affects other callers. The shared flight is itself bounded
+   by `MaxFlight` (§3.5), so a stalled origin fails all waiters within the
+   bound instead of pinning the key.
 4. **Total discovery**: `Total` reflects the object size whenever the origin
    provides it (Content-Range, or Content-Length on a 200).
 5. **A credential authorizes a fetch, not a cache hit.** This package is only
@@ -242,6 +255,11 @@ go test ./internal/fetch/ -cover -count=1
 | `TestRedactStripsSignature` / `TestFetchErrorsRedactSignature` | the query is dropped, and error strings never carry a signature |
 | `TestStatusErrorRefusedClassification` | 401/403 are refusals; 404/500/502 are not |
 | `TestCoalescingCallerCancel` | caller cancel returns ctx.Err(); shared fetch still completes |
+| `TestStaleFlightEvictedAfterMaxFlight` | a never-returning leader is evicted after `MaxFlight`; a later call leads a replacement |
+| `TestLateStaleLeaderKeepsReplacement` | a late-finishing stale leader never deletes the replacement flight's entry |
+| `TestFlightContextBoundsStalledOrigin` | a ctx-respecting but stalled flight fails all waiters within `MaxFlight` |
+| `TestJoinerRetrySkippedWhenCallerGone` | a cancelled joiner does not fire a refusal retry |
+| `TestAbandonedWaitersReleasedAtDeadline` | a waiter abandoned with a stuck leader is released at the flight deadline even with no later caller |
 
 ## 8. Limitations & TODO
 
