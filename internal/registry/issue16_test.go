@@ -89,6 +89,26 @@ func TestConcurrentColdRequestsShareOneExchange(t *testing.T) {
 	}
 }
 
+// TestDropTokenIfKeepsFreshEntry pins the PR #39 re-review finding: two
+// requests ride the same cached token; A's 401 drops it and A's exchange
+// stores a fresh token; B's 401 (from the OLD token) must not delete the
+// fresh one — invalidation is conditional on the rejected value.
+func TestDropTokenIfKeepsFreshEntry(t *testing.T) {
+	at := NewAuthTransport(nil, nil)
+	key := tokenKey("h", "s")
+	future := time.Now().Add(time.Hour)
+
+	at.storeToken(key, "fresh-token", future)
+	at.dropTokenIf(key, "stale-token") // rejected value != current: keep
+	if tok, ok := at.cachedToken(key); !ok || tok != "fresh-token" {
+		t.Fatalf("fresh token was deleted by a stale rejection (ok=%v)", ok)
+	}
+	at.dropTokenIf(key, "fresh-token") // matching value: drop
+	if _, ok := at.cachedToken(key); ok {
+		t.Fatal("the rejected token itself must be dropped")
+	}
+}
+
 // TestExpiredTokensPurged pins R6d (cache hygiene): the token cache must not
 // grow without bound — expired entries are swept past the cap, and a cache
 // full of still-valid entries resets rather than leaking forever.

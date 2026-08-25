@@ -163,11 +163,11 @@ func (a *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	first := cloneRequest(req)
 	scope := scopeFor(req.URL.Path)
 	key := tokenKey(req.URL.Host, scope)
-	usedCached := false
+	usedToken := ""
 	if clientAuth == "" {
 		if tok, ok := a.cachedToken(key); ok {
 			first.Header.Set("Authorization", "Bearer "+tok)
-			usedCached = true
+			usedToken = tok
 		}
 	}
 
@@ -176,10 +176,13 @@ func (a *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, err
 	}
 
-	if usedCached {
+	if usedToken != "" {
 		// The cached token was just rejected: drop it, or the shared exchange's
-		// cache double-check would hand the same dead token back.
-		a.dropToken(key)
+		// cache double-check would hand the same dead token back. Conditional
+		// on the value: a concurrent request may already have exchanged and
+		// stored a fresh token under this key — deleting THAT would force a
+		// pointless second exchange (PR #39 review).
+		a.dropTokenIf(key, usedToken)
 	}
 
 	if clientAuth != "" {
@@ -336,10 +339,13 @@ func (a *AuthTransport) storeTokenLocked(key, value string, expiresAt time.Time)
 	a.tokens[key] = &cachedToken{value: value, expiresAt: expiresAt}
 }
 
-// dropToken removes a cached token (it was rejected by the registry).
-func (a *AuthTransport) dropToken(key string) {
+// dropTokenIf removes a cached token only if the entry still holds the
+// rejected value — a concurrent re-exchange may already have replaced it.
+func (a *AuthTransport) dropTokenIf(key, rejected string) {
 	a.mu.Lock()
-	delete(a.tokens, key)
+	if t := a.tokens[key]; t != nil && t.value == rejected {
+		delete(a.tokens, key)
+	}
 	a.mu.Unlock()
 }
 
