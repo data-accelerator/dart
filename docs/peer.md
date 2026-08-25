@@ -31,9 +31,10 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   `store.BlockKey.Block` in base-10.
 - `X-DART-Origin` lets a relay-capable Source fetch a block it does not hold
   (via its own parent/origin); `X-DART-Hop` bounds relay recursion.
-- Responses: `200` + block bytes (with `X-DART-Node` and `Content-Length`),
-  `404` if the peer cannot provide the block, `400` for a malformed path, `405`
-  for non-GET, `500` on a source error.
+- Responses: `200` + block bytes (with `X-DART-Node`; `Content-Length` when
+  the source knows the size up front, chunked otherwise — e.g. on the
+  cut-through relay path), `404` if the peer cannot provide the block, `400`
+  for a malformed path, `405` for non-GET, `500` on a source error.
 - The path has no embedded URLs, so it is parsed from `URL.Path` (no `//` trap).
 
 ## 3. Public API
