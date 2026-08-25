@@ -250,6 +250,9 @@ func parsePeers(s string) ([]cluster.Member, error) {
 		if !ok || id == "" || addr == "" {
 			return nil, fmt.Errorf("bad peer %q (want id@host:port)", tok)
 		}
+		if !cluster.ValidMemberID(id) {
+			return nil, fmt.Errorf("bad peer %q: id must be visible ASCII without spaces or control bytes (epoch-framing safety)", tok)
+		}
 		ms = append(ms, cluster.Member{ID: id, Addr: addr, Weight: 1, State: cluster.Ready})
 	}
 	if len(ms) == 0 {
@@ -384,6 +387,11 @@ func build(cfg config) (*node, error) {
 		if cfg.selfID == "" {
 			closer.Close()
 			return nil, fmt.Errorf("-self-id is required with -peers or -discover")
+		}
+		if !cluster.ValidMemberID(cfg.selfID) {
+			closer.Close()
+			return nil, fmt.Errorf("-self-id %q is not a valid member ID: visible ASCII only, no spaces or control bytes "+
+				"(the epoch serialization frames member fields with 0x1F/0x1E; control bytes could collide the epoch)", cfg.selfID)
 		}
 		if cfg.peers != "" && cfg.discover != "" {
 			closer.Close()

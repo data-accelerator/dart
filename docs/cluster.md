@@ -22,7 +22,7 @@ keeping `client-go` out of this module.
 
 | Term | Meaning |
 |---|---|
-| `State` | Member lifecycle: `Joining → Ready → Suspect → Leaving`. |
+| `State` | Member lifecycle: `Joining → Ready → Suspect → Leaving`. **Reserved transitions**: today every producer sets `Ready` only (`DynamicProvider.Learn` forces it; the seeders have no member-state wire field), so `Live()` == `Ready()` in practice. The non-Ready states, their dedup rank, and their placement exclusions are the contract future producers (drain-on-shutdown, join grace) will code against — they are not emitted yet. |
 | `Member` | One node: stable `ID`, capacity `Weight`, `State`. |
 | `View` | Immutable membership snapshot at a given `Epoch`; safe to share across goroutines. |
 | `Epoch` | Deterministic 64-bit hash of the canonical membership; an agreement/change token, not a monotonic counter. |
@@ -91,6 +91,13 @@ safe to pass directly.
 v := cluster.NewView(members)
 owner := hashring.Rank(chunkKey, v.Ready())[0] // placement over Ready members
 ```
+
+### 3.3.1 `func ValidMemberID(s string) bool`
+
+The member-ID alphabet: every byte in [0x21, 0x7E] (visible ASCII, no spaces,
+no control bytes). Enforced at both ingress points — `-self-id`/`-peers`
+parsing in `internal/node` and roster ingest in `DynamicProvider.Learn` — so
+the 0x1F/0x1E epoch framing can never be collided by an ID (§6).
 
 ### 3.4 `type Provider` and `StaticProvider`
 
@@ -226,6 +233,18 @@ guess costs a hop, never correctness.
   epochs, and the epoch would stop being able to answer the one question it
   exists for — "are we looking at the same membership?". Liveness is layered on
   top of the view, not part of it.
+- **Member IDs are restricted to visible ASCII** (`ValidMemberID`: every byte in
+  [0x21, 0x7E]), enforced at both ingress points (`-self-id`/`-peers` parsing
+  and roster ingest). The serialization frames fields with 0x1F/0x1E, so an ID
+  containing those bytes could make two different memberships hash to the same
+  epoch; the alphabet restriction keeps framing unambiguous without a protocol
+  change.
+- **Wart, documented not "fixed"**: `Weight <= 0` is normalized to 1 for
+  placement but hashed *verbatim* into the epoch by `NewView` (the roster
+  ingest path normalizes first, so only direct `NewView` callers can observe
+  it). Two such members would agree on placement but disagree on epoch —
+  harmless config churn. Normalizing before hashing would change epoch values,
+  a protocol-visible change, so the wart stays documented instead.
 - The epoch is an **agreement/change token, not a monotonic counter**: on a
   mismatch a node refreshes membership (re-resolving seeds and re-exchanging
   rosters) and views converge. This suffices under the read-only semantics, where
@@ -255,6 +274,7 @@ go test ./internal/cluster/ -cover -count=1
 | `TestEpochChangesOnMutation` | an id or weight change bumps the epoch; a state change does not |
 | **`TestEpochExcludesState`** | **any combination of states yields one epoch, so the epoch can serve as a convergence token** |
 | `TestReadyLiveFilters` | Ready=Ready only, Live=Ready+Suspect, sorted, weights carried |
+| `TestValidMemberID` / `TestRosterIngestRejectsControlByteIDs` / `TestEpochCollisionInputsRejected` | member-ID alphabet; control-byte IDs rejected at roster ingest; the crafted epoch collision is unreachable |
 | `TestDedupDeterministic` | duplicate IDs collapse deterministically regardless of order |
 | `TestDedupKeepsServingStateOverJoining` | duplicate IDs keep the most authoritative serving state (Ready > Suspect > Joining > Leaving) |
 | `TestHearsayAddrChangeDoesNotRefreshLiveness` | hearsay address changes are adopted but never refresh the liveness clock; flip-flops still expire |

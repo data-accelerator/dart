@@ -260,8 +260,11 @@ func (d *DynamicProvider) Learn(members ...Member) {
 	now := d.cfg.Now()
 	d.mu.Lock()
 	for _, m := range members {
-		if m.ID == "" || m.ID == d.cfg.Self.ID {
-			continue // self is always present; an anonymous member is unusable
+		if !ValidMemberID(m.ID) || m.ID == d.cfg.Self.ID {
+			// Self is always present; an anonymous member is unusable. A control-
+			// byte ID is rejected outright: it could collide the epoch framing
+			// (see ValidMemberID), making different memberships look equal.
+			continue
 		}
 		// NaN cannot arrive here (JSON cannot represent it; A4).
 		if m.Weight <= 0 {

@@ -27,7 +27,11 @@ Three properties make this safe and cheap:
 
 Which node is the tracker for a file is **not** stored anywhere: it is the HRW
 top-1 Ready member for the file key, so every node computes the same answer
-independently. This package therefore holds no placement logic.
+independently — **given the same membership view**. Under split-brain
+(divergent member sets) two nodes can elect different trackers for one file,
+and the reader sets (hence the distribution trees) diverge silently until the
+views reconverge; the epoch handshake is what detects that divergence. This
+package therefore holds no placement logic.
 
 ## 2. Concepts
 
@@ -63,6 +67,11 @@ func (r *Registry) Files() int
   make the first reader wait a whole tick); subsequent changes wait for the tick.
 - `Leave` drops a lease immediately; the frozen set updates on the next tick.
   Dropping the last reader forgets the file entirely.
+- A lease expires at its TTL deadline regardless of further Joins — expiry is
+  not "until the next Join". Enforcement is **lazy**: the sweeper runs on
+  registry activity (amortized to at most once per tick; there is no
+  background goroutine), so an expired lease in an untouched registry lingers
+  until the next call — harmless, because only live readers shape the tree.
 - `Readers` returns a **copy**; `Files` is a diagnostic count.
 - **Idle eviction**: a file with no live leases (readers vanished without a
   `Leave`) and no `Join`/`Readers` activity for `IdleGrace` is forgotten, so a
