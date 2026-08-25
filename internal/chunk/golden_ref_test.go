@@ -22,15 +22,23 @@ func TestChunkKeyAgainstPythonReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("python3 %s: %v", script, err)
 	}
+	n := 0
 	for _, rec := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Split(strings.TrimSpace(rec), "|")
 		if f[0] != "chunkkey" {
 			continue
 		}
+		if len(f) != 5 {
+			t.Fatalf("malformed chunkkey record %q", rec)
+		}
+		n++
 		ci, _ := strconv.ParseInt(f[3], 10, 64)
 		want, _ := strconv.ParseUint(f[4], 10, 64)
 		if got := ChunkKey(f[1], f[2], ci); got != want {
 			t.Errorf("ChunkKey(%q, %q, %d) = %d, python reference says %d", f[1], f[2], ci, got, want)
 		}
+	}
+	if n != 4 {
+		t.Fatalf("reference emitted %d chunkkey records, want 4", n)
 	}
 }

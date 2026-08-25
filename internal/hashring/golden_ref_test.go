@@ -47,16 +47,25 @@ func TestRankWeightedGolden(t *testing.T) {
 // DART_GOLDEN_REF=1 is set (CI); skipped otherwise so contributors need no
 // Python.
 func TestHash64AgainstPythonReference(t *testing.T) {
+	nHash, nRank := 0, 0
 	for _, rec := range goldenRefRecords(t) {
 		f := strings.Split(rec, "|")
 		switch f[0] {
 		case "hash64":
+			if len(f) != 4 {
+				t.Fatalf("malformed hash64 record %q", rec)
+			}
+			nHash++
 			key, _ := strconv.ParseUint(f[1], 10, 64)
 			want, _ := strconv.ParseUint(f[3], 10, 64)
 			if got := Hash64(key, f[2]); got != want {
 				t.Errorf("Hash64(%s, %q) = %d, python reference says %d", f[1], f[2], got, want)
 			}
 		case "rank":
+			if len(f) != 4 {
+				t.Fatalf("malformed rank record %q", rec)
+			}
+			nRank++
 			key, _ := strconv.ParseUint(f[1], 16, 64)
 			var nodes []Node
 			for _, m := range strings.Split(f[2], ",") {
@@ -74,7 +83,16 @@ func TestHash64AgainstPythonReference(t *testing.T) {
 			if got := ids(Rank(key, nodes)); !equalStrings(got, want) {
 				t.Errorf("Rank(%s, %s) = %v, python reference says %v", f[1], f[2], got, want)
 			}
+		case "chunkkey", "epoch":
+			// owned by the chunk/cluster cross-checks
+		default:
+			t.Fatalf("unknown record kind in %q", rec)
 		}
+	}
+	// Guard against the reference silently shrinking: the tables below must
+	// not drift apart from what the script emits.
+	if nHash != 5 || nRank != 5 {
+		t.Fatalf("reference emitted %d hash64 and %d rank records, want 5 and 5", nHash, nRank)
 	}
 }
 

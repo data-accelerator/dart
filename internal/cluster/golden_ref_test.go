@@ -22,11 +22,16 @@ func TestEpochAgainstPythonReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("python3 %s: %v", script, err)
 	}
+	n := 0
 	for _, rec := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		f := strings.Split(strings.TrimSpace(rec), "|")
 		if f[0] != "epoch" {
 			continue
 		}
+		if len(f) != 3 {
+			t.Fatalf("malformed epoch record %q", rec)
+		}
+		n++
 		var members []Member
 		if f[1] != "(empty)" {
 			for _, m := range strings.Split(f[1], ",") {
@@ -45,5 +50,8 @@ func TestEpochAgainstPythonReference(t *testing.T) {
 		if got := NewView(members).Epoch(); got != want {
 			t.Errorf("epoch(%s) = %d, python reference says %d", f[1], got, want)
 		}
+	}
+	if n != 2 {
+		t.Fatalf("reference emitted %d epoch records, want 2", n)
 	}
 }
