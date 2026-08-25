@@ -5,6 +5,7 @@ package node
 // bytes 0x1F/0x1E could otherwise collide two different memberships).
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestSelfIDRejectsControlBytes(t *testing.T) {
 		selfID:     "bad\x1fid",
 		peerListen: "127.0.0.1:0",
 		peers:      "bad\x1fid@127.0.0.1:1",
-	})
+	}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "self-id") {
 		t.Fatalf("error = %v, want a -self-id alphabet complaint", err)
 	}
