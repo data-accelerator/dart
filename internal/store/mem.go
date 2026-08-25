@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // MemStore is an in-memory block cache: a fixed number of fixed-size slabs with
@@ -25,6 +26,10 @@ type MemStore struct {
 	mu    sync.Mutex
 	index map[BlockKey]*memEntry
 	lru   *list.List // *memEntry, most-recent at Front
+
+	// n mirrors len(index) so Len is O(1) lock-free: /admin/cache calls it on
+	// every scrape, and a lock+scan costs O(slots) under contention.
+	n atomic.Int64
 }
 
 // memEntry is one cached block: a slab plus how much of it is in use.
@@ -116,6 +121,7 @@ func (m *MemStore) Put(k BlockKey, data []byte) error {
 	e := &memEntry{key: k, buf: buf, n: len(data)}
 	e.elem = m.lru.PushFront(e)
 	m.index[k] = e
+	m.n.Add(1)
 	return nil
 }
 
@@ -129,6 +135,7 @@ func (m *MemStore) evictLocked() {
 	e := back.Value.(*memEntry)
 	m.lru.Remove(back)
 	delete(m.index, e.key)
+	m.n.Add(-1)
 	m.pool.Put(e.buf)
 	e.buf = nil
 }
@@ -151,16 +158,16 @@ func (m *MemStore) Delete(k BlockKey) bool {
 	}
 	m.lru.Remove(e.elem)
 	delete(m.index, k)
+	m.n.Add(-1)
 	m.pool.Put(e.buf)
 	e.buf = nil
 	return true
 }
 
-// Len returns the number of cached blocks.
+// Len returns the number of cached blocks in O(1), lock-free (the count is
+// maintained alongside the index; see the n field).
 func (m *MemStore) Len() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.index)
+	return int(m.n.Load())
 }
 
 // Slots returns the capacity in blocks.

@@ -45,7 +45,9 @@ and safe for concurrent use, since it runs on the scrape path.
 
 - Metric and label names must match `[a-zA-Z_][a-zA-Z0-9_]*`; an invalid name
   **panics at registration** (a startup programming error, not a runtime path).
-- Label values are escaped (`\`, `"`, newline) per the text format.
+- Label values are escaped (`\`, `"`, newline) per the text format, and HELP
+  strings are escaped too (`\` → `\\`, newline → `\n`) — a help string with
+  a literal newline must not split the exposition line.
 - Registering the same metric name with different labels produces multiple series
   under one `HELP`/`TYPE` header (the normal Prometheus pattern).
 
@@ -146,6 +148,7 @@ go test ./internal/metrics/ ./internal/admin/ -race -count=1
 | `metrics.TestHistogramBoundsSortedAndDeduped` | bounds normalized |
 | `metrics.TestInvalidNamePanics` | invalid metric/label names rejected |
 | `metrics.TestLabelValueEscaping` | quotes/backslashes/newlines escaped |
+| `metrics.TestHelpTextEscaped` / `TestEscapeHelpOnlyEscapesBackslashAndNewline` | HELP strings escaped per the text format (quotes untouched) |
 | `metrics.TestFormatFloatSpecials` | `+Inf`/`-Inf`/`NaN` rendering |
 | `metrics.TestEmptyRegistry` | renders nothing |
 | `metrics.TestConcurrent` | concurrent observe + render (`-race`) |

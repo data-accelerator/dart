@@ -341,6 +341,7 @@ go test ./internal/store/ -cover -count=1
 | `TestBorrowedPutClassOnOwnedKeyRefreshesRecency` | the owned-hit branch refreshes recency as promised |
 | `TestPutClassFeedsEstimator` | insertion is an access: write-only patterns do not degenerate admission |
 | `TestBorrowedAdmissionSerializesWithEviction` | concurrent admit+evict never exceeds the budget (`-race`) |
+| `TestMemStoreLenCounterExact` | the O(1) `Len` counter is exact across Put/refresh/evict/Delete/Close (`BenchmarkMemStoreLen` pins O(1) at 10k slots) |
 
 ## 8. Limitations & TODO
 

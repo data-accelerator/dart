@@ -237,6 +237,14 @@ func (r *Registry) NewCounterFunc(name, help string, fn func() float64, labels .
 }
 
 // escapeLabelValue escapes a label value per the text format.
+// escapeHelp escapes a HELP string per the Prometheus text format: backslash
+// and line feed only (quotes need no escaping outside label values).
+func escapeHelp(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	return s
+}
+
 func escapeLabelValue(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
@@ -300,7 +308,10 @@ func (r *Registry) Render(w io.Writer) error {
 		if !seen[m.name] {
 			seen[m.name] = true
 			if m.help != "" {
-				fmt.Fprintf(&b, "# HELP %s %s\n", m.name, strings.ReplaceAll(m.help, "\n", " "))
+				// HELP must be escaped like a label value: a literal newline
+				// would split the exposition line, a bare backslash is a
+				// format error (Prometheus text format, escaping rules).
+				fmt.Fprintf(&b, "# HELP %s %s\n", m.name, escapeHelp(m.help))
 			}
 			fmt.Fprintf(&b, "# TYPE %s %s\n", m.name, m.kind)
 		}
