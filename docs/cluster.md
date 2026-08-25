@@ -250,6 +250,7 @@ go test ./internal/cluster/ -cover -count=1
 | Test | Property guarded |
 |---|---|
 | `TestEpochGolden` | epoch matches an independent Python reference (serialization pinned) |
+| `TestEpochAgainstPythonReference` | CI diffs the epoch goldens against the tracked Python script |
 | `TestEpochDeterministicUnderShuffle` | epoch independent of input order |
 | `TestEpochChangesOnMutation` | an id or weight change bumps the epoch; a state change does not |
 | **`TestEpochExcludesState`** | **any combination of states yields one epoch, so the epoch can serve as a convergence token** |

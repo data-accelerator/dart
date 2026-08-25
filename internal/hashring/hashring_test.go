@@ -6,12 +6,13 @@ import (
 	"testing"
 )
 
-// --- Golden values, computed by an independent Python reference implementation
-// of the exact same construction (FNV-1a over little-endian key bytes + nodeID
-// bytes, then fmix64). These are the real determinism guard: if the Go hash
-// ever drifts from the specified construction, these break. Do NOT regenerate
-// them with the Go code itself (that would be a tautology) — recompute with an
-// independent implementation and treat any change as a ring-breaking event.
+// --- Golden values, computed by the independent Python reference
+// implementation contrib/golden/golden_reference.py (tracked in this repo; CI
+// diffs it against the live Go code under DART_GOLDEN_REF=1). These are the
+// real determinism guard: if the Go hash ever drifts from the specified
+// construction, these break. Do NOT regenerate them with the Go code itself
+// (that would be a tautology) — recompute with the Python reference and treat
+// any change as a ring-breaking event.
 
 func TestHash64Golden(t *testing.T) {
 	cases := []struct {

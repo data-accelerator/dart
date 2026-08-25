@@ -8,8 +8,9 @@ import (
 // digest is a canonical OCI-style sha256 blob digest (64 hex chars).
 var digest = "sha256:" + strings.Repeat("ab", 32)
 
-// TestChunkKeyGolden pins the ChunkKey serialization against an independent
-// Python reference. ChunkKey selects owners, so it is part of the wire protocol;
+// TestChunkKeyGolden pins the ChunkKey serialization against the independent
+// Python reference contrib/golden/golden_reference.py (CI diffs it against the
+// live Go code under DART_GOLDEN_REF=1). ChunkKey selects owners, so it is part of the wire protocol;
 // a change here reshuffles placement and must be treated as breaking.
 func TestChunkKeyGolden(t *testing.T) {
 	cases := []struct {

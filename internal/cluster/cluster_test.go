@@ -6,9 +6,10 @@ import (
 	"github.com/data-accelerator/dart/internal/hashring"
 )
 
-// TestEpochGolden pins the epoch serialization against an independent Python
-// reference (FNV-1a over ID,0x1F,big-endian float64 weight bits,0x1E, then
-// fmix64). The epoch is part of the wire protocol (X-DART-Epoch); if this
+// TestEpochGolden pins the epoch serialization against the independent Python
+// reference contrib/golden/golden_reference.py (FNV-1a over ID,0x1F,
+// big-endian float64 weight bits,0x1E, then fmix64; CI diffs it against the
+// live Go code under DART_GOLDEN_REF=1). The epoch is part of the wire protocol (X-DART-Epoch); if this
 // breaks, epoch computation drifted and must be treated as a protocol change.
 //
 // These values changed once, in 2026-08, when State was removed from the hash
