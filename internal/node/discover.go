@@ -76,8 +76,14 @@ func rosterOf(d *cluster.DynamicProvider) peer.Roster {
 // resolves inside a StatefulSet.
 func advertisedAddr(explicit, listen string) (string, error) {
 	if explicit != "" {
-		if _, _, err := net.SplitHostPort(explicit); err != nil {
+		h, _, err := net.SplitHostPort(explicit)
+		if err != nil {
 			return "", fmt.Errorf("-peer-advertise %q is not host:port: %w", explicit, err)
+		}
+		// An explicit wildcard advertisement is the exact harm this function
+		// exists to prevent: every peer that learns it dials itself.
+		if isWildcardHost(h) {
+			return "", fmt.Errorf("-peer-advertise %q is a wildcard address: every peer that learned it would dial itself", explicit)
 		}
 		return explicit, nil
 	}

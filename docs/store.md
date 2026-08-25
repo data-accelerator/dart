@@ -115,7 +115,7 @@ type ClassStore interface {
     Stats() TieredStats
 }
 func OpenTiered(TieredOptions) (*Tiered, error) // {Path, SlotSize, Slots, OwnedFraction}
-var ErrBadTieredOptions error  // SlotSize <= 0, Slots < 2, or OwnedFraction outside (0,1)
+var ErrBadTieredOptions error  // SlotSize <= 0, Slots < 2, or OwnedFraction < 0 or >= 1 (0 = unset, defaults to 0.8)
 func (t *Tiered) Touch(k BlockKey) // record an access in the estimator without reading (used by Hybrid)
 ```
 
@@ -314,7 +314,7 @@ go test ./internal/store/ -cover -count=1
 | `TestSketchAdmitFavorsPopular` | hot candidate beats cold victim; unseen candidate loses to hot victim |
 | `TestSketchDecay` | halving makes stale popularity fade |
 | `TestSketchConcurrent` / `TestNextPow2` | concurrency (`-race`); size rounding |
-| `TestTieredBadOptions` / `TestTieredSplitsCapacity` | option validation; 80/20 split, invalid fraction default, ≥1 slot each |
+| `TestTieredBadOptions` / `TestTieredSplitsCapacity` | option validation; 80/20 split, out-of-range fraction rejected (0 = unset → 0.8), ≥1 slot each |
 | `TestTieredRoundtripBothClasses` | both budgets store and serve; per-class stats |
 | **`TestTieredBudgetIsolation`** | **200 borrowed inserts never evict any owned block** |
 | **`TestTieredAdmissionRejectsOneShots`** | **one-shot candidates are refused; warm borrowed entries survive** |

@@ -29,6 +29,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -85,6 +86,33 @@ type config struct {
 // are the discovery schemes this binary accepts in -discover (see
 // DiscoveryScheme); dns and static also resolve without registration for
 // backward compatibility.
+// newThrottledLogger returns an OnError handler that writes to out at most
+// once per minute: discovery errors repeat every refresh interval (default 5s)
+// under a persistent outage, and library callers need diagnostics on their own
+// writer, not os.Stderr. The throttle collapses bursts; distinct errors within
+// the window are counted, not silently dropped.
+func newThrottledLogger(out io.Writer) func(error) {
+	var mu sync.Mutex
+	var last time.Time
+	var suppressed int
+	return func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if now.Sub(last) < time.Minute {
+			suppressed++
+			return
+		}
+		if suppressed > 0 {
+			fmt.Fprintf(out, "dart: discover: %v (%d similar suppressed)\n", err, suppressed)
+		} else {
+			fmt.Fprintf(out, "dart: discover: %v\n", err)
+		}
+		last = now
+		suppressed = 0
+	}
+}
+
 func Run(args []string, out io.Writer, version string, schemes ...DiscoveryScheme) error {
 	cfg, err := parseFlags(args, out, schemes)
 	if err != nil {
@@ -96,7 +124,7 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	}
 	cfg.schemes = schemes
 
-	n, err := build(cfg)
+	n, err := build(cfg, out)
 	if err != nil {
 		return err
 	}
@@ -164,20 +192,43 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	fmt.Fprintf(out, "dart client=%s | mode: %s | p2p: %s | admin: %s | cache: %s (%d MiB)\n",
 		cfg.listen, mode, p2p, adminMode, cfg.cacheDir, cfg.cacheSize/chunk.MiB)
 
+	shutdownAll := func() error {
+		// Each server gets its own full drain budget, concurrently: a shared
+		// sequential budget lets a long-draining client server expire the
+		// context before the peer/admin Shutdown calls even start — killing
+		// precisely the relay connections a draining node should close cleanly.
+		var wg sync.WaitGroup
+		errs := make(chan error, len(servers))
+		for _, s := range servers {
+			wg.Add(1)
+			go func(s *http.Server) {
+				defer wg.Done()
+				shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				errs <- s.Shutdown(shutCtx)
+			}(s)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	select {
 	case err := <-errCh:
+		// A server died early: the deferred closer is about to close the store
+		// and release the cache-dir lock — the siblings must not keep serving
+		// (admin would still answer /admin/stats over a closed store). Shut
+		// them down before returning.
+		_ = shutdownAll()
 		return err
 	case <-ctx.Done():
 		fmt.Fprintln(out, "dart shutting down...")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var firstErr error
-		for _, s := range servers {
-			if err := s.Shutdown(shutCtx); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
+		return shutdownAll()
 	}
 }
 
@@ -201,8 +252,9 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 		"maintain membership by discovery instead of a fixed -peers list: "+
 			schemeUsage(schemes)+", or a bare address list a:port,b:port,...")
 	fs.StringVar(&cfg.peerAdvertise, "peer-advertise", "",
-		"host:port peers should use to reach this node; defaults to -peer-listen with the "+
-			"host taken from POD_IP or the hostname when it is a wildcard")
+		"host:port peers should use to reach this node; wildcard values are rejected. "+
+			"When empty, defaults to -peer-listen with a wildcard host resolved from, in "+
+			"order: DART_ADVERTISE_HOST, POD_IP, the hostname")
 	fs.DurationVar(&cfg.discoverInterval, "discover-interval", cluster.DefaultRefreshInterval,
 		"how often to re-resolve seeds and re-exchange rosters")
 	fs.DurationVar(&cfg.forgetAfter, "forget-after", cluster.DefaultForgetAfter,
@@ -228,6 +280,18 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 		"only treat \"<algo>:<hex>\" paths as content-addressed; disables recognizing Docker Distribution's object-storage layout")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
+	}
+	// An explicitly-set out-of-range share is an operator error, not a "0.8
+	// please": fail startup. (0 unset means default; here Visit sees only
+	// flags actually given, so 0 can only be explicit.)
+	var badFraction bool
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "owned-fraction" && (cfg.ownedFraction <= 0 || cfg.ownedFraction >= 1) {
+			badFraction = true
+		}
+	})
+	if badFraction {
+		return config{}, fmt.Errorf("-owned-fraction must satisfy 0 < f < 1, got %g", cfg.ownedFraction)
 	}
 	// The mirror and the prefix API share a listener, so the prefix must not
 	// shadow the registry API path.
@@ -285,7 +349,7 @@ func (cs closers) Close() error {
 }
 
 // build constructs the store, engine, and handlers from cfg.
-func build(cfg config) (*node, error) {
+func build(cfg config, out io.Writer) (*node, error) {
 	cc := chunk.Config{ChunkSize: cfg.chunkSize, BlockSize: cfg.blockSize}
 	if err := cc.Validate(); err != nil {
 		return nil, err
@@ -427,12 +491,7 @@ func build(cfg config) (*node, error) {
 				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr},
 				RefreshInterval: cfg.discoverInterval,
 				ForgetAfter:     cfg.forgetAfter,
-				OnError: func(err error) {
-					// Discovery errors are expected and transient (a peer restarting, DNS
-					// briefly unavailable). Membership is unaffected, so this is a log line
-					// rather than a failure.
-					fmt.Fprintln(os.Stderr, "dart: discover:", err)
-				},
+				OnError:         newThrottledLogger(out),
 			})
 			eopt.Cluster = dyn
 		default:

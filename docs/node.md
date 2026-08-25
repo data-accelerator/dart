@@ -52,7 +52,12 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 
 The node's whole lifecycle: parse flags (`args`, without argv[0]; parse errors
 and usage go to `out`), build the node, serve until `SIGINT`/`SIGTERM`, then
-shut down with a 10s drain. `version` is what `-version` prints — commands stamp
+shut down with a 10s drain **per server, concurrently** (a slow client drain
+cannot starve the peer/admin shutdowns). If one server dies early (e.g. a bind
+failure), the siblings are shut down before `Run` returns — nothing keeps
+serving over the closed store. Discovery diagnostics go to `out`, throttled to
+one line per minute with a suppression count. `version` is what `-version`
+prints — commands stamp
 theirs via `-ldflags "-X main.version=..."` and pass it through.
 
 `schemes` is the discovery-scheme table for `-discover`; see §3.2. Errors from
@@ -161,6 +166,12 @@ the extraction:
 | `TestSchemeUsage` | help text lists registered schemes, historical text when none |
 | `TestRunPrintsVersion` | `-version` prints the version passed to `Run` |
 | `TestSelfIDRejectsControlBytes` / `TestParsePeersRejectsControlByteIDs` | control-byte member IDs rejected at `-self-id` and `-peers` (epoch-framing safety) |
+| `TestWildcardAdvertiseRejected` | explicit wildcard `-peer-advertise` values are rejected (incl. IPv6 long/zoned forms); loopback stays valid |
+| `TestOwnedFractionFlagValidation` | an explicit out-of-range or non-finite `-owned-fraction` fails startup |
+| `TestParseByteSizeExact` | plain byte counts are exact above 2^53; overflow errors |
+| `TestDiscoveryErrorsRoutedAndThrottled` | discovery errors go to `out`, one line/minute with a suppression count |
+| `TestOutWriterIsSerialized` | all out writes are serialized through the lockedWriter |
+| `TestEarlyListenerFailureShutsSiblings` | an early bind failure shuts down the peer/admin servers before Run returns |
 | `TestRedactURLUserinfo` | the startup banner strips URL userinfo (no credentials in logs) |
 | `TestBuildKeepsSeederForLifecycle` | the built node retains its seeder and its optional `Run(ctx)` stays assertable |
 | `TestSchemes` (in `cmd/dart` and `providers/k8s/cmd/dart-k8s`) | each binary wires exactly its intended scheme set |

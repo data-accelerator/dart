@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"io"
 	"strings"
 	"testing"
 
@@ -131,7 +132,7 @@ func TestBuildKeepsSeederForLifecycle(t *testing.T) {
 		// advertisedAddr requires a listen host:port when -peer-advertise is unset.
 		peerListen: "127.0.0.1:0",
 		discover:   "watch:whatever",
-	})
+	}, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

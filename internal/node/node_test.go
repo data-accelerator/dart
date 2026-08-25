@@ -78,13 +78,13 @@ func TestNewHandlerValidation(t *testing.T) {
 	// invalid chunk config
 	bad := base
 	bad.chunkSize = 10 // not a multiple of 16
-	if _, err := build(bad); err == nil {
+	if _, err := build(bad, io.Discard); err == nil {
 		t.Error("expected invalid chunk config to fail")
 	}
 	// cache smaller than a block
 	bad = base
 	bad.cacheSize = 8
-	if _, err := build(bad); err == nil {
+	if _, err := build(bad, io.Discard); err == nil {
 		t.Error("expected cache-size < block-size to fail")
 	}
 }
@@ -102,7 +102,7 @@ func TestEndToEndPrefix(t *testing.T) {
 		cacheDir: t.TempDir(), cacheSize: 1 << 20,
 		chunkSize: 64, blockSize: 16, prefix: "dart",
 	}
-	n, err := build(cfg)
+	n, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 
 func TestNewHandlerBuildsForTmpDir(t *testing.T) {
 	cfg := config{cacheDir: filepath.Join(t.TempDir(), "sub"), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16, prefix: "dart"}
-	n, err := build(cfg)
+	n, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -190,12 +190,12 @@ func TestParsePeers(t *testing.T) {
 // first one's cache.
 func TestBuildRejectsSharedCacheDir(t *testing.T) {
 	cfg := config{cacheDir: t.TempDir(), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16, prefix: "dart"}
-	n1, err := build(cfg)
+	n1, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("first build: %v", err)
 	}
 
-	if _, err := build(cfg); err == nil {
+	if _, err := build(cfg, io.Discard); err == nil {
 		n1.closer.Close()
 		t.Fatal("second build on the same cache dir succeeded")
 	} else if !strings.Contains(err.Error(), "already in use") {
@@ -206,7 +206,7 @@ func TestBuildRejectsSharedCacheDir(t *testing.T) {
 	if err := n1.closer.Close(); err != nil {
 		t.Fatalf("close first: %v", err)
 	}
-	n2, err := build(cfg)
+	n2, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build after release: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestBuildRegistryMirror(t *testing.T) {
 		cacheDir: t.TempDir(), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16,
 		prefix: "dart", registry: upstream.URL,
 	}
-	n, err := build(cfg)
+	n, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -255,12 +255,12 @@ func TestBuildRegistryMirror(t *testing.T) {
 	bad := cfg
 	bad.cacheDir = t.TempDir()
 	bad.registry = "ftp://not-http"
-	if _, err := build(bad); err == nil {
+	if _, err := build(bad, io.Discard); err == nil {
 		t.Fatal("expected an invalid -registry to fail the build")
 	}
 	retry := bad
 	retry.registry = upstream.URL
-	n2, err := build(retry)
+	n2, err := build(retry, io.Discard)
 	if err != nil {
 		t.Fatalf("build after a failed attempt: %v (lock leaked?)", err)
 	}
@@ -290,7 +290,7 @@ func TestBothFrontEndsShareOneCache(t *testing.T) {
 		cacheDir: t.TempDir(), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16,
 		prefix: "dart", registry: upstream.URL,
 	}
-	n, err := build(cfg)
+	n, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestBuildRegistryAuth(t *testing.T) {
 		cacheDir: t.TempDir(), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16,
 		prefix: "dart", registry: upstream.URL, registryAuth: credFile,
 	}
-	n, err := build(cfg)
+	n, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -425,13 +425,13 @@ func TestBuildRegistryAuth(t *testing.T) {
 		badCfg := cfg
 		badCfg.cacheDir = t.TempDir()
 		badCfg.registryAuth = bad
-		if _, err := build(badCfg); err == nil {
+		if _, err := build(badCfg, io.Discard); err == nil {
 			t.Errorf("credential file %q should have failed the build", bad)
 			continue
 		}
 		fixed := badCfg
 		fixed.registryAuth = credFile
-		n2, err := build(fixed)
+		n2, err := build(fixed, io.Discard)
 		if err != nil {
 			t.Errorf("retry after a bad credential file: %v (lock leaked?)", err)
 			continue
@@ -453,7 +453,7 @@ func TestBuildP2PWiring(t *testing.T) {
 	base := config{cacheDir: t.TempDir(), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16, prefix: "dart"}
 
 	// Without -peers: single node, no peer handler.
-	n1, err := build(base)
+	n1, err := build(base, io.Discard)
 	if err != nil {
 		t.Fatalf("build single-node: %v", err)
 	}
@@ -466,13 +466,13 @@ func TestBuildP2PWiring(t *testing.T) {
 	p2p := base
 	p2p.cacheDir = t.TempDir()
 	p2p.peers = "A@127.0.0.1:9001,B@127.0.0.1:9002"
-	if _, err := build(p2p); err == nil {
+	if _, err := build(p2p, io.Discard); err == nil {
 		t.Error("expected error: -peers without -self-id")
 	}
 
 	// With -peers and -self-id: peer handler present.
 	p2p.selfID = "A"
-	n2, err := build(p2p)
+	n2, err := build(p2p, io.Discard)
 	if err != nil {
 		t.Fatalf("build p2p: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestBuildP2PWiring(t *testing.T) {
 // engine's metrics; empty disables it.
 func TestBuildAdmin(t *testing.T) {
 	cfg := config{cacheDir: t.TempDir(), cacheSize: 1 << 20, chunkSize: 64, blockSize: 16, prefix: "dart", adminAddr: ":0"}
-	n, err := build(cfg)
+	n, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestBuildAdmin(t *testing.T) {
 
 	cfg.adminAddr = ""
 	cfg.cacheDir = t.TempDir()
-	n2, err := build(cfg)
+	n2, err := build(cfg, io.Discard)
 	if err != nil {
 		t.Fatalf("build no-admin: %v", err)
 	}

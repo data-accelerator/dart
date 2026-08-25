@@ -184,7 +184,7 @@ func TestDiscoverAndPeersAreExclusive(t *testing.T) {
 		selfID: "a", peerListen: "127.0.0.1:0",
 		peers:    "a@127.0.0.1:1",
 		discover: "static:127.0.0.1:2",
-	})
+	}, io.Discard)
 	if err == nil {
 		t.Fatal("expected an error when both -peers and -discover are set")
 	}
@@ -201,7 +201,7 @@ func TestDiscoverRequiresSelfID(t *testing.T) {
 		listen: "127.0.0.1:0", prefix: "dart", cacheDir: dir,
 		cacheSize: 64 << 20, blockSize: 1 << 20, chunkSize: 8 << 20,
 		peerListen: "127.0.0.1:0", discover: "static:127.0.0.1:2",
-	})
+	}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "self-id") {
 		t.Errorf("error = %v, want a complaint about -self-id", err)
 	}
@@ -218,7 +218,7 @@ func TestRosterServedOnPeerListener(t *testing.T) {
 		peerAdvertise: "10.0.0.1:9000",
 		discover:      "static:127.0.0.1:65535",
 		adminAddr:     "",
-	})
+	}, io.Discard)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
