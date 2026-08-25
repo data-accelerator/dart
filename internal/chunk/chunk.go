@@ -195,7 +195,7 @@ func ObjectIDLayout(rawURL string, layout DigestLayout) (id string, contentAddre
 	if err == nil {
 		segs := strings.Split(u.Path, "/")
 		for _, seg := range segs {
-			if isDigest(seg) {
+			if IsDigest(seg) {
 				return strings.ToLower(seg), true
 			}
 		}
@@ -218,7 +218,7 @@ func ObjectIDLayout(rawURL string, layout DigestLayout) (id string, contentAddre
 		raw = raw[:i]
 	}
 	for _, seg := range strings.Split(raw, "/") {
-		if isDigest(seg) {
+		if IsDigest(seg) {
 			return strings.ToLower(seg), true
 		}
 	}
@@ -306,7 +306,11 @@ func isHex(s string) bool {
 
 // isDigest reports whether s looks like "<algo>:<hex>" with at least 32 hex
 // digits (covers sha256 = 64, sha512 = 128).
-func isDigest(s string) bool {
+// IsDigest reports whether s is a recognizable content digest
+// "<algorithm>:<hex>" (lowercase alnum algorithm, >= 32 hex chars). It is the
+// shared recognizer used by ObjectIDLayout and by the registry mirror, which
+// must classify cacheable paths exactly as content-addressed ones.
+func IsDigest(s string) bool {
 	i := strings.IndexByte(s, ':')
 	if i <= 0 || i == len(s)-1 {
 		return false

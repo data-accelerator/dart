@@ -41,6 +41,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+
+	"github.com/data-accelerator/dart/internal/chunk"
 	"net/url"
 	"strings"
 
@@ -100,7 +102,11 @@ func New(opt Options) (*Mirror, error) {
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = up.Scheme
 			pr.Out.URL.Host = up.Host
+			// Preserve the client's exact encoding: URL.Path is decoded, and a
+			// decoded '?' or '#' would corrupt the outgoing request (a %3F in a
+			// repository name must reach the upstream as %3F).
 			pr.Out.URL.Path = up.Path + pr.In.URL.Path
+			pr.Out.URL.RawPath = up.Path + pr.In.URL.EscapedPath()
 			// Registries route on Host and TLS needs the right SNI, so the
 			// outgoing Host must be the upstream's, not the mirror's.
 			pr.Out.Host = up.Host
@@ -113,20 +119,26 @@ func New(opt Options) (*Mirror, error) {
 	return m, nil
 }
 
-// upstreamURL builds the upstream URL for a request path.
-func (m *Mirror) upstreamURL(path string) string {
-	return m.upstream.Scheme + "://" + m.upstream.Host + m.upstream.Path + path
+// upstreamURL builds the upstream URL for a request, preserving the client's
+// path encoding: r.URL.Path is decoded, so concatenating it raw would let a
+// decoded '?'/'#' (from a %3F/%23 in a repository name) corrupt the URL — the
+// fetch identity and the upstream request must be the same URL.
+func (m *Mirror) upstreamURL(r *http.Request) string {
+	u := &url.URL{
+		Scheme:  m.upstream.Scheme,
+		Host:    m.upstream.Host,
+		Path:    m.upstream.Path + r.URL.Path,
+		RawPath: m.upstream.Path + r.URL.EscapedPath(),
+	}
+	return u.String()
 }
 
 // resolveBlob maps a blob request to its upstream URL for the engine.
 func (m *Mirror) resolveBlob(r *http.Request) (string, error) {
-	// Use RequestURI's path rather than a cleaned path so the digest reaches the
-	// upstream exactly as the client wrote it.
-	path := r.URL.Path
-	if _, ok := BlobDigest(path); !ok {
-		return "", fmt.Errorf("registry: %q is not a blob path", path)
+	if _, ok := BlobDigest(r.URL.Path); !ok {
+		return "", fmt.Errorf("registry: %q is not a blob path", r.URL.Path)
 	}
-	return m.upstreamURL(path), nil
+	return m.upstreamURL(r), nil
 }
 
 // ServeHTTP implements http.Handler.
@@ -144,8 +156,7 @@ func (m *Mirror) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if digest, ok := BlobDigest(r.URL.Path); ok {
 		// Immutable, digest-addressed: serve from cache. Echo the digest the
-		// client asked for so containerd can verify without re-reading the body,
-		// and mark the response cacheable-forever for the same reason.
+		// client asked for so containerd can verify without re-reading the body.
 		w.Header().Set("Docker-Content-Digest", digest)
 		w.Header().Set("Content-Type", "application/octet-stream")
 		m.blobs.ServeHTTP(w, r)
@@ -182,44 +193,12 @@ func BlobDigest(path string) (string, bool) {
 	return digest, true
 }
 
-// validDigest reports whether s is an OCI content digest "<algorithm>:<hex>".
-//
-// This is what separates cacheable from non-cacheable, so it rejects anything it
-// does not fully understand: a further path segment (an upload URL), an empty
-// half, or characters outside the OCI grammar.
+// validDigest reports whether s is a recognizable content digest
+// "<algorithm>:<hex>". It is exactly chunk.IsDigest: the cacheability
+// classification must agree with the identity derivation (chunk.ObjectID), or a
+// path would be marked cacheable without being content-addressed — a mutable
+// path cached forever. This rejects anything it does not fully understand: a
+// further path segment (an upload URL), an empty half, an unknown shape.
 func validDigest(s string) bool {
-	algo, hex, ok := strings.Cut(s, ":")
-	if !ok || algo == "" || hex == "" || strings.Contains(hex, "/") {
-		return false
-	}
-	// algorithm: [a-z0-9]+ with optional [.+_-] separators
-	prevSep := true // a separator may not lead
-	for i := 0; i < len(algo); i++ {
-		c := algo[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-			prevSep = false
-		case c == '.' || c == '+' || c == '_' || c == '-':
-			if prevSep {
-				return false
-			}
-			prevSep = true
-		default:
-			return false
-		}
-	}
-	if prevSep {
-		return false // a separator may not trail
-	}
-	// encoded: [a-zA-Z0-9=_-]+
-	for i := 0; i < len(hex); i++ {
-		c := hex[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
-			c == '=' || c == '_' || c == '-':
-		default:
-			return false
-		}
-	}
-	return true
+	return chunk.IsDigest(s)
 }

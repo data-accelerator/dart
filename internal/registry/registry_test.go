@@ -130,12 +130,19 @@ func get(t *testing.T, h http.Handler, path string, hdr http.Header) (*http.Resp
 // --- digest / path classification ---
 
 func TestBlobDigestClassification(t *testing.T) {
-	const d = "sha256:" + "ab12cd34" // shape only; validDigest does not check length
+	// validDigest is chunk.IsDigest: lowercase alnum algorithm + >= 32 hex —
+	// the same recognizer chunk.ObjectID uses, so cacheable == content-addressed.
+	const d = "sha256:" + "ab12cd34" + "ef56ab78" + "90cd12ef" + "34ab56cd" // 32 hex
 	cacheable := []string{
 		"/v2/library/nginx/blobs/" + d,
 		"/v2/deep/nested/name/blobs/" + d,
-		"/v2/n/blobs/sha512:AAbb99__--==",
-		"/v2/n/blobs/multihash.sha2+256:abc",
+	}
+	rejectedShapes := []string{
+		"/v2/n/blobs/sha256:ab12cd34",              // too short to be a digest
+		"/v2/n/blobs/sha512:AAbb99__--==",          // not hex
+		"/v2/n/blobs/multihash.sha2+256:abc",       // unrecognized algorithm shape
+		"/v2/n/blobs/sha256:latest",                // a mutable tag, not a digest
+		"/v2/n/blobs/SHA256:" + d[len("sha256:"):], // uppercase algorithm
 	}
 	for _, p := range cacheable {
 		if got, ok := BlobDigest(p); !ok {
@@ -145,24 +152,24 @@ func TestBlobDigestClassification(t *testing.T) {
 		}
 	}
 
-	notCacheable := []string{
-		"/v2/library/nginx/manifests/latest",               // mutable tag
-		"/v2/library/nginx/manifests/" + d,                 // manifests are never cached
-		"/v2/library/nginx/blobs/uploads/some-uuid",        // push session
-		"/v2/library/nginx/blobs/uploads/uuid?digest=" + d, // push completion
-		"/v2/library/nginx/blobs/",                         // empty digest
-		"/v2/library/nginx/blobs/notadigest",               // no algorithm separator
-		"/v2/library/nginx/blobs/:abc",                     // empty algorithm
-		"/v2/library/nginx/blobs/sha256:",                  // empty encoding
-		"/v2/library/nginx/blobs/sha256:ab/cd",             // extra path segment
-		"/v2/library/nginx/blobs/SHA256:abc",               // algorithm must be lowercase
-		"/v2/library/nginx/blobs/-sha256:abc",              // leading separator
-		"/v2/library/nginx/blobs/sha256-:abc",              // trailing separator
-		"/v2/blobs/" + d,                                   // empty name
-		"/v2/",                                             // ping
-		"/v1/library/nginx/blobs/" + d,                     // wrong API version
-		"/blobs/" + d,                                      // not under /v2/
-	}
+	notCacheable := append(rejectedShapes,
+		"/v2/library/nginx/manifests/latest",             // mutable tag
+		"/v2/library/nginx/manifests/"+d,                 // manifests are never cached
+		"/v2/library/nginx/blobs/uploads/some-uuid",      // push session
+		"/v2/library/nginx/blobs/uploads/uuid?digest="+d, // push completion
+		"/v2/library/nginx/blobs/",                       // empty digest
+		"/v2/library/nginx/blobs/notadigest",             // no algorithm separator
+		"/v2/library/nginx/blobs/:abc",                   // empty algorithm
+		"/v2/library/nginx/blobs/sha256:",                // empty encoding
+		"/v2/library/nginx/blobs/sha256:ab/cd",           // extra path segment
+		"/v2/library/nginx/blobs/SHA256:abc",             // algorithm must be lowercase
+		"/v2/library/nginx/blobs/-sha256:abc",            // leading separator
+		"/v2/library/nginx/blobs/sha256-:abc",            // trailing separator
+		"/v2/blobs/"+d,                                   // empty name
+		"/v2/",                                           // ping
+		"/v1/library/nginx/blobs/"+d,                     // wrong API version
+		"/blobs/"+d,                                      // not under /v2/
+	)
 	for _, p := range notCacheable {
 		if got, ok := BlobDigest(p); ok {
 			t.Errorf("BlobDigest(%q) = %q (cacheable), want not-a-blob", p, got)
