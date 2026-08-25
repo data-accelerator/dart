@@ -32,6 +32,14 @@ registers `k8s.Scheme` with `node.Run`, enabling
 port name or number; absent, the port named `peer` is used (matching
 `deploy/k8s/daemonset.yaml`, which names its peer Service port `peer`).
 
+`dart-k8s` adds no flags of its own; the full set is in
+[dart.md](./dart.md). Two are load-bearing here: `-self-id` (the node's
+cluster identity — placement keys derive from it, so it must be stable and
+cluster-unique; the DaemonSet wires it from the node name via the downward
+API) and
+`-peer-advertise` (peers dial this; `DART_ADVERTISE_HOST`/`POD_IP` resolve a
+wildcard listen host, in that order).
+
 ## 2. Concepts
 
 | Term | Meaning |
@@ -62,9 +70,10 @@ func (s *Seeder) Seeds(ctx context.Context) ([]string, error)
 
 ## 4. Invariants & Guarantees
 
-- **Read-only, namespaced privilege**: the informer needs `get/list/watch` on
-  `endpointslices` in one namespace (see `deploy/k8s/rbac.yaml`); DART never
-  writes to the API.
+- **Read-only, namespaced privilege**: the informer needs only `list`/`watch`
+  on `endpointslices` in one namespace — a shared informer never issues
+  single-object `get`s (see `deploy/k8s/rbac.yaml`); DART never writes to the
+  API.
 - **Snapshots are sorted**, so `Seeds` output is deterministic regardless of
   informer store order.
 - **A slice without the selected port is skipped**, not an error — a rollout can
@@ -112,6 +121,13 @@ go test ./... -race -cover -count=1
 - The informer resyncs never (`resyncPeriod = 0`): watch events plus relist-on-
   reconnect are the update path; a silently missed event would persist. A slow
   periodic resync is a candidate hardening.
+- **A partitioned apiserver means frozen membership, served silently**: the
+  informer keeps reconnecting and `Seeds` serves the last-known snapshot
+  indefinitely — by design (membership loss is worse than staleness for a
+  read-only cache). There is no in-process staleness gauge: "time since last
+  event" cannot distinguish a quiet cluster from a broken watch, and watch
+  errors stay inside client-go's retry loop. Detect an apiserver partition via
+  cluster-side signals (apiserver latency, other controllers), not via DART.
 - Weights are not read from Kubernetes metadata (all members self-report weight
   1); if heterogeneous capacities become real, pod annotations are the natural
   source, plus hysteresis at the provider level (see cluster.md §8).
