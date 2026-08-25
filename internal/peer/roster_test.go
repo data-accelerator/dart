@@ -181,9 +181,14 @@ func TestRosterServerNamesItself(t *testing.T) {
 	defer done()
 
 	c := NewClient()
-	got, _, err := c.FetchRoster(context.Background(), addr, "", "")
+	got, responder, err := c.FetchRoster(context.Background(), addr, "", "")
 	if err != nil {
 		t.Fatalf("FetchRoster: %v", err)
+	}
+	// The responder's self-reported ID must ride along: liveness is credited to
+	// it (issue #2), so dropping it silently would break dynamic convergence.
+	if responder != "node-b" {
+		t.Errorf("responder = %q, want the server's NodeID %q", responder, "node-b")
 	}
 	var found bool
 	for _, m := range got.Members {

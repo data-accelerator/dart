@@ -220,7 +220,7 @@ type RosterServer struct { NodeID string; Src func() Roster; Learn func(id, addr
 func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, string, error)
 ```
 
-Membership rides the peer listener. Four properties are deliberate:
+Membership rides the peer listener. Five properties are deliberate:
 
 - **`Members` always includes the sender.** That entry is why a caller holding only
   an address makes the request: DNS and other seeds hand out addresses, never

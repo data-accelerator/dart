@@ -104,9 +104,14 @@ func TestRosterFetcherAdapter(t *testing.T) {
 	defer srv.Close()
 
 	f := &rosterFetcher{c: peer.NewClient(), selfID: "node-a", selfAddr: "10.0.0.1:9000"}
-	ms, _, err := f.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"))
+	ms, responder, err := f.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"))
 	if err != nil {
 		t.Fatalf("FetchRoster: %v", err)
+	}
+	// The responder ID must pass through: DynamicProvider credits liveness to
+	// it (issue #2); an adapter that dropped it would silently stall convergence.
+	if responder != "node-b" {
+		t.Errorf("responder = %q, want %q", responder, "node-b")
 	}
 
 	byID := map[string]cluster.Member{}
