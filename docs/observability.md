@@ -56,7 +56,7 @@ and safe for concurrent use, since it runs on the scrape path.
 | `dart_block_source_total` | counter | `source=cache\|peer\|origin` | blocks served, by where they came from |
 | `dart_bytes_total` | counter | `direction=client\|peer_in\|origin_in` | bytes written to clients / pulled from peers / pulled from origin |
 | `dart_relay_total` | counter | `result=served\|declined` | relay requests handled for peers |
-| `dart_block_fetch_seconds` | histogram | `source=peer\|origin` | block fetch latency |
+| `dart_block_fetch_seconds` | histogram | `source=peer\|origin` | block-path fetch latency: cache fills and peer reads only — Size probes and the uncached passthrough path are **not** observed here (`dart_passthrough_total` counts the latter). A coalesced fetch still observes its latency (the caller genuinely waited) even though its bytes are not double-counted in `dart_bytes_total` |
 | `dart_hedge_total` | counter | `event=fired\|primary_won\|backup_won` | tail-latency hedges: duplicates launched, and which contender served the block |
 | `dart_peer_failover_total` | counter | — | definite peer failures escalated to the next ancestor (not rate limited, unlike hedges) |
 | `dart_passthrough_total` | counter | `reason=range_unsupported` | requests proxied verbatim to origin, bypassing cache and P2P (Range-ignoring origin; see docs/engine.md §3.9) |
