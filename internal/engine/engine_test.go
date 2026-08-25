@@ -228,3 +228,39 @@ func TestNewValidation(t *testing.T) {
 		t.Error("expected nil fetcher to fail")
 	}
 }
+
+// TestSizeHiddenTotalIsProbeFailure pins issue #3: a 206 that hides the total
+// ("Content-Range: bytes 0-0/*") must fail the probe loudly instead of caching
+// a fabricated size (previously size=1 from len(probe body)). A fabricated
+// size poisons every later read of the object — full GETs would silently
+// serve one byte, larger ranges 416 — and the sizes cache is write-once for
+// the process lifetime.
+func TestSizeHiddenTotalIsProbeFailure(t *testing.T) {
+	content := blob(64)
+	var cnt int64
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&cnt, 1)
+		w.Header().Set("Content-Range", "bytes 0-0/*")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(content[:1])
+	}))
+	defer origin.Close()
+
+	e := newEngine(t, testCfg())
+	if _, err := e.Size(context.Background(), origin.URL); err == nil {
+		t.Fatal("Size succeeded on a 206 without a total; want a loud probe failure")
+	}
+	// Nothing cached: a second probe reaches origin again (a fixed origin
+	// recovers without a restart)...
+	if _, err := e.Size(context.Background(), origin.URL); err == nil {
+		t.Fatal("second Size succeeded; the failure must not be cached either")
+	}
+	if got := atomic.LoadInt64(&cnt); got != 2 {
+		t.Fatalf("origin probes = %d, want 2 (nothing cached)", got)
+	}
+	// ...and a plain GET errors instead of silently serving a 1-byte body.
+	var buf bytes.Buffer
+	if err := e.Serve(context.Background(), &buf, origin.URL, 0, 63); err == nil {
+		t.Fatalf("Serve wrote %d bytes with no error; want the probe failure", buf.Len())
+	}
+}

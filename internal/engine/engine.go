@@ -181,6 +181,13 @@ func New(opt Options) (*Engine, error) {
 // reads the total from the response (Content-Range, or Content-Length if the
 // origin ignores Range). A probe that reveals a Range-ignoring origin also
 // marks the object for passthrough (see RangeUnsupported).
+//
+// A 206 response that hides the total (`Content-Range: bytes 0-0/*`) is a
+// probe failure, not a size: block geometry is impossible without the total,
+// and caching a fabricated one would poison every later read of the object —
+// the cache is write-once and process-lifetime (see §3.3 of docs/engine.md).
+// Size therefore returns an error and caches nothing, so a corrected origin
+// recovers without a restart.
 func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	oid, _ := chunk.ObjectID(url)
 	e.mu.Lock()
@@ -197,14 +204,16 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	sz := r.Total
-	if sz < 0 {
-		sz = int64(len(r.Data)) // origin did not reveal a total
+	if r.Total < 0 && !r.RangeIgnored {
+		return 0, fmt.Errorf("engine: origin %s answered 206 without revealing the object size", fetch.Redact(url))
 	}
 	e.mu.Lock()
-	e.sizes[oid] = sizeMeta{size: sz, noRange: r.RangeIgnored}
+	// For a Range-ignoring origin the total may legitimately stay unknown (-1
+	// on a chunked 200); it is never fabricated — the object is proxied
+	// verbatim via ServePassthrough, which needs no size.
+	e.sizes[oid] = sizeMeta{size: r.Total, noRange: r.RangeIgnored}
 	e.mu.Unlock()
-	return sz, nil
+	return r.Total, nil
 }
 
 // RangeUnsupported reports whether the origin serving url is known to ignore
