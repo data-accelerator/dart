@@ -88,6 +88,11 @@ type Tiered struct {
 
 	sk *sketch
 
+	// admitMu serializes the borrowed admission decision with the evicting
+	// Put: deciding in one critical section and inserting in another lets a
+	// race admit candidates that were never compared against the victim
+	// (TinyLFU TOCTOU).
+	admitMu  sync.Mutex
 	mu       sync.Mutex
 	rejected uint64
 }
@@ -134,24 +139,34 @@ func OpenTiered(opt TieredOptions) (*Tiered, error) {
 // keyHash derives the sketch hash for a block key.
 func keyHash(k BlockKey) uint64 { return fmix64(k.Chunk ^ (k.Block * 0x9e3779b97f4a7c15)) }
 
-// Get returns the block from either budget, recording the access for admission
-// accounting. Owned is checked first: it is the authoritative copy.
+// Get returns the block from either budget. Owned is checked first: it is the
+// authoritative copy. Only traffic the admission policy governs feeds the
+// estimator — borrowed hits and misses. Owned hits are excluded: owned blocks
+// are never evicted via the sketch, and counting them would drive the halving
+// cadence (sized for the borrowed budget) far too fast, decaying warm borrowed
+// estimates to zero where a one-shot could evict them.
 func (t *Tiered) Get(k BlockKey) ([]byte, bool, error) {
-	t.sk.Increment(keyHash(k))
 	if data, ok, err := t.owned.Get(k); err != nil || ok {
 		return data, ok, err
 	}
+	t.sk.Increment(keyHash(k))
 	return t.borrowed.Get(k)
 }
 
-// GetReader streams the block from either budget.
+// GetReader streams the block from either budget, with the same estimator
+// scoping as Get.
 func (t *Tiered) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
-	t.sk.Increment(keyHash(k))
 	if r, n, ok, err := t.owned.GetReader(k); err != nil || ok {
 		return r, n, ok, err
 	}
+	t.sk.Increment(keyHash(k))
 	return t.borrowed.GetReader(k)
 }
+
+// Touch records an access to k in the admission estimator without reading the
+// block: used by wrappers (Hybrid) whose fast tier answers the read but must
+// not let the key's borrowed-budget estimate decay while it does.
+func (t *Tiered) Touch(k BlockKey) { t.sk.Increment(keyHash(k)) }
 
 // Put inserts the block into the borrowed budget (the conservative default for
 // callers that do not know the class). An admission rejection is not an error.
@@ -171,19 +186,34 @@ func (t *Tiered) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
 		if err := t.owned.Put(k, data); err != nil {
 			return false, err
 		}
+		// A block lives in exactly one budget: promoting to owned drops the
+		// borrowed copy, or Len/Stats would double-count and the authoritative
+		// block would stay evictable.
+		t.borrowed.Delete(k)
 		return true, nil
 	}
 
-	// Already cached (either budget): nothing to admit, just refresh recency.
+	// Already owned: nothing to admit, but still refresh recency as promised —
+	// the copy stays put (owned is authoritative; a borrowed copy must not
+	// shadow it).
 	if t.owned.Has(k) {
-		return true, nil
+		return true, t.owned.Put(k, data)
 	}
 	if t.borrowed.Has(k) {
 		return true, t.borrowed.Put(k, data)
 	}
 
+	// Insertion is itself an access: feed the estimator so a write-only
+	// pattern does not leave every estimate at 0 (where admission degenerates
+	// to always-admit).
+	t.sk.Increment(keyHash(k))
+
 	// Below capacity: admit freely. At capacity: only admit a candidate that is
-	// at least as popular as the block we would evict.
+	// at least as popular as the block we would evict. The decision and the
+	// evicting Put must be atomic: a preemption in between would admit a
+	// candidate that was never compared against the then-current victim.
+	t.admitMu.Lock()
+	defer t.admitMu.Unlock()
 	if t.borrowed.Len() >= t.borrowed.Slots() {
 		victim, ok := t.borrowed.evictionCandidate()
 		if ok && !t.sk.Admit(keyHash(k), keyHash(victim)) {

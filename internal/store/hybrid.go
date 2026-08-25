@@ -33,8 +33,23 @@ func NewHybrid(mem *MemStore, back ClassStore) *Hybrid {
 
 // Get returns the block, preferring memory and promoting a backing-store hit
 // into memory so subsequent reads avoid the disk.
+// toucher is implemented by backing stores with an admission estimator
+// (Tiered): a mem-tier hit must still feed it, or the key's estimate decays
+// while mem serves the reads — and a later demotion back to the borrowed
+// budget would face admission with a cold estimate.
+type toucher interface{ Touch(BlockKey) }
+
+func (h *Hybrid) touchBack(k BlockKey) {
+	if t, ok := h.back.(toucher); ok {
+		t.Touch(k)
+	}
+}
+
 func (h *Hybrid) Get(k BlockKey) ([]byte, bool, error) {
 	if data, ok, err := h.mem.Get(k); err != nil || ok {
+		if ok {
+			h.touchBack(k)
+		}
 		return data, ok, err
 	}
 	data, ok, err := h.back.Get(k)
@@ -53,6 +68,9 @@ func (h *Hybrid) Get(k BlockKey) ([]byte, bool, error) {
 // point of streaming. A block that is actually hot gets promoted via Get.
 func (h *Hybrid) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
 	if r, n, ok, err := h.mem.GetReader(k); err != nil || ok {
+		if ok {
+			h.touchBack(k)
+		}
 		return r, n, ok, err
 	}
 	return h.back.GetReader(k)
