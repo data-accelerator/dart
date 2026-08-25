@@ -19,7 +19,8 @@ import (
 // stays valid (the local multi-node rig runs several nodes on one host).
 func TestWildcardAdvertiseRejected(t *testing.T) {
 	for _, bad := range []string{"0.0.0.0:9000", ":9000", "[::]:9000", "::1:9000",
-		"0:0:0:0:0:0:0:0:9000", "[0::0]:9000"} { // IPv6 unspecified, long forms
+		"0:0:0:0:0:0:0:0:9000", "[0::0]:9000", // IPv6 unspecified, long forms
+		"[::%eth0]:9000"} { // zoned unspecified
 		if _, err := advertisedAddr(bad, "127.0.0.1:9001"); err == nil {
 			t.Errorf("advertisedAddr(%q) accepted, want a wildcard rejection", bad)
 		}

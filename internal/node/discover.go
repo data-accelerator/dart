@@ -112,6 +112,11 @@ func isWildcardHost(h string) bool {
 	// spellings ("::", "[::]", "0:0:0:0:0:0:0:0", "[0::0]", ...) and every one
 	// of them advertised to a peer means "dial yourself".
 	h = strings.TrimPrefix(strings.TrimSuffix(h, "]"), "[")
+	// A zone suffix ("::%eth0") is not parseable by net.ParseIP but the address
+	// is still the unspecified one.
+	if i := strings.IndexByte(h, '%'); i >= 0 {
+		h = h[:i]
+	}
 	if ip := net.ParseIP(h); ip != nil {
 		return ip.IsUnspecified()
 	}

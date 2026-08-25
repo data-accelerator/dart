@@ -146,18 +146,39 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	}
 	defer n.closer.Close()
 
-	servers := []*http.Server{{
-		Addr: cfg.listen, Handler: n.client, ReadHeaderTimeout: 15 * time.Second,
-	}}
-	if n.peer != nil {
-		servers = append(servers, &http.Server{
-			Addr: cfg.peerListen, Handler: n.peer, ReadHeaderTimeout: 15 * time.Second,
+	// Per-server in-flight handler tracking: a timed-out graceful drain
+	// force-closes connections, but Close does not join the handler goroutines
+	// — and the deferred closer is about to close the store under them.
+	// shutdownAll waits (briefly, bounded) for that server's tracker to empty
+	// before returning. Per-server (not shared): a shared WaitGroup would race
+	// Add-during-Wait while a sibling server still accepts connections.
+	type tracked struct {
+		srv *http.Server
+		wg  *sync.WaitGroup
+	}
+	track := func(h http.Handler) (*sync.WaitGroup, http.Handler) {
+		wg := &sync.WaitGroup{}
+		return wg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wg.Add(1)
+			defer wg.Done()
+			h.ServeHTTP(w, r)
 		})
 	}
-	if n.admin != nil {
-		servers = append(servers, &http.Server{
-			Addr: cfg.adminAddr, Handler: n.admin, ReadHeaderTimeout: 15 * time.Second,
+
+	var servers []tracked
+	add := func(addr string, h http.Handler) {
+		wg, th := track(h)
+		servers = append(servers, tracked{
+			srv: &http.Server{Addr: addr, Handler: th, ReadHeaderTimeout: 15 * time.Second},
+			wg:  wg,
 		})
+	}
+	add(cfg.listen, n.client)
+	if n.peer != nil {
+		add(cfg.peerListen, n.peer)
+	}
+	if n.admin != nil {
+		add(cfg.adminAddr, n.admin)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -174,12 +195,12 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	}
 
 	errCh := make(chan error, len(servers))
-	for _, s := range servers {
+	for _, tr := range servers {
 		go func(s *http.Server) {
 			if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				errCh <- err
 			}
-		}(s)
+		}(tr.srv)
 	}
 
 	// The registry mirror does not replace the other front end: both are dispatched
@@ -215,21 +236,30 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 		// precisely the relay connections a draining node should close cleanly.
 		var wg sync.WaitGroup
 		errs := make(chan error, len(servers))
-		for _, s := range servers {
+		for _, tr := range servers {
 			wg.Add(1)
-			go func(s *http.Server) {
+			go func(tr tracked) {
 				defer wg.Done()
 				shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				err := s.Shutdown(shutCtx)
+				err := tr.srv.Shutdown(shutCtx)
 				if err != nil {
 					// The drain deadline expired with handlers still running
 					// (they may be touching the store the deferred closer is
-					// about to close) — force-close so nothing outlives it.
-					s.Close()
+					// about to close): force-close the connections, then give
+					// the abandoned handlers a short bounded grace to unwind
+					// before Run returns and the store closes under them.
+					// Close does not join handler goroutines, hence the wait.
+					tr.srv.Close()
+					done := make(chan struct{})
+					go func() { tr.wg.Wait(); close(done) }()
+					select {
+					case <-done:
+					case <-time.After(2 * time.Second):
+					}
 				}
 				errs <- err
-			}(s)
+			}(tr)
 		}
 		wg.Wait()
 		close(errs)
