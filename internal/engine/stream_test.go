@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -127,5 +128,124 @@ func TestStreamRelayChainThroughEngines(t *testing.T) {
 		if !stores[n.ID].Has(key) {
 			t.Errorf("rank %d node %s missing block after streaming relay chain", i, n.ID)
 		}
+	}
+}
+
+// TestStreamRelayRejectsWrongLengthBlock pins issue #1: a cut-through relay
+// must validate the streamed length against the object geometry before
+// caching. Relay responses carry no Content-Length, so a short clean chunked
+// EOF is indistinguishable from success at the transport; caching such a block
+// would poison the write-once cache permanently and propagate downstream. The
+// relayed bytes are still served on (the leaf's own geometry check protects
+// clients), but a wrongly-sized block must never enter the cache.
+func TestStreamRelayRejectsWrongLengthBlock(t *testing.T) {
+	content := blob(16) // exactly one block
+	var originCnt int64
+	origin := countingOrigin(t, content, &originCnt)
+
+	// Broken upstream: short-writes half a block on a chunked response (never
+	// calls sizer) and reports success — the StreamSource contract's letter
+	// permits it ("write exactly n bytes when returning n").
+	short := peer.StreamSource(func(_ context.Context, req peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+		n, err := w.Write(content[:8])
+		return int64(n), true, err
+	})
+	rootSrv := httptest.NewServer(&peer.StreamServer{NodeID: "A", Src: short})
+	defer rootSrv.Close()
+	rootAddr := strings.TrimPrefix(rootSrv.URL, "http://")
+
+	// Middle node B: real engine whose only cluster member is A, so A is
+	// deterministically B's upstream (B is not a member; the owner is).
+	st := openStoreAt(t)
+	prov := cluster.NewStaticProvider(
+		cluster.Member{ID: "A", Addr: rootAddr, Weight: 1, State: cluster.Ready},
+	)
+	e, err := New(Options{
+		Chunk: testCfg(), Store: st, Fetcher: newFetcher(),
+		Cluster: prov, Peer: peer.NewClient(), SelfID: "B", Fanout: 1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(&peer.StreamServer{NodeID: "B", Src: e.PeerStreamSource()})
+	defer srv.Close()
+
+	key := blockKeyFor(origin.URL)
+	var buf bytes.Buffer
+	n, held, err := peer.NewClient().Stream(context.Background(), strings.TrimPrefix(srv.URL, "http://"),
+		peer.BlockRequest{Key: key, URL: origin.URL}, &buf)
+	if err != nil || !held {
+		t.Fatalf("Stream held=%v err=%v", held, err)
+	}
+	if n != 8 {
+		t.Fatalf("downstream received %d bytes, want the 8 the broken parent sent (served on)", n)
+	}
+	if st.Has(key) {
+		t.Error("wrongly-sized relayed block was cached (issue #1)")
+	}
+
+	// A correct relay of the same block is cached: sanity that the geometry
+	// check admits exactly the expected length.
+	full := peer.StreamSource(func(_ context.Context, req peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+		sizer(int64(len(content)))
+		n, err := w.Write(content)
+		return int64(n), true, err
+	})
+	fullSrv := httptest.NewServer(&peer.StreamServer{NodeID: "A", Src: full})
+	defer fullSrv.Close()
+	prov.Set([]cluster.Member{
+		{ID: "A", Addr: strings.TrimPrefix(fullSrv.URL, "http://"), Weight: 1, State: cluster.Ready},
+	})
+
+	buf.Reset()
+	n, held, err = peer.NewClient().Stream(context.Background(), strings.TrimPrefix(srv.URL, "http://"),
+		peer.BlockRequest{Key: key, URL: origin.URL}, &buf)
+	if err != nil || !held || n != 16 {
+		t.Fatalf("correct relay: n=%d held=%v err=%v", n, held, err)
+	}
+	if got, ok, _ := st.Get(key); !ok || !bytes.Equal(got, content) {
+		t.Errorf("correct relay not cached: ok=%v len=%d", ok, len(got))
+	}
+}
+
+// TestStreamRelayDoesNotCacheWhenSizeUnresolved pins the companion guarantee
+// of issue #1: when the object size cannot be resolved, relayed bytes cannot
+// be validated and must not be cached (they are still served on).
+func TestStreamRelayDoesNotCacheWhenSizeUnresolved(t *testing.T) {
+	content := blob(16)
+	// Origin that never answers Size's probe successfully.
+	origin := httptest.NewServer(http.NotFoundHandler())
+	origin.Close() // connection refused
+
+	full := peer.StreamSource(func(_ context.Context, req peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+		sizer(int64(len(content)))
+		n, err := w.Write(content)
+		return int64(n), true, err
+	})
+	rootSrv := httptest.NewServer(&peer.StreamServer{NodeID: "A", Src: full})
+	defer rootSrv.Close()
+
+	st := openStoreAt(t)
+	prov := cluster.NewStaticProvider(
+		cluster.Member{ID: "A", Addr: strings.TrimPrefix(rootSrv.URL, "http://"), Weight: 1, State: cluster.Ready},
+	)
+	e, err := New(Options{
+		Chunk: testCfg(), Store: st, Fetcher: newFetcher(),
+		Cluster: prov, Peer: peer.NewClient(), SelfID: "B", Fanout: 1,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := httptest.NewServer(&peer.StreamServer{NodeID: "B", Src: e.PeerStreamSource()})
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	n, held, err := peer.NewClient().Stream(context.Background(), strings.TrimPrefix(srv.URL, "http://"),
+		peer.BlockRequest{Key: blockKeyFor(origin.URL), URL: origin.URL}, &buf)
+	if err != nil || !held || n != 16 {
+		t.Fatalf("Stream n=%d held=%v err=%v (bytes must still be served on)", n, held, err)
+	}
+	if st.Has(blockKeyFor(origin.URL)) {
+		t.Error("relayed block cached although its size could not be validated")
 	}
 }

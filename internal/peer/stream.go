@@ -113,8 +113,13 @@ func (s *StreamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case !held && !lw.started:
 		http.Error(w, "block not held", http.StatusNotFound)
 	case err != nil:
-		// Headers already sent; the truncated body signals the failure (the
-		// client detects it via Content-Length mismatch).
+		// Headers already sent; the truncated body signals the failure. When a
+		// size was reported the client detects the truncation via Content-Length
+		// mismatch; on a chunked response (no sizer call) an abrupt mid-body
+		// failure surfaces as unexpected EOF — but a *clean* chunked EOF is
+		// indistinguishable from success, so a cut-through relay must validate
+		// the streamed length against the object geometry itself (the engine's
+		// relay does; see engine.relayFromParent).
 		_ = n
 	}
 }
