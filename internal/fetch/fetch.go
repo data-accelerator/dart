@@ -203,6 +203,12 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 // the window, and let Body.Close abort the rest. The total is taken from
 // Content-Length (-1 when the response is chunked).
 func sliceIgnoredRange(resp *http.Response, url string, start, end int64) (Range, error) {
+	if resp.ContentLength == 0 && start == 0 {
+		// The window [0,0] of an empty object is the empty window, not an
+		// error — some origins answer the size probe this way instead of with
+		// a 416. Either response means "this object is empty".
+		return Range{Data: []byte{}, Total: 0, RangeIgnored: true}, nil
+	}
 	if resp.ContentLength >= 0 && start >= resp.ContentLength {
 		return Range{}, fmt.Errorf("fetch: %s: range start %d beyond size %d", Redact(url), start, resp.ContentLength)
 	}

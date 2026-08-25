@@ -46,6 +46,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if size == 0 && r.Header.Get("Range") == "" {
+		// A plain GET of an empty object is a valid empty 200, not a 416:
+		// RFC 7233 defines 416 only for Range requests, and "no Range means the
+		// whole object" — an empty whole.
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	start, end, isRange, ok := parseRange(r.Header.Get("Range"), size)
 	if !ok {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))

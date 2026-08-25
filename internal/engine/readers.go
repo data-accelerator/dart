@@ -9,16 +9,18 @@ import (
 	"github.com/data-accelerator/dart/internal/tracker"
 )
 
-// readerSetTTL is how long a locally cached reader set is trusted before the
-// engine re-JOINs the tracker. It is shorter than the tracker's lease so the
-// lease never lapses while this node is still reading.
+// readerSetTTL is the fallback cache period for a locally cached reader set,
+// used only when the tracker granted no lease duration. Normally the cache
+// period is half the granted lease (see readers), so renewal always lands
+// before the lease lapses.
 const readerSetTTL = 2 * time.Second
 
 // readerSet is a cached, frozen reader set for one file.
 type readerSet struct {
-	nodes    []string
-	epoch    uint64
-	cachedAt time.Time
+	nodes     []string
+	epoch     uint64
+	cachedAt  time.Time
+	expiresAt time.Time
 }
 
 // trackerAddr returns the address of the tracker responsible for fileKey: the
@@ -51,7 +53,7 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 	now := time.Now()
 
 	e.rsMu.Lock()
-	if rs, hit := e.rs[objectID]; hit && now.Sub(rs.cachedAt) < readerSetTTL {
+	if rs, hit := e.rs[objectID]; hit && now.Before(rs.expiresAt) {
 		nodes := rs.nodes
 		e.rsMu.Unlock()
 		return nodes
@@ -82,8 +84,27 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 		}
 	}
 
+	// Cache for half the granted lease, so the next re-Join lands well before
+	// our tracker lease lapses: a renewal period longer than the lease would
+	// silently drop this node from the frozen reader set while it is still
+	// reading. (readerSetTTL is only the fallback for a tracker that reported
+	// no grant.)
+	ttl := time.Duration(resp.TTLMs) * time.Millisecond / 2
+	if ttl <= 0 {
+		ttl = readerSetTTL
+	}
 	e.rsMu.Lock()
-	e.rs[objectID] = &readerSet{nodes: resp.Readers, epoch: resp.EpochS, cachedAt: now}
+	if len(e.rs) > 256 {
+		// Bound the cache: drop expired entries before growing past a few
+		// hundred objects. Live entries stay; the map tracks objects currently
+		// being read, which is naturally small.
+		for id, rs := range e.rs {
+			if now.After(rs.expiresAt) {
+				delete(e.rs, id)
+			}
+		}
+	}
+	e.rs[objectID] = &readerSet{nodes: resp.Readers, epoch: resp.EpochS, cachedAt: now, expiresAt: now.Add(ttl)}
 	e.rsMu.Unlock()
 	return resp.Readers
 }

@@ -30,6 +30,15 @@ parent is always another reader — see docs/tracker.md) and otherwise all Ready
 members. Without P2P configured the engine is single-node (every miss goes to
 origin).
 
+Reader-set lookups are **cached per object for half the granted tracker lease**
+(and the cache doubles as the lease renewal: a hit re-serves the frozen set, a
+miss re-JOINs, which refreshes this node's own lease). Caching for half the
+lease guarantees renewal always lands before the lease lapses; a tracker that
+grants nothing falls back to a 2 s period. Expired entries are swept as the
+cache grows past a few hundred objects, so the map tracks objects currently
+being read and stays small. When the tracker is unreachable the engine falls
+back to all-member routing for that lookup (the reader set is soft state).
+
 ## 2. Concepts
 
 | Term | Meaning |
@@ -212,9 +221,13 @@ Separately, `peer.Client` bounds every individual peer request with **three**
 timeouts (dial 1 s, response header 10 s, request 30 s — see docs/peer.md §3.3), so
 a stalled or departed peer can never hold a read open until the caller's context
 expires. And when a `peer.Breaker` is configured, target selection **skips peers
-whose circuit is open**, walking further up the ancestor chain instead — so a dead
-branch is routed around rather than forcing every reader beneath it back to origin.
-If no ancestor is usable, the read falls through to origin.
+whose circuit is open** — on the buffered Get path by walking further up the
+ancestor chain, and on the streaming relay path by skipping an open-circuit
+parent and falling through to origin — so a dead branch is routed around rather
+than forcing every reader beneath it back to origin. A parent that *errors* on
+the relay path before writing a byte is likewise treated as a decline (fall
+through to origin); once bytes have streamed to the requester, a failure can
+only propagate. If no ancestor is usable, the read falls through to origin.
 
 Together these bound abrupt node death: the dial timeout makes the first affected
 read fail in ~1 s, a dial failure opens the circuit on that single observation, and
@@ -223,7 +236,12 @@ every later read skips the departed peer entirely.
 Metrics: `dart_hedge_total{event=fired|primary_won|backup_won}` and
 `dart_peer_failover_total`. Comparing `backup_won` against `fired` shows whether
 hedging is paying for itself; `dart_peer_failover_total` rising marks peers
-actually going away.
+actually going away. `primary_won`/`backup_won` are recorded **only when a hedge
+actually fired** — with hedging disabled, or when the backup answered via
+failover rather than speculation, no win is recorded, so the comparison stays
+meaningful exactly when it is consulted. The latency estimator learns only from
+fetches that actually held the block (`held=true`): a fast 404 miss must not
+collapse the p99, or hedges would arm a few milliseconds into genuine fetches.
 `RegisterStoreMetrics` and `RegisterPeerMetrics` additionally export cache
 occupancy and open-circuit counts (see docs/observability.md).
 
@@ -257,9 +275,11 @@ Range-unsupported (process-local, never expires — a restart re-probes), and
 (`HTTPFetcher` and `Coalescing` implement it); with a fetcher that cannot
 stream it fails cleanly instead of falling back to per-block pulls. On the
 peer plane, a relay that has marked an object Range-unsupported **declines**
-relay requests for it (`held=false`), so the requester uses its own
+relay requests for it (`held=false`) on both relay sources
+(`PeerStreamSource` and `PeerSource`), so the requester uses its own
 passthrough path rather than this node pulling the whole object per block on
-its behalf.
+its behalf. Defense in depth: `block()` never caches bytes sliced from a
+Range-ignored whole-object response even when the marker is absent.
 
 Metrics: `dart_passthrough_total{reason="range_unsupported"}` counts proxied
 requests; their bytes are counted as both `client` and `origin_in` wire bytes
@@ -269,10 +289,18 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 
 1. **Correct bytes**: `Serve` returns exactly `content[start:end+1]`, across
    block and chunk boundaries.
-2. **Read-through + cache**: a block is fetched from origin at most once while
-   cached; a repeated identical request touches origin zero times (size and
-   blocks cached).
-3. **Non-chunked responses**: client reads always use Content-Length framing.
+2. **Read-through + cache**: a block is fetched from origin at most once per
+   coalesced flight and zero times more *while cached*. Two qualifications:
+   insertion is best-effort — under cache pressure a block may be evicted
+   before a later read, which then re-fetches it; and "at most once" assumes
+   the configured `Fetcher` coalesces (the node wires `fetch.Coalescing`; a
+   custom non-coalescing Fetcher re-fetches per concurrent miss). Bytes sliced
+   from a Range-ignored whole-object 200 are served but never cached (§3.9).
+3. **Non-chunked responses on the block path**: client reads served from the
+   block engine always use Content-Length framing. Verbatim passthrough of a
+   Range-blind origin forwards the origin's own framing, chunked included.
+   An empty object is a valid `200` with `Content-Length: 0`; a Range request
+   on it is `416`.
 4. **Range semantics**: standard `200`/`206`/`416` with correct `Content-Range`.
 
 ## 5. Concurrency & Call Permissions
@@ -348,6 +376,13 @@ go test ./internal/engine/ -cover -count=1
 | `TestHedgeDelayDisabledAndBounds` | off when disabled or sample-starved; floored and capped |
 | **`TestHedgeBeatsSlowPrimary`** | **a 5 s stalled parent no longer stalls the read — completes in ms via the backup** |
 | `TestHedgeDisabledWaitsForPrimary` | the contrast: with hedging off the read waits out the stall and sends no duplicate |
+| `TestPeerSourceDeclinesRangeBlindOrigin` | the buffered relay declines a Range-blind origin like the streaming one; nothing cached |
+| `TestBlockDoesNotCacheRangeIgnored` | defense in depth: bytes sliced from a Range-ignored 200 are served, never cached |
+| `TestHedgeWinMetricsRequireFiredHedge` | no hedge fired → no hedge-win counters (the backup_won/fired comparison stays meaningful) |
+| `TestMissesDoNotFeedLatencyEstimator` | fast 404 misses never arm the hedge delay |
+| `TestReaderSetCacheFollowsGrantedLease` | the reader-set cache renews at half the granted lease, never lapsing mid-read |
+| `TestStreamRelayParentErrorFallsBackToOrigin` | an open-circuit/errored parent is skipped to origin, not propagated as a 500 |
+| `TestEmptyObjectGetServes200` | empty object: 200 empty on both paths; a Range request stays 416 |
 | `TestHedgeFallsBackWhenBothMiss` | both contenders 404 → ok=false → origin |
 | `TestHedgeTargetsPickParentAndGrandparent` | primary=parent, backup=grandparent/root; root has no upstream; non-member asks the owner |
 | `TestHedgeTargetsSkipsOpenCircuit` | an open parent is skipped and the grandparent promoted; all-open yields no target |

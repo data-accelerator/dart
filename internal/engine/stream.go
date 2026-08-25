@@ -74,11 +74,20 @@ func (e *Engine) PeerStreamSource() peer.StreamSource {
 
 		// Relay: try this node's parent in the tree, cut-through.
 		if e.p2p {
-			if n, ok, err := e.relayFromParent(ctx, req, w); ok || err != nil {
-				if ok {
-					e.mx.recordRelay(true)
-				}
-				return n, ok, err
+			n, ok, err := e.relayFromParent(ctx, req, w)
+			switch {
+			case ok:
+				e.mx.recordRelay(true)
+				return n, true, nil
+			case err != nil && n > 0:
+				// Partial bytes already left for the requester; the response is
+				// committed, so the error must propagate.
+				return n, false, err
+			case err != nil:
+				// The parent failed before writing anything (circuit open,
+				// transport error): treat it like a clean decline and fall
+				// through to origin, which is authoritative. Propagating a 500
+				// here would fail a read the origin could have served.
 			}
 		}
 
@@ -169,6 +178,10 @@ func (e *Engine) parentAddr(ctx context.Context, objectID string, chunkKey uint6
 	}
 	m, ok := view.Get(ranked[targetIdx].ID)
 	if !ok || m.Addr == "" {
+		return "", false
+	}
+	if e.peer != nil && e.peer.Breaker != nil && !e.peer.Breaker.Healthy(m.Addr) {
+		// Circuit open: skip the parent, same as the buffered Get path does.
 		return "", false
 	}
 	return m.Addr, true
