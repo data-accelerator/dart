@@ -160,6 +160,25 @@ func NewView(members []Member) *View {
 	return v
 }
 
+// ValidMemberID reports whether s is a legal member ID: every byte in
+// [0x21, 0x7E] (visible ASCII, no spaces). The epoch serialization frames
+// member fields with the control bytes 0x1F/0x1E (see computeEpoch); an ID
+// containing them could make two genuinely different memberships hash to the
+// same epoch — two nodes would believe they agree while disagreeing.
+// Enforcing a printable alphabet at the ingress points (-self-id validation
+// and roster ingest) keeps the framing unambiguous without a protocol change.
+func ValidMemberID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7E {
+			return false
+		}
+	}
+	return true
+}
+
 // computeEpoch is a deterministic 64-bit hash of the *authoritative* part of the
 // canonical membership: FNV-1a over each member's (ID, 0x1F, big-endian float64
 // bits of weight, 0x1E), then an fmix64 finalizer. members MUST already be

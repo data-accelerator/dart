@@ -160,6 +160,7 @@ the extraction:
 | `TestUnregisteredK8sSpecDoesNotMatch` | `k8s:` without the scheme never reaches Kubernetes code (static fallback) |
 | `TestSchemeUsage` | help text lists registered schemes, historical text when none |
 | `TestRunPrintsVersion` | `-version` prints the version passed to `Run` |
+| `TestSelfIDRejectsControlBytes` / `TestParsePeersRejectsControlByteIDs` | control-byte member IDs rejected at `-self-id` and `-peers` (epoch-framing safety) |
 | `TestRedactURLUserinfo` | the startup banner strips URL userinfo (no credentials in logs) |
 | `TestBuildKeepsSeederForLifecycle` | the built node retains its seeder and its optional `Run(ctx)` stays assertable |
 | `TestSchemes` (in `cmd/dart` and `providers/k8s/cmd/dart-k8s`) | each binary wires exactly its intended scheme set |
