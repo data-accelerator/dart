@@ -124,6 +124,8 @@ func NewDynamicProvider(cfg DynamicConfig) *DynamicProvider {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	// NaN/±Inf need no guard: weights arrive via JSON (which cannot represent
+	// them) or are hardcoded — see A4 of docs/design-assumptions.md.
 	if cfg.Self.Weight <= 0 {
 		cfg.Self.Weight = 1
 	}
@@ -261,6 +263,7 @@ func (d *DynamicProvider) Learn(members ...Member) {
 		if m.ID == "" || m.ID == d.cfg.Self.ID {
 			continue // self is always present; an anonymous member is unusable
 		}
+		// NaN cannot arrive here (JSON cannot represent it; A4).
 		if m.Weight <= 0 {
 			m.Weight = 1
 		}

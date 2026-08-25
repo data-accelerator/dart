@@ -170,12 +170,21 @@ Callers may rely on the following (each is guarded by a test, see §7):
   rely on epoch convergence under the read-only semantics (while old and new
   views coexist, only routing efficiency is affected, never correctness).
 - **Floating point note**: `score` uses `math.Log` (a pure-Go implementation in
-  Go, hence cross-platform consistent); `u=(h+0.5)/2^64` stays strictly inside
-  `(0,1)`, avoiding `ln(1)=0`/`ln(0)=-inf`. For equal weights the HRW order is
+  Go, hence cross-platform consistent); `u=(h+0.5)/2^64` stays inside `(0,1)`,
+  avoiding `ln(1)=0`/`ln(0)=-inf` — with one honest rounding edge: for the top
+  1024 uint64 hash values `float64(h)` rounds to exactly `2^64`, making `u=1.0`
+  and `score=-Inf` (probability ≈ 5.5e-17 per key-node pair). That is benign:
+  `-Inf` sorts last and ties still break by ID, so the strict total order and
+  input-order independence are unaffected — the only effect is a minuscule
+  placement bias. A strictly-inside construction would be a breaking change
+  (epoch bump, golden regeneration) to fix a 1-in-10^16 nudge; not worth it.
+  For equal weights the HRW order is
   equivalent to descending `Hash64` integer order — cross-validation confirmed
   the float order == the integer order, and the measured minimum hash gap
   (~5.5e16) far exceeds the float-ambiguity threshold (~2^11), so floating point
-  introduces no ordering ambiguity.
+  introduces no ordering ambiguity. (`Weight` values that are NaN or non-finite
+  cannot arrive: weights are JSON-carried or hardcoded — see A4 of
+  docs/design-assumptions.md.)
 - **Golden value source**: the `Hash64` golden values were computed by an
   **independent Python implementation** (not by the Go code itself), forming a
   genuine cross-implementation guard; changing the hash trips the golden test

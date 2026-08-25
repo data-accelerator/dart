@@ -129,11 +129,11 @@ func ChunkKey(namespace, objectID string, chunkIndex int64) uint64 {
 	for i := 0; i < len(namespace); i++ {
 		mix(namespace[i])
 	}
-	mix(0x1F)
+	mix(UnitSep)
 	for i := 0; i < len(objectID); i++ {
 		mix(objectID[i])
 	}
-	mix(0x1F)
+	mix(UnitSep)
 	var num [8]byte
 	binary.BigEndian.PutUint64(num[:], uint64(chunkIndex))
 	for _, b := range num {
@@ -207,17 +207,45 @@ func ObjectIDLayout(rawURL string, layout DigestLayout) (id string, contentAddre
 		host := strings.ToLower(u.Host)
 		scheme := strings.ToLower(u.Scheme)
 		if scheme != "" || host != "" {
-			return scheme + "://" + host + u.Path, false
+			return stripUnitSep(scheme + "://" + host + u.Path), false
 		}
 	}
-	// Unparseable or scheme/host-less: fall back to the raw string, but still
-	// honor an embedded digest if present.
-	for _, seg := range strings.Split(rawURL, "/") {
+	// Unparseable or scheme/host-less: fall back to the raw string with the
+	// query and fragment cut — identity must not move with a signature (the
+	// query is always excluded, §3.5) — but still honor an embedded digest.
+	raw := rawURL
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	for _, seg := range strings.Split(raw, "/") {
 		if isDigest(seg) {
 			return strings.ToLower(seg), true
 		}
 	}
-	return rawURL, false
+	return stripUnitSep(raw), false
+}
+
+// UnitSep is the field separator ChunkKey mixes between namespace and
+// objectID. It must never appear inside either field, or serialization would
+// not be injective: ChunkKey("a","b␟c",0) would equal ChunkKey("a␟b","c",0).
+// Namespaces containing it are rejected at engine construction; derived object
+// identities have it stripped (stripUnitSep).
+const UnitSep = 0x1F
+
+// stripUnitSep removes the ChunkKey field separator from a derived object
+// identity. A URL can deliver a literal 0x1F via a percent-encoded "%1F" in
+// the path; dropping it keeps ChunkKey injective. (Digest identities are pure
+// hex and never contain it.)
+func stripUnitSep(s string) string {
+	if strings.IndexByte(s, UnitSep) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == UnitSep {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // digestHexLen maps a digest algorithm to its hex-encoded length. Only
