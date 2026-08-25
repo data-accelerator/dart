@@ -103,6 +103,12 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // bidirectional; either may be empty, in which case the callee learns nothing
 // from us.
 //
+// The second return value is the responder's own stable ID (from its
+// self-identification header), which is how a caller credits liveness to the
+// member that actually answered rather than to whichever member happens to
+// advertise the dialed address. It is empty when the responder does not
+// identify itself.
+//
 // Unlike a block fetch, this deliberately does **not** consult the circuit
 // breaker for admission, and the difference matters. Skipping a peer whose circuit
 // is open is right for a block: there is a grandparent and there is the origin. For
@@ -116,14 +122,14 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // keeps probing at a bounded interval, a peer that comes back has its circuit
 // closed by the next successful roster fetch, so the data path recovers without
 // waiting for a request to be spent on discovering it.
-func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string) (Roster, error) {
+func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string) (Roster, string, error) {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+RosterPath, nil)
 	if err != nil {
 		c.record(addr, outcomeSoftFail)
-		return Roster{}, err
+		return Roster{}, "", err
 	}
 	if selfID != "" {
 		req.Header.Set(HeaderNode, selfID)
@@ -135,34 +141,41 @@ func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string)
 	resp, err := c.http().Do(req)
 	if err != nil {
 		c.record(addr, classify(err))
-		return Roster{}, fmt.Errorf("peer %s: roster: %w", addr, err)
+		return Roster{}, "", fmt.Errorf("peer %s: roster: %w", addr, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		c.record(addr, outcomeSoftFail)
-		return Roster{}, fmt.Errorf("peer %s: roster: unexpected status %s", addr, resp.Status)
+		return Roster{}, "", fmt.Errorf("peer %s: roster: unexpected status %s", addr, resp.Status)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBody))
 	if err != nil {
 		c.record(addr, outcomeSoftFail)
-		return Roster{}, fmt.Errorf("peer %s: roster: read: %w", addr, err)
+		return Roster{}, "", fmt.Errorf("peer %s: roster: read: %w", addr, err)
 	}
 	var roster Roster
 	if err := json.Unmarshal(body, &roster); err != nil {
 		c.record(addr, outcomeSoftFail)
-		return Roster{}, fmt.Errorf("peer %s: roster: decode: %w", addr, err)
+		return Roster{}, "", fmt.Errorf("peer %s: roster: decode: %w", addr, err)
 	}
 
+	// The responder's identity is the second return value, taken from its
+	// self-identification header — an address is never an identity (a recycled
+	// pod IP answers for a member that is gone), so callers must credit
+	// liveness by this ID, not by the dialed address. It is empty when the
+	// responder does not identify itself.
+	//
 	// If the responder named itself in the header but omitted itself from the body,
 	// add it. That entry is the whole point of the exchange for a caller that only
 	// has an address, so it is worth reconstructing rather than discarding the
 	// response.
-	if id := resp.Header.Get(HeaderNode); id != "" && !rosterHas(roster, id) {
-		roster.Members = append(roster.Members, RosterMember{ID: id, Addr: addr, Weight: 1})
+	responder := resp.Header.Get(HeaderNode)
+	if responder != "" && !rosterHas(roster, responder) {
+		roster.Members = append(roster.Members, RosterMember{ID: responder, Addr: addr, Weight: 1})
 	}
 	c.record(addr, outcomeAnswered)
-	return roster, nil
+	return roster, responder, nil
 }
 
 func rosterHas(r Roster, id string) bool {

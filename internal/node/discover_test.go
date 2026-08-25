@@ -104,7 +104,7 @@ func TestRosterFetcherAdapter(t *testing.T) {
 	defer srv.Close()
 
 	f := &rosterFetcher{c: peer.NewClient(), selfID: "node-a", selfAddr: "10.0.0.1:9000"}
-	ms, err := f.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"))
+	ms, _, err := f.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"))
 	if err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}

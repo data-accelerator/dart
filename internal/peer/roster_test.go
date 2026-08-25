@@ -34,7 +34,7 @@ func TestRosterRoundTrip(t *testing.T) {
 	defer done()
 
 	c := NewClient()
-	got, err := c.FetchRoster(context.Background(), addr, "node-a", "10.0.0.1:9000")
+	got, _, err := c.FetchRoster(context.Background(), addr, "node-a", "10.0.0.1:9000")
 	if err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestRosterEpochIsStringForPrecision(t *testing.T) {
 	defer done()
 
 	c := NewClient()
-	got, err := c.FetchRoster(context.Background(), addr, "", "")
+	got, _, err := c.FetchRoster(context.Background(), addr, "", "")
 	if err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestRosterLearnsCaller(t *testing.T) {
 	defer done()
 
 	c := NewClient()
-	if _, err := c.FetchRoster(context.Background(), addr, "caller", "10.9.9.9:9000"); err != nil {
+	if _, _, err := c.FetchRoster(context.Background(), addr, "caller", "10.9.9.9:9000"); err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}
 	if len(got) != 1 || got[0].id != "caller" || got[0].addr != "10.9.9.9:9000" {
@@ -133,7 +133,7 @@ func TestRosterLearnsCaller(t *testing.T) {
 
 	// An anonymous caller teaches nothing rather than producing a bogus member.
 	got = nil
-	if _, err := c.FetchRoster(context.Background(), addr, "", ""); err != nil {
+	if _, _, err := c.FetchRoster(context.Background(), addr, "", ""); err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}
 	if len(got) != 0 {
@@ -158,7 +158,7 @@ func TestRosterAdvertisedAddrNotRemoteAddr(t *testing.T) {
 
 	c := NewClient()
 	advertised := "10.0.0.7:19146"
-	if _, err := c.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "caller", advertised); err != nil {
+	if _, _, err := c.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "caller", advertised); err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}
 	if learnedAddr != advertised {
@@ -181,7 +181,7 @@ func TestRosterServerNamesItself(t *testing.T) {
 	defer done()
 
 	c := NewClient()
-	got, err := c.FetchRoster(context.Background(), addr, "", "")
+	got, _, err := c.FetchRoster(context.Background(), addr, "", "")
 	if err != nil {
 		t.Fatalf("FetchRoster: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRosterFetchIgnoresOpenCircuit(t *testing.T) {
 		t.Fatalf("setup: circuit = %v, want open", got)
 	}
 
-	got, err := c.FetchRoster(context.Background(), addr, "me", "me:1")
+	got, _, err := c.FetchRoster(context.Background(), addr, "me", "me:1")
 	if err != nil {
 		t.Fatalf("FetchRoster refused while the circuit was open: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestRosterFetchRecordsFailure(t *testing.T) {
 	c.Breaker = brk
 
 	const dead = "127.0.0.1:1" // nothing listens here
-	if _, err := c.FetchRoster(context.Background(), dead, "a", "a:1"); err == nil {
+	if _, _, err := c.FetchRoster(context.Background(), dead, "a", "a:1"); err == nil {
 		t.Fatal("expected a dial failure")
 	}
 	// A dial failure is a conclusion, not a suspicion: one is enough.
@@ -298,7 +298,7 @@ func TestRosterFetchBadBody(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient()
-	if _, err := c.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "", ""); err == nil {
+	if _, _, err := c.FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "", ""); err == nil {
 		t.Error("expected a decode error")
 	}
 }

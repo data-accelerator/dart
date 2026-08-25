@@ -217,7 +217,7 @@ const HeaderPeerAddr = "X-DART-Peer-Addr"
 type Roster struct { Epoch string; Members []RosterMember }
 type RosterMember struct { ID, Addr string; Weight float64 }
 type RosterServer struct { NodeID string; Src func() Roster; Learn func(id, addr string) }
-func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, error)
+func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, string, error)
 ```
 
 Membership rides the peer listener. Four properties are deliberate:
@@ -225,6 +225,9 @@ Membership rides the peer listener. Four properties are deliberate:
 - **`Members` always includes the sender.** That entry is why a caller holding only
   an address makes the request: DNS and other seeds hand out addresses, never
   identities, and placement needs a stable `ID`.
+- **The responder's own ID is returned separately** (second return value, from its
+  `X-DART-Node` self-identification header). Liveness must be credited to that ID —
+  never to the dialed address, which pod-IP reuse can recycle to a different member.
 - **`Epoch` is a decimal string, not a JSON number.** An epoch is a full `uint64`
   and JSON numbers are doubles, so values above 2^53 would be silently corrupted by
   any conforming parser.

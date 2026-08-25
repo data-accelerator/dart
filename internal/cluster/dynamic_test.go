@@ -12,24 +12,39 @@ import (
 
 // fakeFetcher answers roster requests from a scripted address -> members map.
 type fakeFetcher struct {
-	mu      sync.Mutex
-	rosters map[string][]Member
-	fail    map[string]bool
-	calls   int64
+	mu         sync.Mutex
+	rosters    map[string][]Member
+	responders map[string]string // addr -> responder ID override (default: the member owning addr)
+	anonymous  map[string]bool   // addr -> responder does not identify itself
+	fail       map[string]bool
+	calls      int64
 }
 
-func (f *fakeFetcher) FetchRoster(_ context.Context, addr string) ([]Member, error) {
+func (f *fakeFetcher) FetchRoster(_ context.Context, addr string) ([]Member, string, error) {
 	atomic.AddInt64(&f.calls, 1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail[addr] {
-		return nil, fmt.Errorf("unreachable: %s", addr)
+		return nil, "", fmt.Errorf("unreachable: %s", addr)
 	}
 	ms, ok := f.rosters[addr]
 	if !ok {
-		return nil, fmt.Errorf("no such peer: %s", addr)
+		return nil, "", fmt.Errorf("no such peer: %s", addr)
 	}
-	return ms, nil
+	if f.anonymous[addr] {
+		return ms, "", nil // responder does not identify itself
+	}
+	id := f.responders[addr]
+	if id == "" {
+		// A real peer identifies itself; default to the member owning addr.
+		for _, m := range ms {
+			if m.Addr == addr {
+				id = m.ID
+				break
+			}
+		}
+	}
+	return ms, id, nil
 }
 
 func (f *fakeFetcher) set(addr string, ms ...Member) {
@@ -173,12 +188,13 @@ type liveFetcher struct {
 	provs map[string]*DynamicProvider
 }
 
-func (l *liveFetcher) FetchRoster(_ context.Context, addr string) ([]Member, error) {
+func (l *liveFetcher) FetchRoster(_ context.Context, addr string) ([]Member, string, error) {
 	p, ok := l.provs[addr]
 	if !ok {
-		return nil, fmt.Errorf("unreachable: %s", addr)
+		return nil, "", fmt.Errorf("unreachable: %s", addr)
 	}
-	return p.Current().Members(), nil
+	// The provider at addr answers as itself: its own ID is the responder's.
+	return p.Current().Members(), p.Self().ID, nil
 }
 
 // TestDynamicHearsayDoesNotKeepDeadMemberAlive is the regression test for a bug a
@@ -626,5 +642,82 @@ func TestDynamicRunStopsOnContextCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// TestDynamicConfirmCreditsResponderNotAddress is the regression test for
+// issue #2: direct contact must be credited to the member that answered —
+// identified by its self-reported ID — never to whichever member advertises
+// the dialed address. Otherwise pod-IP reuse keeps a dead member Ready
+// forever: the recycled address answers, the address match refreshes the dead
+// member's clock, and placement keeps routing ~1/N of the keyspace to a
+// corpse.
+func TestDynamicConfirmCreditsResponderNotAddress(t *testing.T) {
+	c := newClock()
+	f := &fakeFetcher{}
+
+	// X lived at 10.0.0.9:9000; the address was then recycled to Y. Y's roster
+	// still carries X's stale entry (hearsay) — with X listed first at the same
+	// address, an address-based match would credit X.
+	f.set("10.0.0.9:9000",
+		Member{ID: "X", Addr: "10.0.0.9:9000"},
+		Member{ID: "Y", Addr: "10.0.0.9:9000"},
+	)
+	f.responders = map[string]string{"10.0.0.9:9000": "Y"}
+
+	d := NewDynamicProvider(DynamicConfig{
+		Self:        Member{ID: "S", Addr: "10.0.0.1:9000"},
+		Seeder:      StaticSeeder{"10.0.0.9:9000"},
+		Fetcher:     f,
+		Now:         c.now,
+		ForgetAfter: time.Minute,
+	})
+
+	// Both X and Y are learned from the first roster.
+	if v := d.Refresh(context.Background()); !hasID(v, "X") || !hasID(v, "Y") {
+		t.Fatalf("initial view %v, want both X and Y learned", ids(v))
+	}
+
+	// Keep refreshing across more than ForgetAfter of silence from X. Y answers
+	// every time and must stay; X, never credited again, must be forgotten.
+	for i := 0; i < 3; i++ {
+		c.advance(30 * time.Second)
+		v := d.Refresh(context.Background())
+		if !hasID(v, "Y") {
+			t.Fatalf("round %d: live responder Y dropped: %v", i, ids(v))
+		}
+	}
+	if v := d.Current(); hasID(v, "X") {
+		t.Fatalf("dead member X still present after ForgetAfter of only-Y contact: %v "+
+			"(address-recycled liveness credit keeps dead members alive)", ids(v))
+	}
+}
+
+// TestDynamicUnidentifiedResponderEarnsNoCredit: a responder that does not
+// identify itself (empty responderID) must not refresh anyone's clock —
+// ambiguous evidence credits nobody.
+func TestDynamicUnidentifiedResponderEarnsNoCredit(t *testing.T) {
+	c := newClock()
+	f := &fakeFetcher{}
+	f.set("10.0.0.9:9000", Member{ID: "X", Addr: "10.0.0.9:9000"})
+	f.anonymous = map[string]bool{"10.0.0.9:9000": true}
+
+	d := NewDynamicProvider(DynamicConfig{
+		Self:        Member{ID: "S", Addr: "10.0.0.1:9000"},
+		Seeder:      StaticSeeder{"10.0.0.9:9000"},
+		Fetcher:     f,
+		Now:         c.now,
+		ForgetAfter: time.Minute,
+	})
+
+	if v := d.Refresh(context.Background()); !hasID(v, "X") {
+		t.Fatalf("X not learned: %v", ids(v))
+	}
+	for i := 0; i < 3; i++ {
+		c.advance(30 * time.Second)
+		d.Refresh(context.Background())
+	}
+	if v := d.Current(); hasID(v, "X") {
+		t.Fatalf("X kept alive by an anonymous responder: %v", ids(v))
 	}
 }

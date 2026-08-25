@@ -120,7 +120,7 @@ type DNSSeeder struct { Name string; Port int; Lookup ... }
 type StaticSeeder []string
 func ParseSeeder(spec string) (Seeder, error)            // "dns:<name>:<port>" | "static:a,b"
 
-type RosterFetcher interface { FetchRoster(ctx, addr) ([]Member, error) }
+type RosterFetcher interface { FetchRoster(ctx, addr) (members []Member, responderID string, err error) }
 func NewDynamicProvider(DynamicConfig) *DynamicProvider  // implements Provider
 ```
 
@@ -149,9 +149,16 @@ which is what makes a truncated DNS answer or a partial seed list survivable.
 
 ### Only direct contact refreshes the liveness clock
 
-`tracked.lastContact` is updated by a **successful roster fetch from** a member, or
-by that member **contacting us**. It is deliberately *not* updated by another peer
-mentioning it.
+`tracked.lastContact` is updated by a **successful roster fetch answered by that
+member**, or by that member **contacting us**. It is deliberately *not* updated by
+another peer mentioning it.
+
+The credit goes to the member that *answered*, identified by its self-reported
+stable ID (`responderID`), never to the member that happens to advertise the
+dialed address: an address can be recycled to a different member (pod-IP reuse),
+and crediting by address would keep the previous owner's clock alive
+indefinitely, pinning a dead member in placement. A responder that does not
+identify itself earns no credit.
 
 This is load-bearing rather than fussy. Every surviving peer keeps listing a dead
 node for as long as it still remembers it, so if hearsay refreshed the clock, two
@@ -246,6 +253,8 @@ go test ./internal/cluster/ -cover -count=1
 | `TestSubscribeCoalesces` | slow consumer sees only the latest; producer never blocks; buffer ≤1 |
 | `TestUnsubscribe` | cancel stops delivery and is idempotent |
 | `TestConcurrentSetAndCurrent` | lock-free reads under concurrent writers + subscriber (`-race`) |
+| `TestDynamicConfirmCreditsResponderNotAddress` | liveness credit goes to the answering member's ID, not the dialed address; a dead member whose address was recycled is forgotten after `ForgetAfter` |
+| `TestDynamicUnidentifiedResponderEarnsNoCredit` | an anonymous responder refreshes nobody's clock |
 
 ## 8. Limitations & TODO
 

@@ -13,11 +13,17 @@ import (
 // its stable ID becomes known — a seed gives an address, and an address is never
 // an identity. State on the returned members is ignored: liveness is local.
 //
+// responderID is the stable ID of the member that actually answered, from its
+// own self-identification. It is the *only* identity direct contact may be
+// credited to: a dialed address proves nothing about which member answered (a
+// recycled pod IP answers for a member that is gone), so an empty responderID
+// earns no liveness credit at all.
+//
 // This is an interface rather than a concrete transport so that membership does
 // not depend on the peer package, and so tests can drive convergence without
 // sockets.
 type RosterFetcher interface {
-	FetchRoster(ctx context.Context, addr string) ([]Member, error)
+	FetchRoster(ctx context.Context, addr string) (members []Member, responderID string, err error)
 }
 
 // Defaults for DynamicProvider.
@@ -191,15 +197,15 @@ func (d *DynamicProvider) Refresh(ctx context.Context) *View {
 // reason to change membership.
 func (d *DynamicProvider) gather(ctx context.Context, targets map[string]struct{}) {
 	type result struct {
-		addr    string
-		members []Member
-		err     error
+		responder string
+		members   []Member
+		err       error
 	}
 	results := make(chan result, len(targets))
 	for addr := range targets {
 		go func(addr string) {
-			ms, err := d.cfg.Fetcher.FetchRoster(ctx, addr)
-			results <- result{addr, ms, err}
+			ms, responder, err := d.cfg.Fetcher.FetchRoster(ctx, addr)
+			results <- result{responder, ms, err}
 		}(addr)
 	}
 	for i := 0; i < cap(results); i++ {
@@ -209,26 +215,31 @@ func (d *DynamicProvider) gather(ctx context.Context, targets map[string]struct{
 				d.reportError(r.err)
 				continue
 			}
-			// A reply is direct evidence that whoever owns this address is alive; the
-			// rest of the roster is hearsay.
+			// A reply is direct evidence that the member that answered is alive;
+			// the rest of the roster is hearsay.
 			d.Learn(r.members...)
-			d.confirm(r.addr)
+			d.confirm(r.responder)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-// confirm records direct contact with whichever member advertises addr.
-func (d *DynamicProvider) confirm(addr string) {
+// confirm records direct contact with the member whose stable ID is
+// responderID. Crediting by identity — never by dialed address — is
+// load-bearing: an address can be recycled to a different member (pod-IP
+// reuse), and crediting by address would keep the previous owner's liveness
+// clock alive indefinitely, pinning a dead member in placement. A responder
+// that does not identify itself earns no credit.
+func (d *DynamicProvider) confirm(responderID string) {
+	if responderID == "" {
+		return
+	}
 	now := d.cfg.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for _, t := range d.known {
-		if t.member.Addr == addr {
-			t.lastContact = now
-			return
-		}
+	if t, ok := d.known[responderID]; ok {
+		t.lastContact = now
 	}
 }
 
