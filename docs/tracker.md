@@ -51,7 +51,14 @@ func (r *Registry) Files() int
 ```
 
 - `Join` records or refreshes interest and returns the currently **frozen** set
-  (`JoinResponse{EpochS, Readers, TTLMs}`). `ttl <= 0` uses the registry default.
+  (`JoinResponse{EpochS, Readers, TTLMs}`). `ttl <= 0` uses the registry default;
+  `ttl > MaxLeaseTTL` (10m) is **clamped** to `MaxLeaseTTL`, and the granted
+  `TTLMs` always reflects the clamp. Leases are meant to be refreshed on a
+  seconds cadence; without the bound a caller could pin a dead reader — and with
+  it the whole file entry, blocking idle eviction — for an arbitrary duration.
+  On the HTTP wire, `ttlMs` values too large for a `time.Duration` are clamped
+  *before* conversion, so they can never overflow-wrap into a silently wrong
+  lease.
 - The first reader of a file is published immediately (it would be useless to
   make the first reader wait a whole tick); subsequent changes wait for the tick.
 - `Leave` drops a lease immediately; the frozen set updates on the next tick.
@@ -63,7 +70,7 @@ func (r *Registry) Files() int
   driven by registry activity, at most one O(files) scan per tick — because an
   idle registry grows nothing. Eviction is safe: a later `Join` simply
   recreates the entry (at the price of an `epochS` reset).
-- Defaults: `DefaultTick = 3s`, `DefaultLeaseTTL = 2 * DefaultTick` (a reader that
+- Defaults: `DefaultTick = 3s`, `DefaultLeaseTTL = 2 * DefaultTick`, `MaxLeaseTTL = 10m` (a reader that
   renews once per tick is never dropped spuriously),
   `DefaultIdleGrace = 1m`. `Options.Now` injects a clock for tests.
 
@@ -133,6 +140,8 @@ go test ./internal/tracker/ -race -count=1
 | `TestJoinPublishesFirstReaderImmediately` | the first reader is published without waiting a tick |
 | `TestTickFreeze` | a join within a tick does not change the published set or epoch; the next tick does |
 | `TestLeaseExpiry` | a reader that stops renewing drops out |
+| `TestJoinClampsLeaseTTL` | a 24h lease request is granted clamped to `MaxLeaseTTL` and actually lapses then |
+| `TestJoinTTLMsOverflowIsClamped` | overflowing `ttlMs` values clamp before duration conversion (no wrap) |
 | `TestLeave` | explicit leave; last reader forgets the file |
 | `TestReadersSortedDeterministic` | two registries with different join orders publish identical sets |
 | `TestEpochStableWhenSetUnchanged` | epoch does not churn across ticks |

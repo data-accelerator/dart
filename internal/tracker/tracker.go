@@ -32,6 +32,11 @@ import (
 const (
 	DefaultTick     = 3 * time.Second
 	DefaultLeaseTTL = 2 * DefaultTick
+	// MaxLeaseTTL bounds any client-requested lease. Leases are meant to be
+	// refreshed on a seconds cadence, so ten minutes is already generous;
+	// without a bound a caller could pin a dead reader (and with it the whole
+	// file entry, blocking idle eviction) for an arbitrary duration.
+	MaxLeaseTTL = 10 * time.Minute
 	// DefaultIdleGrace is how long an empty, unqueried file entry is kept
 	// before idle eviction forgets it.
 	DefaultIdleGrace = time.Minute
@@ -132,6 +137,9 @@ func NewRegistry(opt Options) *Registry {
 func (r *Registry) Join(file, node string, ttl time.Duration) JoinResponse {
 	if ttl <= 0 {
 		ttl = r.ttl
+	}
+	if ttl > MaxLeaseTTL {
+		ttl = MaxLeaseTTL // never grant more than the documented bound
 	}
 	now := r.now()
 
@@ -286,7 +294,15 @@ func (s *Server) Handler() *http.ServeMux {
 			http.Error(w, "file and node are required", http.StatusBadRequest)
 			return
 		}
-		resp := s.R.Join(req.File, req.Node, time.Duration(req.TTLMs)*time.Millisecond)
+		// Clamp before the duration conversion: TTLMs values beyond
+		// math.MaxInt64/int64(time.Millisecond) would overflow the multiplication
+		// and silently wrap (some wrap *negative* — straight to the default —
+		// and some wrap to a positive multi-decade lease).
+		ttlMs := req.TTLMs
+		if ttlMs > MaxLeaseTTL.Milliseconds() {
+			ttlMs = MaxLeaseTTL.Milliseconds()
+		}
+		resp := s.R.Join(req.File, req.Node, time.Duration(ttlMs)*time.Millisecond)
 		writeJSON(w, resp)
 	})
 	mux.HandleFunc(LeavePath, func(w http.ResponseWriter, r *http.Request) {
