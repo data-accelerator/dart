@@ -166,3 +166,50 @@ func TestBorrowedAdmissionSerializesWithEviction(t *testing.T) {
 		t.Fatalf("stats report %d borrowed blocks > 4 slots", st.BorrowedBlocks)
 	}
 }
+
+// TestTouchSkipsOwnedKeys pins the review follow-up to S1: PutClass(Owned)
+// also mirrors the block into a Hybrid's mem tier, so a class-blind Touch
+// would feed owned traffic right back into the borrowed estimator. Touch
+// must skip owned keys.
+func TestTouchSkipsOwnedKeys(t *testing.T) {
+	ts := openTiered(t, 8, 0.5)
+	own := BlockKey{Chunk: 1, Block: 0}
+	if _, err := ts.PutClass(own, make([]byte, 64), Owned); err != nil {
+		t.Fatalf("PutClass: %v", err)
+	}
+	before := ts.sk.Estimate(keyHash(own))
+	for i := 0; i < 100; i++ {
+		ts.Touch(own)
+	}
+	if after := ts.sk.Estimate(keyHash(own)); after != before {
+		t.Fatalf("Touch on an owned key moved its estimate %d -> %d", before, after)
+	}
+
+	// The same through a Hybrid: an owned block mirrored in mem must not feed
+	// the estimator on mem hits, while a borrowed key's must grow.
+	mem, err := OpenMem(MemOptions{SlotSize: 64, Slots: 4})
+	if err != nil {
+		t.Fatalf("OpenMem: %v", err)
+	}
+	h := NewHybrid(mem, ts)
+	if _, ok, _ := h.Get(own); !ok {
+		t.Fatal("owned key must be mirrored in mem")
+	}
+	for i := 0; i < 50; i++ {
+		h.Get(own)
+	}
+	if after := ts.sk.Estimate(keyHash(own)); after != before {
+		t.Fatalf("owned mem hit fed the estimator: %d -> %d", before, after)
+	}
+	bor := BlockKey{Chunk: 2, Block: 0}
+	if _, err := h.PutClass(bor, make([]byte, 64), Borrowed); err != nil {
+		t.Fatalf("PutClass: %v", err)
+	}
+	est0 := ts.sk.Estimate(keyHash(bor))
+	for i := 0; i < 10; i++ {
+		h.Get(bor)
+	}
+	if est1 := ts.sk.Estimate(keyHash(bor)); est1 <= est0 {
+		t.Fatalf("borrowed mem hits did not feed the estimator: %d -> %d", est0, est1)
+	}
+}

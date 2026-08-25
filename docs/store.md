@@ -142,9 +142,13 @@ are excluded because owned blocks are never evicted via the sketch, and counting
 them would fire the halving cadence (sized for the borrowed budget) far too
 often, decaying warm borrowed estimates to zero where a one-shot could evict
 them. A `Hybrid` mem-tier hit still feeds the backing estimator via `Touch`, so
-a hot key's estimate does not decay while mem serves its reads. The admission
-decision and the evicting `Put` run in one critical section (no decide-then-race
-gap). `Put` (the plain `Store` method) defaults to `Borrowed`.
+a hot key's estimate does not decay while mem serves its reads; `Touch` is
+class-aware and skips owned keys (owned blocks are mirrored into mem too, so a
+class-blind touch would feed owned traffic right back in). The TinyLFU
+comparison and the evicting `Put` run inside the borrowed store's own lock
+(`putIfAdmitted`), so the victim compared is exactly the victim evicted — no
+concurrent Get/Delete/Put can reorder the LRU in between. `Put` (the plain
+`Store` method) defaults to `Borrowed`.
 
 **Class migration:** a block lives in exactly one budget. `PutClass(k, Owned)`
 drops any borrowed copy (promotion); `PutClass(k, Borrowed)` on an owned key
@@ -332,6 +336,7 @@ go test ./internal/store/ -cover -count=1
 | `TestHybridConcurrent` | concurrent mixed-class hybrid ops (`-race`) |
 | `TestOwnedTrafficDoesNotDecayBorrowedEstimates` | owned reads never feed the borrowed estimator (no premature decay of warm entries) |
 | `TestHybridMemHitsFeedBackingEstimator` | a mem-tier hit still feeds the backing Tiered estimator via Touch |
+| `TestTouchSkipsOwnedKeys` | Touch is class-aware: owned mem hits never feed the borrowed estimator |
 | `TestPutClassOwnedDropsBorrowedCopy` | promotion to owned drops the borrowed copy (one block, one budget) |
 | `TestBorrowedPutClassOnOwnedKeyRefreshesRecency` | the owned-hit branch refreshes recency as promised |
 | `TestPutClassFeedsEstimator` | insertion is an access: write-only patterns do not degenerate admission |

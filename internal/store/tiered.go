@@ -88,11 +88,6 @@ type Tiered struct {
 
 	sk *sketch
 
-	// admitMu serializes the borrowed admission decision with the evicting
-	// Put: deciding in one critical section and inserting in another lets a
-	// race admit candidates that were never compared against the victim
-	// (TinyLFU TOCTOU).
-	admitMu  sync.Mutex
 	mu       sync.Mutex
 	rejected uint64
 }
@@ -165,8 +160,14 @@ func (t *Tiered) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
 
 // Touch records an access to k in the admission estimator without reading the
 // block: used by wrappers (Hybrid) whose fast tier answers the read but must
-// not let the key's borrowed-budget estimate decay while it does.
-func (t *Tiered) Touch(k BlockKey) { t.sk.Increment(keyHash(k)) }
+// not let the key's borrowed-budget estimate decay while it does. Owned keys
+// are skipped — owned traffic never feeds the estimator (see Get).
+func (t *Tiered) Touch(k BlockKey) {
+	if t.owned.Has(k) {
+		return
+	}
+	t.sk.Increment(keyHash(k))
+}
 
 // Put inserts the block into the borrowed budget (the conservative default for
 // callers that do not know the class). An admission rejection is not an error.
@@ -208,25 +209,23 @@ func (t *Tiered) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
 	// to always-admit).
 	t.sk.Increment(keyHash(k))
 
-	// Below capacity: admit freely. At capacity: only admit a candidate that is
-	// at least as popular as the block we would evict. The decision and the
-	// evicting Put must be atomic: a preemption in between would admit a
-	// candidate that was never compared against the then-current victim.
-	t.admitMu.Lock()
-	defer t.admitMu.Unlock()
-	if t.borrowed.Len() >= t.borrowed.Slots() {
-		victim, ok := t.borrowed.evictionCandidate()
-		if ok && !t.sk.Admit(keyHash(k), keyHash(victim)) {
-			t.mu.Lock()
-			t.rejected++
-			t.mu.Unlock()
-			return false, nil
-		}
-	}
-	if err := t.borrowed.Put(k, data); err != nil {
+	// Below capacity: admitted freely. At capacity: admitted only when at
+	// least as popular as the block that would be evicted. The TinyLFU
+	// comparison and the evict+insert run inside the borrowed store's lock
+	// (putIfAdmitted), so the victim compared is exactly the victim evicted —
+	// no concurrent Get/Delete/Put can reorder the LRU in between.
+	admitted, err := t.borrowed.putIfAdmitted(k, data, func(victim BlockKey) bool {
+		return t.sk.Admit(keyHash(k), keyHash(victim))
+	})
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	if !admitted {
+		t.mu.Lock()
+		t.rejected++
+		t.mu.Unlock()
+	}
+	return admitted, nil
 }
 
 // Has reports whether either budget holds the block.
