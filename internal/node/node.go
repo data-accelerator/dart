@@ -23,12 +23,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -85,7 +88,49 @@ type config struct {
 // are the discovery schemes this binary accepts in -discover (see
 // DiscoveryScheme); dns and static also resolve without registration for
 // backward compatibility.
+// newThrottledLogger returns an OnError handler that writes to out at most
+// once per minute: discovery errors repeat every refresh interval (default 5s)
+// under a persistent outage, and library callers need diagnostics on their own
+// writer, not os.Stderr. The throttle collapses bursts; distinct errors within
+// the window are counted, not silently dropped.
+func newThrottledLogger(out io.Writer) func(error) {
+	var mu sync.Mutex
+	var last time.Time
+	var suppressed int
+	return func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		now := time.Now()
+		if now.Sub(last) < time.Minute {
+			suppressed++
+			return
+		}
+		if suppressed > 0 {
+			fmt.Fprintf(out, "dart: discover: %v (%d similar suppressed)\n", err, suppressed)
+		} else {
+			fmt.Fprintf(out, "dart: discover: %v\n", err)
+		}
+		last = now
+		suppressed = 0
+	}
+}
+
+// lockedWriter serializes concurrent writes to the caller's out: the banner
+// and shutdown lines race the discovery diagnostics goroutine otherwise, and
+// nothing in Run's contract lets us assume out is concurrency-safe.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
 func Run(args []string, out io.Writer, version string, schemes ...DiscoveryScheme) error {
+	out = &lockedWriter{w: out}
 	cfg, err := parseFlags(args, out, schemes)
 	if err != nil {
 		return err
@@ -96,24 +141,57 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	}
 	cfg.schemes = schemes
 
-	n, err := build(cfg)
+	n, err := build(cfg, out)
 	if err != nil {
 		return err
 	}
 	defer n.closer.Close()
 
-	servers := []*http.Server{{
-		Addr: cfg.listen, Handler: n.client, ReadHeaderTimeout: 15 * time.Second,
-	}}
-	if n.peer != nil {
-		servers = append(servers, &http.Server{
-			Addr: cfg.peerListen, Handler: n.peer, ReadHeaderTimeout: 15 * time.Second,
+	// Per-server in-flight handler tracking: a timed-out graceful drain
+	// force-closes connections, but Close does not join the handler goroutines
+	// — and the deferred closer is about to close the store under them.
+	// shutdownAll waits (briefly, bounded) for that server's tracker to empty
+	// before returning. Per-server (not shared): a shared WaitGroup would race
+	// Add-during-Wait while a sibling server still accepts connections.
+	type tracked struct {
+		srv      *http.Server
+		wg       *sync.WaitGroup
+		draining *atomic.Bool
+	}
+	// The wrapper counts BEFORE checking the drain gate: a closer that sets
+	// draining and then waits can never miss a handler that has entered (it is
+	// already counted), and one that arrives after the gate is set bails with
+	// 503 without touching the store. Entry-after-Close is therefore closed
+	// structurally, not by timing.
+	track := func(h http.Handler) (*sync.WaitGroup, *atomic.Bool, http.Handler) {
+		wg := &sync.WaitGroup{}
+		draining := &atomic.Bool{}
+		return wg, draining, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			wg.Add(1)
+			defer wg.Done()
+			if draining.Load() {
+				http.Error(w, "dart: shutting down", http.StatusServiceUnavailable)
+				return
+			}
+			h.ServeHTTP(w, r)
 		})
 	}
-	if n.admin != nil {
-		servers = append(servers, &http.Server{
-			Addr: cfg.adminAddr, Handler: n.admin, ReadHeaderTimeout: 15 * time.Second,
+
+	var servers []tracked
+	add := func(addr string, h http.Handler) {
+		wg, draining, th := track(h)
+		servers = append(servers, tracked{
+			srv:      &http.Server{Addr: addr, Handler: th, ReadHeaderTimeout: 15 * time.Second},
+			wg:       wg,
+			draining: draining,
 		})
+	}
+	add(cfg.listen, n.client)
+	if n.peer != nil {
+		add(cfg.peerListen, n.peer)
+	}
+	if n.admin != nil {
+		add(cfg.adminAddr, n.admin)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -130,12 +208,12 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	}
 
 	errCh := make(chan error, len(servers))
-	for _, s := range servers {
+	for _, tr := range servers {
 		go func(s *http.Server) {
 			if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				errCh <- err
 			}
-		}(s)
+		}(tr.srv)
 	}
 
 	// The registry mirror does not replace the other front end: both are dispatched
@@ -164,20 +242,63 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	fmt.Fprintf(out, "dart client=%s | mode: %s | p2p: %s | admin: %s | cache: %s (%d MiB)\n",
 		cfg.listen, mode, p2p, adminMode, cfg.cacheDir, cfg.cacheSize/chunk.MiB)
 
+	shutdownAll := func() error {
+		// Each server gets its own full drain budget, concurrently: a shared
+		// sequential budget lets a long-draining client server expire the
+		// context before the peer/admin Shutdown calls even start — killing
+		// precisely the relay connections a draining node should close cleanly.
+		var wg sync.WaitGroup
+		errs := make(chan error, len(servers))
+		for _, tr := range servers {
+			wg.Add(1)
+			go func(tr tracked) {
+				defer wg.Done()
+				shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				err := tr.srv.Shutdown(shutCtx)
+				if err != nil {
+					// The drain deadline expired with handlers still running:
+					// close the gate FIRST (new handler entries 503 instead of
+					// touching the store), force-close the connections, then
+					// wait for the handlers that had already entered — Close
+					// does not join handler goroutines. The 2s grace is the
+					// last-resort bound: a handler still stuck after 10s drain
+					// + force-close + 2s grace is abandoned (the process is
+					// exiting); anything longer would hang shutdown on a wedged
+					// handler, which is worse.
+					tr.draining.Store(true)
+					tr.srv.Close()
+					done := make(chan struct{})
+					go func() { tr.wg.Wait(); close(done) }()
+					select {
+					case <-done:
+					case <-time.After(2 * time.Second):
+					}
+				}
+				errs <- err
+			}(tr)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	select {
 	case err := <-errCh:
+		// A server died early: the deferred closer is about to close the store
+		// and release the cache-dir lock — the siblings must not keep serving
+		// (admin would still answer /admin/stats over a closed store). Shut
+		// them down before returning.
+		_ = shutdownAll()
 		return err
 	case <-ctx.Done():
 		fmt.Fprintln(out, "dart shutting down...")
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		var firstErr error
-		for _, s := range servers {
-			if err := s.Shutdown(shutCtx); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
+		return shutdownAll()
 	}
 }
 
@@ -201,8 +322,9 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 		"maintain membership by discovery instead of a fixed -peers list: "+
 			schemeUsage(schemes)+", or a bare address list a:port,b:port,...")
 	fs.StringVar(&cfg.peerAdvertise, "peer-advertise", "",
-		"host:port peers should use to reach this node; defaults to -peer-listen with the "+
-			"host taken from POD_IP or the hostname when it is a wildcard")
+		"host:port peers should use to reach this node; wildcard values are rejected. "+
+			"When empty, defaults to -peer-listen with a wildcard host resolved from, in "+
+			"order: DART_ADVERTISE_HOST, POD_IP, the hostname")
 	fs.DurationVar(&cfg.discoverInterval, "discover-interval", cluster.DefaultRefreshInterval,
 		"how often to re-resolve seeds and re-exchange rosters")
 	fs.DurationVar(&cfg.forgetAfter, "forget-after", cluster.DefaultForgetAfter,
@@ -228,6 +350,20 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 		"only treat \"<algo>:<hex>\" paths as content-addressed; disables recognizing Docker Distribution's object-storage layout")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
+	}
+	// An explicitly-set out-of-range share is an operator error, not a "0.8
+	// please": fail startup. (0 unset means default; here Visit sees only
+	// flags actually given, so 0 can only be explicit.)
+	var badFraction bool
+	fs.Visit(func(f *flag.Flag) {
+		// NaN slips past <=/>= comparisons; reject non-finite explicitly.
+		if f.Name == "owned-fraction" && (math.IsNaN(cfg.ownedFraction) || math.IsInf(cfg.ownedFraction, 0) ||
+			cfg.ownedFraction <= 0 || cfg.ownedFraction >= 1) {
+			badFraction = true
+		}
+	})
+	if badFraction {
+		return config{}, fmt.Errorf("-owned-fraction must satisfy 0 < f < 1, got %g", cfg.ownedFraction)
 	}
 	// The mirror and the prefix API share a listener, so the prefix must not
 	// shadow the registry API path.
@@ -285,7 +421,7 @@ func (cs closers) Close() error {
 }
 
 // build constructs the store, engine, and handlers from cfg.
-func build(cfg config) (*node, error) {
+func build(cfg config, out io.Writer) (*node, error) {
 	cc := chunk.Config{ChunkSize: cfg.chunkSize, BlockSize: cfg.blockSize}
 	if err := cc.Validate(); err != nil {
 		return nil, err
@@ -427,12 +563,7 @@ func build(cfg config) (*node, error) {
 				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr},
 				RefreshInterval: cfg.discoverInterval,
 				ForgetAfter:     cfg.forgetAfter,
-				OnError: func(err error) {
-					// Discovery errors are expected and transient (a peer restarting, DNS
-					// briefly unavailable). Membership is unaffected, so this is a log line
-					// rather than a failure.
-					fmt.Fprintln(os.Stderr, "dart: discover:", err)
-				},
+				OnError:         newThrottledLogger(out),
 			})
 			eopt.Cluster = dyn
 		default:

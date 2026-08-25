@@ -46,6 +46,19 @@ func parseByteSize(s string) (int64, error) {
 		return 0, fmt.Errorf("no number in %q", s)
 	}
 
+	// A plain byte count is parsed as an integer: exact at any magnitude
+	// (float64 rounds above 2^53, silently turning 2^53+1 into 2^53).
+	if unit == "" && !strings.ContainsAny(num, ".") {
+		b, err := strconv.ParseInt(num, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("bad size %q", s)
+		}
+		if b < 0 {
+			return 0, fmt.Errorf("negative size %q", s)
+		}
+		return b, nil
+	}
+
 	// "B" is decoration on any form: 512B, 8GiB, 100MB.
 	unit = strings.TrimSuffix(unit, "b")
 
@@ -58,7 +71,8 @@ func parseByteSize(s string) (int64, error) {
 	}
 
 	// Accept a fraction so 1.5GiB works, but the result is an integral count of
-	// bytes.
+	// bytes. The unit-scaled path is float64: beyond 2^53 it rounds to the
+	// nearest representable byte count (use a plain integer for exact bytes).
 	f, err := strconv.ParseFloat(num, 64)
 	if err != nil {
 		return 0, fmt.Errorf("bad size %q", s)

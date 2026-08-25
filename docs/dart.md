@@ -41,7 +41,7 @@ dart [flags]
 | `-peer-listen` | `:9000` | peer block-server listen address (P2P mode) |
 | `-peers` | `""` | fixed membership: comma-separated `id@host:port` (incl. self). Mutually exclusive with `-discover` |
 | `-discover` | `""` | **maintain** membership by discovery: `<scheme>:<spec>` — `dns:<name>:<port>` (a headless Service), `static:<a>,<b>,...`, or a bare address list; the `dart-k8s` variant adds `k8s:<namespace>/<service>[/<port>]` |
-| `-peer-advertise` | `""` | `host:port` peers should dial; defaults to `-peer-listen`, substituting `POD_IP`/`DART_ADVERTISE_HOST`/hostname when the host is a wildcard |
+| `-peer-advertise` | `""` | `host:port` peers should dial; wildcard values are rejected. Defaults to `-peer-listen`, resolving a wildcard host in order: `DART_ADVERTISE_HOST` → `POD_IP` → hostname |
 | `-discover-interval` | `5s` | how often to re-resolve seeds and re-exchange rosters |
 | `-forget-after` | `60s` | how long a member must be unseen **and** unreachable before removal |
 | `-fanout` | `2` | distribution-tree branching factor (children per node) |
@@ -49,7 +49,7 @@ dart [flags]
 | `-reader-tree` | `true` | build the distribution tree over the active reader set (per-file tracker) |
 | `-tracker-tick` | `3s` | how often a tracker republishes a reader set |
 | `-replicas` | `1` | HRW candidates that authoritatively hold a chunk (the owned budget) |
-| `-owned-fraction` | `0.8` | share of the cache reserved for owned blocks (0<f<1) |
+| `-owned-fraction` | `0.8` | share of the cache reserved for owned blocks (0<f<1); an explicitly-set out-of-range value fails startup |
 | `-mem-size` | `256 MiB` | in-memory hot-set size; below one block disables the memory tier |
 
 **Size units.** `-cache-size`, `-chunk-size`, `-block-size` and `-mem-size` accept

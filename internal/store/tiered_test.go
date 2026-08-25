@@ -134,10 +134,20 @@ func TestTieredSplitsCapacity(t *testing.T) {
 	if st.OwnedSlots != 8 || st.BorrowedSlots != 2 {
 		t.Errorf("split = owned %d / borrowed %d, want 8/2", st.OwnedSlots, st.BorrowedSlots)
 	}
-	// An out-of-range fraction falls back to the 0.8 default.
-	ts2 := openTiered(t, 10, 5)
+	// An out-of-range fraction is rejected, never silently substituted (issue
+	// #17 N4): 1.5/-0.5 must error; 0 is the zero value (unset) → 0.8 default;
+	// node flag parsing rejects an explicitly-set 0 (see issue17_test.go).
+	for _, f := range []float64{1, 1.5, -0.5} {
+		if _, err := OpenTiered(TieredOptions{
+			Path: filepath.Join(t.TempDir(), "b"), SlotSize: 64 << 10, Slots: 10,
+			OwnedFraction: f,
+		}); err != ErrBadTieredOptions {
+			t.Errorf("OwnedFraction %v = %v, want ErrBadTieredOptions", f, err)
+		}
+	}
+	ts2 := openTiered(t, 10, 0) // zero value = unset
 	if st2 := ts2.Stats(); st2.OwnedSlots != 8 {
-		t.Errorf("invalid fraction: owned slots = %d, want 8 (default)", st2.OwnedSlots)
+		t.Errorf("unset fraction: owned slots = %d, want 8 (default 0.8)", st2.OwnedSlots)
 	}
 	// Both budgets always get at least one slot.
 	ts3 := openTiered(t, 2, 0.99)
