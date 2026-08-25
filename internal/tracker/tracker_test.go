@@ -2,6 +2,10 @@ package tracker
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -276,4 +280,48 @@ func TestConcurrent(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+// TestJoinClampsLeaseTTL pins issue #5: a client-supplied lease is bounded by
+// MaxLeaseTTL — a 24h request must not pin a dead reader (and with it the
+// whole file entry, blocking idle eviction) for a day.
+func TestJoinClampsLeaseTTL(t *testing.T) {
+	clk := newClock()
+	r := newReg(clk, time.Second, 2*time.Second)
+
+	resp := r.Join("f", "n", 24*time.Hour)
+	if resp.TTLMs != MaxLeaseTTL.Milliseconds() {
+		t.Fatalf("granted TTLMs = %d, want clamped %d", resp.TTLMs, MaxLeaseTTL.Milliseconds())
+	}
+	// The lease must actually lapse at the clamp, not live on for 24h.
+	clk.advance(MaxLeaseTTL + time.Second)
+	r.Join("f", "other", 0) // any call sweeps
+	if got, _ := r.Readers("f"); len(got) != 1 || got[0] != "other" {
+		t.Fatalf("readers = %v, want only [other] (clamped lease must expire)", got)
+	}
+}
+
+// TestJoinTTLMsOverflowIsClamped pins issue #5's overflow half: values beyond
+// what time.Duration(req.TTLMs)*time.Millisecond can hold must never wrap —
+// some wrapped negative (silently becoming the default) and some wrapped to a
+// positive multi-decade lease that was then granted verbatim.
+func TestJoinTTLMsOverflowIsClamped(t *testing.T) {
+	srv := httptest.NewServer((&Server{R: newReg(newClock(), time.Second, 2*time.Second)}).Handler())
+	defer srv.Close()
+
+	for _, ttlMs := range []int64{1 << 62, math.MaxInt64, 1 << 50, 24 * 3600 * 1000} {
+		body := fmt.Sprintf(`{"file":"f","node":"n","ttlMs":%d}`, ttlMs)
+		resp, err := http.Post(srv.URL+JoinPath, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		var jr JoinResponse
+		if err := json.NewDecoder(resp.Body).Decode(&jr); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		resp.Body.Close()
+		if jr.TTLMs != MaxLeaseTTL.Milliseconds() {
+			t.Errorf("ttlMs=%d: granted %d, want clamped %d", ttlMs, jr.TTLMs, MaxLeaseTTL.Milliseconds())
+		}
+	}
 }
