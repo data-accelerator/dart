@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -153,24 +154,36 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	// before returning. Per-server (not shared): a shared WaitGroup would race
 	// Add-during-Wait while a sibling server still accepts connections.
 	type tracked struct {
-		srv *http.Server
-		wg  *sync.WaitGroup
+		srv      *http.Server
+		wg       *sync.WaitGroup
+		draining *atomic.Bool
 	}
-	track := func(h http.Handler) (*sync.WaitGroup, http.Handler) {
+	// The wrapper counts BEFORE checking the drain gate: a closer that sets
+	// draining and then waits can never miss a handler that has entered (it is
+	// already counted), and one that arrives after the gate is set bails with
+	// 503 without touching the store. Entry-after-Close is therefore closed
+	// structurally, not by timing.
+	track := func(h http.Handler) (*sync.WaitGroup, *atomic.Bool, http.Handler) {
 		wg := &sync.WaitGroup{}
-		return wg, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		draining := &atomic.Bool{}
+		return wg, draining, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			defer wg.Done()
+			if draining.Load() {
+				http.Error(w, "dart: shutting down", http.StatusServiceUnavailable)
+				return
+			}
 			h.ServeHTTP(w, r)
 		})
 	}
 
 	var servers []tracked
 	add := func(addr string, h http.Handler) {
-		wg, th := track(h)
+		wg, draining, th := track(h)
 		servers = append(servers, tracked{
-			srv: &http.Server{Addr: addr, Handler: th, ReadHeaderTimeout: 15 * time.Second},
-			wg:  wg,
+			srv:      &http.Server{Addr: addr, Handler: th, ReadHeaderTimeout: 15 * time.Second},
+			wg:       wg,
+			draining: draining,
 		})
 	}
 	add(cfg.listen, n.client)
@@ -244,12 +257,16 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 				defer cancel()
 				err := tr.srv.Shutdown(shutCtx)
 				if err != nil {
-					// The drain deadline expired with handlers still running
-					// (they may be touching the store the deferred closer is
-					// about to close): force-close the connections, then give
-					// the abandoned handlers a short bounded grace to unwind
-					// before Run returns and the store closes under them.
-					// Close does not join handler goroutines, hence the wait.
+					// The drain deadline expired with handlers still running:
+					// close the gate FIRST (new handler entries 503 instead of
+					// touching the store), force-close the connections, then
+					// wait for the handlers that had already entered — Close
+					// does not join handler goroutines. The 2s grace is the
+					// last-resort bound: a handler still stuck after 10s drain
+					// + force-close + 2s grace is abandoned (the process is
+					// exiting); anything longer would hang shutdown on a wedged
+					// handler, which is worse.
+					tr.draining.Store(true)
 					tr.srv.Close()
 					done := make(chan struct{})
 					go func() { tr.wg.Wait(); close(done) }()
