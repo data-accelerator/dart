@@ -673,9 +673,11 @@ func TestUncontendedFetchNotMarkedCoalesced(t *testing.T) {
 // the stale flight and lead a replacement.
 func TestStaleFlightEvictedAfterMaxFlight(t *testing.T) {
 	var calls int64
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) }) // release the stalled leader at test end
 	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
 		if atomic.AddInt64(&calls, 1) == 1 {
-			select {} // stalled leader: never returns, ignores ctx
+			<-stall // stalled leader: returns only when the test ends, ignores ctx
 		}
 		return Range{Data: blob(8), Total: 8}, nil
 	})
@@ -797,5 +799,39 @@ func TestJoinerRetrySkippedWhenCallerGone(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // let any mistaken retry fire
 	if got := atomic.LoadInt64(&calls); got != 1 {
 		t.Fatalf("underlying calls = %d, want 1 (a gone caller must not retry)", got)
+	}
+}
+
+// TestAbandonedWaitersReleasedAtDeadline pins the review-found residual of
+// issue #4: a joiner whose caller gave up must not block in the flight wait
+// forever when the leader ignores cancellation — even when no later caller
+// ever arrives for the key. At the flight deadline the waiter re-checks,
+// evicts the stale flight, and leads a replacement.
+func TestAbandonedWaitersReleasedAtDeadline(t *testing.T) {
+	var calls int64
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) }) // release all stuck fn calls at test end
+	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
+		atomic.AddInt64(&calls, 1)
+		<-stall // ignores ctx: simulates a permanently stuck origin
+		return Range{Data: blob(8), Total: 8}, nil
+	})
+	c := &Coalescing{F: f, MaxFlight: 40 * time.Millisecond}
+
+	// Two callers join the same stuck flight and give up; no later caller ever
+	// arrives for the key.
+	for i := 0; i < 2; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		if _, err := c.Fetch(ctx, "u", 0, 7); err == nil {
+			t.Fatal("caller: want its own ctx deadline, got nil")
+		}
+		cancel()
+	}
+
+	// After the deadline the abandoned waiter must have been released and led
+	// a replacement flight — not be blocked in the wait forever.
+	time.Sleep(200 * time.Millisecond)
+	if got := atomic.LoadInt64(&calls); got < 2 {
+		t.Fatalf("underlying calls = %d, want >= 2 (abandoned waiter must be released at the deadline)", got)
 	}
 }

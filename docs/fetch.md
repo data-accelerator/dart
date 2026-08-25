@@ -107,11 +107,12 @@ identical fetches share one call to `F`. The **shared origin request runs on a
 bounded background context** (`MaxFlight`, default 10m): one caller's
 cancellation does not abort it — the block still completes for the other
 waiters (desirable for a cache) — but a stalled origin cannot pin it forever
-either. A call arriving after a flight's deadline evicts the stale entry and
-leads a replacement, and a late-finishing stale leader never deletes the
-replacement's entry; without the bound, one half-dead origin connection would
-poison the cache key for the process lifetime and leak one goroutine per
-abandoned waiter. Each caller's own `ctx` only bounds how long that caller
+either. A waiter blocked past the flight's deadline re-checks, evicts the
+stale entry, and leads a replacement (so abandoned waiters are released at
+the deadline even when no later caller ever arrives), and a late-finishing
+stale leader never deletes the replacement's entry; without the bound, one
+half-dead origin connection would poison the cache key for the process
+lifetime and leak one goroutine per abandoned waiter. Each caller's own `ctx` only bounds how long that caller
 waits (a cancelled caller returns `ctx.Err()`).
 
 A joiner whose flight was refused (401/403) retries once with its own
@@ -258,6 +259,7 @@ go test ./internal/fetch/ -cover -count=1
 | `TestLateStaleLeaderKeepsReplacement` | a late-finishing stale leader never deletes the replacement flight's entry |
 | `TestFlightContextBoundsStalledOrigin` | a ctx-respecting but stalled flight fails all waiters within `MaxFlight` |
 | `TestJoinerRetrySkippedWhenCallerGone` | a cancelled joiner does not fire a refusal retry |
+| `TestAbandonedWaitersReleasedAtDeadline` | a waiter abandoned with a stuck leader is released at the flight deadline even with no later caller |
 
 ## 8. Limitations & TODO
 

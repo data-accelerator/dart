@@ -427,48 +427,59 @@ type group struct {
 }
 
 type call struct {
-	wg  sync.WaitGroup
-	val Range
-	err error
-	end time.Time // deadline; zero when unbounded
+	done chan struct{} // closed when the flight completes
+	val  Range
+	err  error
+	end  time.Time // deadline; zero when unbounded
 }
 
 // Do executes fn once per in-flight key. shared reports whether the result was
 // shared with a concurrent caller.
 //
-// maxFlight bounds how long a flight may occupy its key: a call arriving after
-// the deadline evicts the stale flight and leads a replacement, so a leader
-// whose fetcher ignores context cancellation still cannot pin the key forever.
-// A late-finishing stale leader deletes only its own entry, never the
-// replacement's.
+// maxFlight bounds how long a flight may occupy its key. A joiner waits only
+// until the flight's deadline, then re-checks: if the leader overran (a stalled
+// origin, or a fetcher ignoring context), the stale entry is evicted and a
+// replacement flight led — so a dead flight releases its waiters at the
+// deadline even when nobody else ever calls. A late-finishing stale leader
+// deletes only its own entry, never the replacement's.
 func (g *group) Do(key string, maxFlight time.Duration, fn func() (Range, error)) (v Range, err error, shared bool) {
-	g.mu.Lock()
-	if g.m == nil {
-		g.m = make(map[string]*call)
-	}
-	if c, ok := g.m[key]; ok {
-		if maxFlight <= 0 || time.Now().Before(c.end) {
-			g.mu.Unlock()
-			c.wg.Wait()
-			return c.val, c.err, true
+	for {
+		g.mu.Lock()
+		if g.m == nil {
+			g.m = make(map[string]*call)
 		}
-		delete(g.m, key) // stale flight: abandon it and lead a replacement
-	}
-	c := new(call)
-	c.wg.Add(1)
-	if maxFlight > 0 {
-		c.end = time.Now().Add(maxFlight)
-	}
-	g.m[key] = c
-	g.mu.Unlock()
+		c, ok := g.m[key]
+		if ok && (maxFlight <= 0 || time.Now().Before(c.end)) {
+			g.mu.Unlock()
+			if maxFlight <= 0 {
+				<-c.done
+				return c.val, c.err, true
+			}
+			select {
+			case <-c.done:
+				return c.val, c.err, true
+			case <-time.After(time.Until(c.end)):
+				continue // deadline passed: evict the stale flight or join its replacement
+			}
+		}
+		if ok {
+			delete(g.m, key) // stale flight: abandon it and lead a replacement
+		}
+		c = &call{done: make(chan struct{})}
+		if maxFlight > 0 {
+			c.end = time.Now().Add(maxFlight)
+		}
+		g.m[key] = c
+		g.mu.Unlock()
 
-	c.val, c.err = fn()
-	c.wg.Done()
+		c.val, c.err = fn()
+		close(c.done)
 
-	g.mu.Lock()
-	if g.m[key] == c {
-		delete(g.m, key)
+		g.mu.Lock()
+		if g.m[key] == c {
+			delete(g.m, key)
+		}
+		g.mu.Unlock()
+		return c.val, c.err, false
 	}
-	g.mu.Unlock()
-	return c.val, c.err, false
 }
