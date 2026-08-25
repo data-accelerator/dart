@@ -71,19 +71,18 @@ func (p *StaticProvider) Set(members []Member) *View {
 func (p *StaticProvider) Subscribe() (<-chan *View, func()) {
 	ch := make(chan *View, 1)
 
-	// Register and snapshot under the lock: a Set either serialized before us
-	// (its Store is the view we snapshot, and it could not have notified a
-	// channel we had not registered yet) or after us (it notifies this
-	// channel). Loading first and registering second would leave a gap in
-	// which a Set is neither snapshotted nor delivered. notify() coalesces,
-	// so a Set racing in between is not lost either.
+	// Register, snapshot, and deliver under the lock: a Set either serialized
+	// before us (its Store is the view we deliver) or after us (it notifies
+	// this channel, overwriting the initial delivery). Every step outside the
+	// lock leaves a gap: Load-then-register loses a Set entirely; delivering
+	// after unlock lets a concurrent Set's notify land first and then be
+	// drained and overwritten by our stale snapshot.
 	p.mu.Lock()
 	id := p.nextID
 	p.nextID++
 	p.subs[id] = ch
-	cur := p.cur.Load()
+	notify(ch, p.cur.Load()) // deliver current state immediately
 	p.mu.Unlock()
-	notify(ch, cur) // deliver current state immediately
 
 	var once sync.Once
 	cancel := func() {
