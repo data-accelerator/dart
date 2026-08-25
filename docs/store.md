@@ -88,7 +88,8 @@ Semantics:
     at capacity, then writes and indexes the block.
 - `Get(k)` reads the block via `ReadAt`, moves it to the front of the LRU, and
   returns a fresh copy; a miss returns `(nil, false, nil)`.
-- `Has` does not affect LRU order. `Delete` frees the slot for reuse. `Len`
+- `Has` does not affect LRU order. `Delete` frees the slot for reuse (a
+  `GetReader` outstanding on that slot is torn — see §5). `Len`
   returns the number of cached blocks. `Close` closes the file and is idempotent.
 
 ```go
@@ -97,6 +98,12 @@ defer s.Close()
 _ = s.Put(store.BlockKey{Chunk: ck, Block: bi}, blockBytes)
 b, ok, _ := s.Get(store.BlockKey{Chunk: ck, Block: bi})
 ```
+
+### 3.3.1 Directory lock: `func LockDir(dir string) (*DirLock, error)`
+
+An `flock`-style guard so two nodes never share one cache directory (see §5.1).
+The returned `DirLock` is released by `Close`; on non-Unix platforms it is a
+no-op stub.
 
 ### 3.4 Two budgets: `Tiered` (owned / borrowed) with TinyLFU admission
 
@@ -108,7 +115,11 @@ type ClassStore interface {
     Stats() TieredStats
 }
 func OpenTiered(TieredOptions) (*Tiered, error) // {Path, SlotSize, Slots, OwnedFraction}
+var ErrBadTieredOptions error  // SlotSize <= 0, Slots < 2, or OwnedFraction outside (0,1)
+func (t *Tiered) Touch(k BlockKey) // record an access in the estimator without reading (used by Hybrid)
 ```
+
+`Slots >= 2` is required so both budgets get at least one slot.
 
 `Tiered` is two independent `DiskStore`s over separate files:
 
@@ -125,8 +136,24 @@ borrowed churn can only ever consume its own share.
 **Admission:** once the borrowed budget is full, a candidate is stored only if
 TinyLFU estimates it at least as popular as the block that would be evicted, so a
 stream of one-shot relayed blocks cannot wipe warm entries. A rejection is
-reported as `admitted=false`, **not** an error. `Get`/`GetReader` record accesses
-into the estimator; `Put` (the plain `Store` method) defaults to `Borrowed`.
+reported as `admitted=false`, **not** an error. The estimator counts exactly the
+traffic admission governs: **borrowed hits, misses, and insertions** — owned hits
+are excluded because owned blocks are never evicted via the sketch, and counting
+them would fire the halving cadence (sized for the borrowed budget) far too
+often, decaying warm borrowed estimates to zero where a one-shot could evict
+them. A `Hybrid` mem-tier hit still feeds the backing estimator via `Touch`, so
+a hot key's estimate does not decay while mem serves its reads; `Touch` is
+class-aware and skips owned keys (owned blocks are mirrored into mem too, so a
+class-blind touch would feed owned traffic right back in). The TinyLFU
+comparison and the evicting `Put` run inside the borrowed store's own lock
+(`putIfAdmitted`), so the victim compared is exactly the victim evicted — no
+concurrent Get/Delete/Put can reorder the LRU in between. `Put` (the plain
+`Store` method) defaults to `Borrowed`.
+
+**Class migration:** a block lives in exactly one budget. `PutClass(k, Owned)`
+drops any borrowed copy (promotion); `PutClass(k, Borrowed)` on an owned key
+keeps the owned copy and refreshes its recency (never shadows it). Re-putting an
+existing key refreshes recency in whichever budget holds it.
 
 The estimator (`sketch.go`) is a 4-bit count-min sketch plus a doorkeeper bloom
 filter with periodic halving, so it tracks *recent* popularity and the long tail
@@ -149,6 +176,9 @@ docs/engine.md).
 
 ```go
 func OpenMem(MemOptions) (*MemStore, error)      // {SlotSize, Slots}
+var ErrBadMemOptions error                       // SlotSize <= 0 or Slots <= 0
+func (m *MemStore) Slots() int                   // capacity in blocks
+func (d *DiskStore) Slots() int                  // capacity in blocks
 func NewHybrid(mem *MemStore, back ClassStore) *Hybrid
 ```
 
@@ -179,6 +209,9 @@ mem, _ := store.OpenMem(store.MemOptions{SlotSize: 4*chunk.MiB, Slots: 64})
 h := store.NewHybrid(mem, tieredDisk) // Close(h) closes both tiers
 ```
 
+`Hybrid.Len` is O(mem slots): the mem tier is checked for duplicates against
+the backing store's count. It exists for metrics/diagnostics, not hot paths.
+
 ## 4. Invariants & Guarantees
 
 1. **O(1) operations**: Put/Get/Has/Delete are O(1) (map + intrusive LRU +
@@ -201,11 +234,16 @@ h := store.NewHybrid(mem, tieredDisk) // Close(h) closes both tiers
   locking and pin/refcount for lock-free reads are future optimizations (§8).
 - `Get` returns caller-owned copies; no internal buffers are shared out.
   `GetReader`, by contrast, hands back a reader **backed by the slot** and valid
-  only until that slot is reused: without a pin, a concurrent eviction can tear
-  the bytes mid-read. Streaming a block to a socket therefore uses `Get` (an
-  in-lock copy), **not** `GetReader` — the peer plane must never emit a torn
-  block. `GetReader` remains for callers that can guarantee the block is not
-  concurrently evictable.
+  only until that slot is reused — and reuse follows **any** removal of the
+  block, eviction *and* `Delete` alike: without a pin, a concurrent eviction or
+  delete can tear the bytes mid-read, and a torn read is **silent** (no error,
+  no generation check exists to detect one). Streaming a block to a socket
+  therefore uses `Get` (an in-lock copy), **not** `GetReader` — the peer plane
+  must never emit a torn block. `GetReader` remains for callers that hold the
+  block's lifetime externally; note no store API can *make* a block
+  non-evictable, so in practice that means single-threaded consumers or blocks
+  pinned by a higher layer. It currently has no in-tree callers, which is
+  deliberate.
 - Verified with `-race` under concurrent Put/Get/Delete/Has with eviction churn.
 
 ## 5.1 Disk footprint and operational notes
@@ -296,6 +334,13 @@ go test ./internal/store/ -cover -count=1
 | `TestHybridGetReaderDoesNotPromote` | the streaming path does not buffer to populate memory |
 | `TestHybridHasDeleteLenClose` / `TestHybridPutDefaultsToBorrowed` | cross-tier Has/Delete/Len; plain Put is borrowed |
 | `TestHybridConcurrent` | concurrent mixed-class hybrid ops (`-race`) |
+| `TestOwnedTrafficDoesNotDecayBorrowedEstimates` | owned reads never feed the borrowed estimator (no premature decay of warm entries) |
+| `TestHybridMemHitsFeedBackingEstimator` | a mem-tier hit still feeds the backing Tiered estimator via Touch |
+| `TestTouchSkipsOwnedKeys` | Touch is class-aware: owned mem hits never feed the borrowed estimator |
+| `TestPutClassOwnedDropsBorrowedCopy` | promotion to owned drops the borrowed copy (one block, one budget) |
+| `TestBorrowedPutClassOnOwnedKeyRefreshesRecency` | the owned-hit branch refreshes recency as promised |
+| `TestPutClassFeedsEstimator` | insertion is an access: write-only patterns do not degenerate admission |
+| `TestBorrowedAdmissionSerializesWithEviction` | concurrent admit+evict never exceeds the budget (`-race`) |
 
 ## 8. Limitations & TODO
 

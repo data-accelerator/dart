@@ -183,32 +183,48 @@ func (s *DiskStore) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
 
 // Put inserts or refreshes a block, evicting the LRU block if at capacity.
 func (s *DiskStore) Put(k BlockKey, data []byte) error {
+	_, err := s.putIfAdmitted(k, data, nil)
+	return err
+}
+
+// putIfAdmitted is Put with an admission gate on eviction: when the store is
+// full and inserting k would evict the LRU block, the gate is consulted with
+// the victim's key and a false answer aborts the insertion (admitted=false,
+// nil) without evicting. The whole decide-then-evict-then-insert sequence runs
+// under s.mu, so the victim compared is exactly the victim evicted — no
+// concurrent Get/Delete/Put can reorder the LRU in between.
+func (s *DiskStore) putIfAdmitted(k BlockKey, data []byte, admit func(victim BlockKey) bool) (bool, error) {
 	if len(data) == 0 {
-		return ErrEmptyBlock
+		return false, ErrEmptyBlock
 	}
 	if int64(len(data)) > s.slotSize {
-		return ErrBlockTooLarge
+		return false, ErrBlockTooLarge
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Blocks are content-addressed and immutable: if already present, just
-	// refresh recency and return (avoid a redundant rewrite).
 	if slot, ok := s.index[k]; ok {
 		s.lru.MoveToFront(s.elem[slot])
-		return nil
+		return true, nil
+	}
+
+	if len(s.free) == 0 {
+		back := s.lru.Back()
+		victim := s.meta[back.Value.(int)].key
+		if admit != nil && !admit(victim) {
+			return false, nil
+		}
 	}
 
 	slot := s.acquireSlot()
 	if _, err := s.f.WriteAt(data, s.offset(slot)); err != nil {
-		// Return the slot to the free list; nothing was indexed.
 		s.free = append(s.free, slot)
-		return fmt.Errorf("store: write slot %d: %w", slot, err)
+		return false, fmt.Errorf("store: write slot %d: %w", slot, err)
 	}
 	s.meta[slot] = slotMeta{key: k, length: int64(len(data)), inUse: true}
 	s.index[k] = slot
 	s.elem[slot] = s.lru.PushFront(slot)
-	return nil
+	return true, nil
 }
 
 // acquireSlot returns a free slot id, evicting the LRU block if none are free.
@@ -262,23 +278,6 @@ func (s *DiskStore) Len() int {
 
 // Slots returns the store's capacity in blocks.
 func (s *DiskStore) Slots() int { return len(s.meta) }
-
-// evictionCandidate returns the key that Put would evict next (the
-// least-recently-used block), so an admission policy can compare a candidate
-// against it. ok is false when nothing would be evicted (free slots remain or
-// the store is empty).
-func (s *DiskStore) evictionCandidate() (BlockKey, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.free) > 0 {
-		return BlockKey{}, false
-	}
-	back := s.lru.Back()
-	if back == nil {
-		return BlockKey{}, false
-	}
-	return s.meta[back.Value.(int)].key, true
-}
 
 // Close closes the backing file. The store must not be used afterwards.
 func (s *DiskStore) Close() error {

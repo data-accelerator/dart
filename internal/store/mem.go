@@ -166,21 +166,6 @@ func (m *MemStore) Len() int {
 // Slots returns the capacity in blocks.
 func (m *MemStore) Slots() int { return m.slots }
 
-// evictionCandidate returns the key Put would evict next, for admission
-// policies. ok is false when the store is below capacity or empty.
-func (m *MemStore) evictionCandidate() (BlockKey, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(m.index) < m.slots {
-		return BlockKey{}, false
-	}
-	back := m.lru.Back()
-	if back == nil {
-		return BlockKey{}, false
-	}
-	return back.Value.(*memEntry).key, true
-}
-
 // Close drops all entries. A MemStore holds no OS resources, so Close is only
 // about releasing memory promptly; it is idempotent.
 func (m *MemStore) Close() error {
