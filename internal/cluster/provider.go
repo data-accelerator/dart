@@ -50,10 +50,15 @@ func (p *StaticProvider) Current() *View { return p.cur.Load() }
 // identical to the current one the epoch is unchanged, but subscribers are
 // still notified (they can compare epochs to no-op).
 func (p *StaticProvider) Set(members []Member) *View {
-	v := NewView(members)
-	p.cur.Store(v)
+	v := NewView(members) // build outside the lock: canonicalization can be slow
 
+	// Store and notify under one critical section: concurrent Sets then
+	// linearize on the lock, so the view that wins Current() is the one whose
+	// Set serialized last, and subscribers see every Set in that same order.
+	// Storing outside the lock would let an earlier Set's view overwrite a
+	// later one's after its subscribers were already notified.
 	p.mu.Lock()
+	p.cur.Store(v)
 	for _, ch := range p.subs {
 		notify(ch, v)
 	}
@@ -65,12 +70,18 @@ func (p *StaticProvider) Set(members []Member) *View {
 // current View, then every View published by Set.
 func (p *StaticProvider) Subscribe() (<-chan *View, func()) {
 	ch := make(chan *View, 1)
-	ch <- p.cur.Load() // deliver current state immediately
 
+	// Register, snapshot, and deliver under the lock: a Set either serialized
+	// before us (its Store is the view we deliver) or after us (it notifies
+	// this channel, overwriting the initial delivery). Every step outside the
+	// lock leaves a gap: Load-then-register loses a Set entirely; delivering
+	// after unlock lets a concurrent Set's notify land first and then be
+	// drained and overwritten by our stale snapshot.
 	p.mu.Lock()
 	id := p.nextID
 	p.nextID++
 	p.subs[id] = ch
+	notify(ch, p.cur.Load()) // deliver current state immediately
 	p.mu.Unlock()
 
 	var once sync.Once

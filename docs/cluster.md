@@ -64,8 +64,12 @@ semantics). It is retrievable via `Get`.
 ### 3.3 `type View` and `func NewView(members []Member) *View`
 
 `NewView` copies and **canonicalizes** the input: sorts by `(ID, State, Weight)`
-and de-duplicates by `ID` (keeping the first entry in that deterministic order).
-The resulting View and its epoch are therefore **independent of input order**.
+and de-duplicates by `ID`. Duplicate IDs are a conflicting-reports case: the
+canonical sort is `(ID, state rank, Weight)` with the rank **Ready > Suspect >
+Joining > Leaving**, so the entry claiming the node can serve always wins — a
+`Joining` or `Leaving` marker must never suppress a member another source still
+reports as `Ready` (placement would silently lose a serving node). The resulting
+View and its epoch are therefore **independent of input order**.
 The input slice is not modified.
 
 Methods (all on an immutable receiver; safe for concurrent use):
@@ -108,7 +112,12 @@ func (p *StaticProvider) Subscribe() (<-chan *View, func())
 ```
 
 `Subscribe` returns a **buffered(1), coalescing** channel: the current View is
-delivered immediately, then each `Set`. A slow consumer only ever sees the most
+delivered immediately, then each `Set` — atomically: registration and the
+snapshot happen under one lock, so a concurrent `Set` is either in the initial
+delivery or arrives right after, never lost in a gap. `Set` likewise stores and
+notifies under one critical section, so concurrent `Set`s linearize: the one
+serialized last owns `Current()` and subscribers observe every `Set` in that
+order. A slow consumer only ever sees the most
 recent View (intermediate ones are dropped) and the producer never blocks. The
 returned cancel func unsubscribes and is idempotent.
 
@@ -151,7 +160,11 @@ which is what makes a truncated DNS answer or a partial seed list survivable.
 
 `tracked.lastContact` is updated by a **successful roster fetch answered by that
 member**, or by that member **contacting us**. It is deliberately *not* updated by
-another peer mentioning it.
+another peer mentioning it — and that includes hearsay carrying a *changed*
+address: the newest address is adopted (a pod can be recreated with a new IP
+while keeping its identity), but the clock is untouched, since an address report
+is not liveness evidence. Otherwise two survivors flip-flopping conflicting
+reports about a dead node would refresh each other's memory of it forever.
 
 The credit goes to the member that *answered*, identified by its self-reported
 stable ID (`responderID`), never to the member that happens to advertise the
@@ -242,6 +255,10 @@ go test ./internal/cluster/ -cover -count=1
 | **`TestEpochExcludesState`** | **any combination of states yields one epoch, so the epoch can serve as a convergence token** |
 | `TestReadyLiveFilters` | Ready=Ready only, Live=Ready+Suspect, sorted, weights carried |
 | `TestDedupDeterministic` | duplicate IDs collapse deterministically regardless of order |
+| `TestDedupKeepsServingStateOverJoining` | duplicate IDs keep the most authoritative serving state (Ready > Suspect > Joining > Leaving) |
+| `TestHearsayAddrChangeDoesNotRefreshLiveness` | hearsay address changes are adopted but never refresh the liveness clock; flip-flops still expire |
+| `TestConcurrentSetLastReturnedWins` | concurrent Sets linearize: the Set serialized last owns Current() |
+| `TestSubscribeNeverMissesConcurrentSet` | a Set racing Subscribe is always delivered (no registration gap) |
 | `TestGet` | binary-search lookup, presence and absence |
 | `TestMembersCopy` | `Members()` returns a copy; View not mutable through it |
 | `TestInputNotMutated` | `NewView` does not reorder/modify the caller's slice |
