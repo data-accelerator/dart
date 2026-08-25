@@ -62,24 +62,30 @@ func TestClientAuthorizationTakesPrecedence(t *testing.T) {
 
 // TestConcurrentColdRequestsShareOneExchange pins R6d (singleflight): 8
 // concurrent cold pulls of one repository used to fire 8 token exchanges.
+// Looped: the publish ordering (cache warm before the in-flight marker is
+// removed, one critical section) must hold across scheduling windows — a
+// follower arriving in the store/unpublish gap used to lead a second
+// exchange (found in PR review).
 func TestConcurrentColdRequestsShareOneExchange(t *testing.T) {
-	tr := newTokenRegistry(t)
-	at := NewAuthTransport(nil, tr.creds())
-	path := tr.srv.URL + "/v2/library/nginx/blobs/sha256:abc"
+	for round := 0; round < 25; round++ {
+		tr := newTokenRegistry(t)
+		at := NewAuthTransport(nil, tr.creds())
+		path := tr.srv.URL + "/v2/library/nginx/blobs/sha256:abc"
 
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if resp, _ := doGet(t, at, path); resp.StatusCode != http.StatusOK {
-				t.Errorf("status = %d", resp.StatusCode)
-			}
-		}()
-	}
-	wg.Wait()
-	if got := tr.tokenIss.Load(); got != 1 {
-		t.Fatalf("token endpoint called %d times for 8 concurrent cold requests, want 1", got)
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if resp, _ := doGet(t, at, path); resp.StatusCode != http.StatusOK {
+					t.Errorf("status = %d", resp.StatusCode)
+				}
+			}()
+		}
+		wg.Wait()
+		if got := tr.tokenIss.Load(); got != 1 {
+			t.Fatalf("round %d: token endpoint called %d times for 8 concurrent cold requests, want 1", round, got)
+		}
 	}
 }
 

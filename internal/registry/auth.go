@@ -230,11 +230,12 @@ func (a *AuthTransport) authorize(ctx context.Context, ch challenge, cred Creden
 		ch.scope = scope
 	}
 	key := tokenKey(host, scope)
-	tok, expiry, err := a.fetchTokenShared(ctx, key, ch, cred)
+	// fetchTokenShared stores the token before unpublishing the in-flight
+	// call, so by the time it returns the cache is already warm.
+	tok, _, err := a.fetchTokenShared(ctx, key, ch, cred)
 	if err != nil {
 		return "", err
 	}
-	a.storeToken(key, tok, expiry)
 	return "Bearer " + tok, nil
 }
 
@@ -310,6 +311,11 @@ func (a *AuthTransport) cachedToken(key string) (string, bool) {
 func (a *AuthTransport) storeToken(key, value string, expiresAt time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.storeTokenLocked(key, value, expiresAt)
+}
+
+// storeTokenLocked stores; caller must hold a.mu.
+func (a *AuthTransport) storeTokenLocked(key, value string, expiresAt time.Time) {
 	if a.tokens == nil {
 		a.tokens = make(map[string]*cachedToken)
 	}
@@ -366,7 +372,14 @@ func (a *AuthTransport) fetchTokenShared(ctx context.Context, key string, ch cha
 
 	c.value, c.expiresAt, c.err = a.fetchToken(ctx, ch, cred)
 
+	// Publish the result to the cache BEFORE removing the in-flight marker:
+	// a follower arriving after the delete but before a later store would see
+	// neither and lead a second exchange. Under this one critical section a
+	// new entrant always sees either the in-flight call or the warm cache.
 	a.mu.Lock()
+	if c.err == nil {
+		a.storeTokenLocked(key, c.value, c.expiresAt)
+	}
 	delete(a.inflight, key)
 	a.mu.Unlock()
 	close(c.done)
