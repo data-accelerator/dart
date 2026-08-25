@@ -45,8 +45,10 @@ import (
 //	}
 //
 // Hosts must match URL.Host exactly, including a non-default port, because that
-// is the key the transport looks up and the bound that keeps a credential from
-// being sent to any other host.
+// is the key the transport looks up. The key bounds where *resource requests*
+// carry the credential; the token exchange additionally sends it to the realm
+// the upstream's 401 designates (cross-host by design — see docs/registry.md
+// §5 and AuthTransport's doc comment).
 func LoadCredentials(path string) (map[string]Credential, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -81,10 +83,16 @@ func (c Credential) basic() string {
 // AuthTransport adds registry credentials to outgoing requests, performing the
 // Distribution token exchange when the registry asks for it.
 //
-// Credentials are keyed by host and are only ever sent to a host present in the
-// map. That matters because registries redirect blob downloads to a CDN: the
-// transport is invoked again for the redirect target, and sending the registry
-// credential to an unrelated host would leak it.
+// Credentials are keyed by host: resource requests carry a credential only to a
+// host present in the map. That matters because registries redirect blob
+// downloads to a CDN: the transport is invoked again for the redirect target,
+// and sending the registry credential to an unrelated host would leak it.
+//
+// The token exchange is the deliberate exception: it GETs whatever realm the
+// upstream's 401 WWW-Authenticate header designates — cross-host (e.g.
+// registry-1.docker.io -> auth.docker.io) — carrying the credential. The realm
+// is trusted as delivered; DART does not validate it (see docs/registry.md §5
+// and docs/design-assumptions.md A2).
 type AuthTransport struct {
 	// Base carries the actual requests; nil uses http.DefaultTransport.
 	Base http.RoundTripper
