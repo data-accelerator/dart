@@ -58,8 +58,9 @@ byte-level guarantees across a mixed-geometry window are out of scope.
 
 ## A4. Weights are finite; non-positive ones are normalized to 1
 
-Placement math assumes a **finite** weight; the score formula `w / -ln(u)`
-divides by it. Non-positive weights are *not* an error: every boundary
+Placement math assumes a **finite** weight: the score formula `w / -ln(u)`
+scales a logarithmic term by it, so a non-finite weight yields an invalid
+score. Non-positive weights are *not* an error: every boundary
 normalizes `weight <= 0` to 1 (hashring's `Node.Weight` semantics, cluster's
 self/member normalization in docs/cluster.md), so placement always sees a
 positive finite number. The JSON wire additionally cannot carry NaN/±Inf at
