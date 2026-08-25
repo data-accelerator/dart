@@ -108,7 +108,9 @@ func Depth(i, n, k int) int      // number of edges from root to i (root = 0)
   `remaining mod k` segments get one extra), applied recursively.
 - `Parent` and `Children` share the internal `childSegments`, so they are
   **exact mutual inverses**.
-- **Complexity**: all O(depth·k) = O(k·log_k n), no significant extra allocation.
+- **Complexity**: all O(depth) = O(log_k n). `Parent`/`Depth` are
+  zero-allocation (each level locates the containing child segment
+  arithmetically); `Children` allocates only its result slice.
 - **Boundary**: out-of-range index or `k < 1`: `Parent`/`Depth` return -1,
   `Children` returns nil.
 - **Degenerate cases**: `k=1` → linked list (`Parent(i)=i-1`); `k ≥ n-1` → star
@@ -169,25 +171,29 @@ Callers may rely on the following (each is guarded by a test, see §7):
   changes tree shapes — a **breaking change**: it must bump the cluster epoch and
   rely on epoch convergence under the read-only semantics (while old and new
   views coexist, only routing efficiency is affected, never correctness).
-- **Floating point note**: `score` uses `math.Log` (a pure-Go implementation in
-  Go, hence cross-platform consistent); `u=(h+0.5)/2^64` stays inside `(0,1)`,
-  avoiding `ln(1)=0`/`ln(0)=-inf` — with one honest rounding edge: for the top
-  1024 uint64 hash values `float64(h)` rounds to exactly `2^64`, making `u=1.0`
-  and `score=-Inf` (probability ≈ 5.5e-17 per key-node pair). That is benign:
-  `-Inf` sorts last and ties still break by ID, so the strict total order and
-  input-order independence are unaffected — the only effect is a minuscule
-  placement bias. A strictly-inside construction would be a breaking change
-  (epoch bump, golden regeneration) to fix a 1-in-10^16 nudge; not worth it.
-  For equal weights the HRW order is
+- **Floating point note**: `score` uses `math.Log` — assembly on amd64/s390x,
+  portable Go elsewhere; the implementations are bit-identical across platforms
+  today (verified: 0 bit-differences over 50M samples, and 0 weighted-order
+  divergences in a 1000-case Python-vs-Go cross-check). The pinned tests compare
+  *orders*, never raw floats, so a future 1-ulp toolchain drift would only
+  surface at an exact tie. `u=(h+0.5)/2^64` stays inside `(0,1)` — except the
+  top 1024 uint64 hash values, where float64 rounding yields `u=1.0` exactly
+  (score `-Inf`, probability ≈ 5.5e-17 per key-node pair; benign: `-Inf` sorts
+  last and ties still break by ID, so the total order and input-order
+  independence hold). For equal weights the HRW order is
   equivalent to descending `Hash64` integer order — cross-validation confirmed
   the float order == the integer order, and the measured minimum hash gap
   (~5.5e16) far exceeds the float-ambiguity threshold (~2^11), so floating point
   introduces no ordering ambiguity. (`Weight` values that are NaN or non-finite
   cannot arrive: weights are JSON-carried or hardcoded — see A4 of
   docs/design-assumptions.md.)
-- **Golden value source**: the `Hash64` golden values were computed by an
-  **independent Python implementation** (not by the Go code itself), forming a
-  genuine cross-implementation guard; changing the hash trips the golden test
+- **Golden value source**: the golden values (`Hash64`, weighted and
+  equal-weight `Rank` orders — plus `ChunkKey` and epoch in their packages) are
+  computed by an **independent Python implementation**,
+  `contrib/golden/golden_reference.py`, tracked in this repo. CI runs it and
+  diffs every record against the live Go code (`DART_GOLDEN_REF=1 go test`),
+  so the "independent implementation" claim is executable and regenerating
+  goldens has a canonical source. Changing the hash trips the golden test
   immediately.
 
 ## 7. Testing
@@ -212,6 +218,10 @@ go test ./internal/hashring/ -cover -count=1
 |---|---|
 | `TestHash64Golden` | `Hash64` matches the 5 golden values from an independent Python reference (cross-implementation determinism) |
 | `TestRankGolden` | full ordering for a fixed node-set+key matches the golden order (float order == integer order) |
+| `TestRankWeightedGolden` | weighted w / -ln(u) ordering pinned against the Python reference |
+| `TestHash64AgainstPythonReference` | CI (DART_GOLDEN_REF=1) diffs every golden record against the tracked Python script |
+| `TestParentZeroAllocs` / `TestDepthZeroAllocs` | tree navigation allocates nothing (arithmetic child-segment location) |
+| `TestChildSegmentMatchesChildSegments` | the arithmetic locator agrees with the materializing partition on an exhaustive grid |
 | `TestRankShuffleInvariant` | 200 random input shuffles yield byte-identical `Rank` output (core coordination-free property) |
 | `TestRankDoesNotMutateInput` | `Rank` does not mutate the caller's slice |
 | `TestRankIsPermutation` | output is a permutation of the input, no dupes/omissions |

@@ -201,6 +201,7 @@ go test ./internal/chunk/ -cover -count=1
 | Test | Property guarded |
 |---|---|
 | `TestChunkKeyGolden` | `ChunkKey` matches an independent Python reference (serialization pinned) |
+| `TestChunkKeyAgainstPythonReference` | CI diffs the ChunkKey goldens against the tracked Python script |
 | `TestConfigValidate` | valid/invalid configs; `BlocksPerChunk` |
 | `TestGridMath` | ChunkIndex/BlockIndex/ChunkOfBlock/BlockStart across boundaries |
 | `TestSegmentsSingleBlock` | a small read maps to exactly one block/sub-range |

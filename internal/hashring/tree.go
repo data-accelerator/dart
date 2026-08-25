@@ -49,10 +49,39 @@ func childSegments(lo, hi, k int) [][2]int {
 	return segs
 }
 
+// childSegment locates, within the children of [lo,hi], the segment containing
+// position i — the same partition childSegments materializes, computed
+// arithmetically with no allocation.
+func childSegment(lo, hi, k, i int) (int, int, bool) {
+	childLo := lo + 1
+	if k < 1 || childLo > hi || i < childLo || i > hi {
+		return -1, -1, false
+	}
+	remaining := hi - childLo + 1
+	base := remaining / k
+	extra := remaining % k
+	// Segments 0..extra-1 have size base+1, the rest base; segment c starts at
+	// childLo + c*base + min(c, extra).
+	boundary := childLo + extra*(base+1)
+	if i < boundary {
+		c := (i - childLo) / (base + 1)
+		s := childLo + c*(base+1)
+		return s, s + base, true // size base+1
+	}
+	if base == 0 {
+		return -1, -1, false // unreachable: boundary == hi+1 when base == 0
+	}
+	c := extra + (i-boundary)/base
+	s := boundary + (c-extra)*base
+	return s, s + base - 1, true // size base
+}
+
 // descend walks from the whole range [0, n-1] down to the subtree whose root
 // is position i. It calls visit(root) at every ancestor root encountered,
 // including i's own position last, and returns i's subtree range [lo, hi]. For
 // an out-of-range i (or k < 1) it returns (-1, -1) and does not call visit.
+// Zero-allocation: each level locates the containing child segment
+// arithmetically (childSegment).
 func descend(i, n, k int, visit func(root int)) (int, int) {
 	if i < 0 || i >= n || k < 1 {
 		return -1, -1
@@ -65,19 +94,13 @@ func descend(i, n, k int, visit func(root int)) (int, int) {
 		if i == lo {
 			return lo, hi
 		}
-		moved := false
-		for _, s := range childSegments(lo, hi, k) {
-			if i >= s[0] && i <= s[1] {
-				lo, hi = s[0], s[1]
-				moved = true
-				break
-			}
-		}
-		if !moved {
+		nlo, nhi, ok := childSegment(lo, hi, k, i)
+		if !ok {
 			// Unreachable for a valid i in [0,n): every descendant lands in
 			// exactly one child segment.
 			return -1, -1
 		}
+		lo, hi = nlo, nhi
 	}
 }
 
