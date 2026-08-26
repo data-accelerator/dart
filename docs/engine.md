@@ -360,6 +360,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestEngineP2PPeerMissFallsBackToOrigin` | empty peer (404) → origin fallback, correct bytes |
 | `TestEngineP2PSelfOwnerUsesOrigin` | self is owner → peers not consulted, origin used |
 | `TestPeerSourceRelayFetchOnBehalf` | relay Source fetches-on-behalf and serves a block it did not hold |
+| **`TestRelayHopBoundary`** | **both peer-facing sources: hop == maxHop-1 still relays; hop == maxHop declines without touching the origin** |
 | `TestTreeMultiHopRelay` | 3-node fanout=1 chain: a tail request populates every node via the relay chain |
 | `TestPeerStreamSourceLocalHit` | locally-held block streamed from the store |
 | `TestPeerStreamSourceRootFetchesOrigin` | tree root satisfies a relay request from origin and caches it |

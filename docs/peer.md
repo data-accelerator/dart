@@ -31,10 +31,19 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   `store.BlockKey.Block` in base-10.
 - `X-DART-Origin` lets a relay-capable Source fetch a block it does not hold
   (via its own parent/origin); `X-DART-Hop` bounds relay recursion.
+- `X-DART-Hop` is optional (absent = depth 0) and must be a non-negative
+  decimal int; any other value — malformed, negative, or out of range — is
+  rejected with `400` before the Source is invoked. Accepting a negative hop
+  would weaken the engine's relay-loop bound (`hop >= maxHop`, incremented at
+  each relay): a negative start would delay the cutoff, a huge negative one
+  effectively forever. The bound itself (`maxHop`) is enforced by the engine,
+  not here, so any non-negative value — including one at or past the bound —
+  is a valid wire value at this layer.
 - Responses: `200` + block bytes (with `X-DART-Node`; `Content-Length` when
   the source knows the size up front, chunked otherwise — e.g. on the
   cut-through relay path), `404` if the peer cannot provide the block, `400`
-  for a malformed path, `405` for non-GET, `500` on a source error, and `502` +
+  for a malformed path or an invalid `X-DART-Hop`, `405` for non-GET, `500`
+  on a source error, and `502` +
   `X-DART-Upstream-Status: <origin code>` when a relay's origin fetch was
   refused (§3.6 — the peer is fine; the caller's credential is not).
 - The path has no embedded URLs, so it is parsed from `URL.Path` (no `//` trap).
@@ -330,6 +339,8 @@ go test ./internal/peer/ -race -count=1
 | `TestClientMiss` | a not-held block yields `held=false, err=nil` (404) |
 | `TestServerNodeHeader` | `X-DART-Node` echoed on responses |
 | `TestServerBadPathAndMethod` | malformed paths → 400/404; non-GET → 405 |
+| **`TestServerHopValidation`** | **both servers: absent hop = 0; non-negative hops (incl. ≥ the engine's relay bound) accepted; negative/malformed/overflow hops → 400 and the Source is never invoked** |
+| `TestParseHop` | decoder edges: empty, leading plus, `-0`, overflow |
 | `TestServerSourceError` | a source error → 500 |
 | `TestClientConnError` | a closed peer port surfaces a transport error |
 | `TestParseBlockPath` | path parsing incl. max uint64 and rejects |
