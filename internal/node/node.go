@@ -31,7 +31,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -115,6 +114,64 @@ func newThrottledLogger(out io.Writer) func(error) {
 	}
 }
 
+// admissionGate is a closeable admission counter. "Admit + count" and "close
+// admission" are serialized under one mutex, so after close no handler can
+// enter the tracked set — a waiter therefore sees a stable, only-shrinking
+// count. This replaces the atomic.Bool+WaitGroup pair, whose Add(1)-after-zero
+// racing Wait() was formally outside the WaitGroup contract even when the
+// late handler was harmless (issue #45).
+type admissionGate struct {
+	mu     sync.Mutex
+	cond   *sync.Cond
+	closed bool
+	active int
+}
+
+func newAdmissionGate() *admissionGate {
+	g := &admissionGate{}
+	g.cond = sync.NewCond(&g.mu)
+	return g
+}
+
+// enter admits the caller into the tracked set, or reports rejection once the
+// gate is closed. A rejected caller never touches the count.
+func (g *admissionGate) enter() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.active++
+	return true
+}
+
+// exit leaves the tracked set; every enter must pair with exactly one exit.
+func (g *admissionGate) exit() {
+	g.mu.Lock()
+	g.active--
+	if g.active <= 0 && g.closed {
+		g.cond.Broadcast()
+	}
+	g.mu.Unlock()
+}
+
+// close stops admissions; entered handlers remain tracked until they exit.
+func (g *admissionGate) close() {
+	g.mu.Lock()
+	g.closed = true
+	g.cond.Broadcast()
+	g.mu.Unlock()
+}
+
+// wait blocks until the gate is closed and every admitted handler has exited.
+func (g *admissionGate) wait() {
+	g.mu.Lock()
+	for !(g.closed && g.active == 0) {
+		g.cond.Wait()
+	}
+	g.mu.Unlock()
+}
+
 // lockedWriter serializes concurrent writes to the caller's out: the banner
 // and shutdown lines race the discovery diagnostics goroutine otherwise, and
 // nothing in Run's contract lets us assume out is concurrency-safe.
@@ -145,53 +202,17 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	if err != nil {
 		return err
 	}
-	defer n.closer.Close()
+	// NOTE: no deferred n.closer.Close() — the store is closed by finish()
+	// only when no handler was abandoned mid-flight (issue #45's lifetime
+	// contract). A deferred close would run even on the abandon path.
 
-	// Per-server in-flight handler tracking: a timed-out graceful drain
-	// force-closes connections, but Close does not join the handler goroutines
-	// — and the deferred closer is about to close the store under them.
-	// shutdownAll waits (briefly, bounded) for that server's tracker to empty
-	// before returning. Per-server (not shared): a shared WaitGroup would race
-	// Add-during-Wait while a sibling server still accepts connections.
-	type tracked struct {
-		srv      *http.Server
-		wg       *sync.WaitGroup
-		draining *atomic.Bool
-	}
-	// The wrapper counts BEFORE checking the drain gate: a closer that sets
-	// draining and then waits can never miss a handler that has entered (it is
-	// already counted), and one that arrives after the gate is set bails with
-	// 503 without touching the store. Entry-after-Close is therefore closed
-	// structurally, not by timing.
-	track := func(h http.Handler) (*sync.WaitGroup, *atomic.Bool, http.Handler) {
-		wg := &sync.WaitGroup{}
-		draining := &atomic.Bool{}
-		return wg, draining, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			wg.Add(1)
-			defer wg.Done()
-			if draining.Load() {
-				http.Error(w, "dart: shutting down", http.StatusServiceUnavailable)
-				return
-			}
-			h.ServeHTTP(w, r)
-		})
-	}
-
-	var servers []tracked
-	add := func(addr string, h http.Handler) {
-		wg, draining, th := track(h)
-		servers = append(servers, tracked{
-			srv:      &http.Server{Addr: addr, Handler: th, ReadHeaderTimeout: 15 * time.Second},
-			wg:       wg,
-			draining: draining,
-		})
-	}
-	add(cfg.listen, n.client)
+	ss := newServerSet()
+	ss.add(cfg.listen, n.client)
 	if n.peer != nil {
-		add(cfg.peerListen, n.peer)
+		ss.add(cfg.peerListen, n.peer)
 	}
 	if n.admin != nil {
-		add(cfg.adminAddr, n.admin)
+		ss.add(cfg.adminAddr, n.admin)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -207,14 +228,7 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 		go n.discover.Run(ctx)
 	}
 
-	errCh := make(chan error, len(servers))
-	for _, tr := range servers {
-		go func(s *http.Server) {
-			if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				errCh <- err
-			}
-		}(tr.srv)
-	}
+	errCh := ss.serve()
 
 	// The registry mirror does not replace the other front end: both are dispatched
 	// on the same listener by request path and share one cache. Reporting only one
@@ -242,64 +256,158 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	fmt.Fprintf(out, "dart client=%s | mode: %s | p2p: %s | admin: %s | cache: %s (%d MiB)\n",
 		cfg.listen, mode, p2p, adminMode, cfg.cacheDir, cfg.cacheSize/chunk.MiB)
 
-	shutdownAll := func() error {
-		// Each server gets its own full drain budget, concurrently: a shared
-		// sequential budget lets a long-draining client server expire the
-		// context before the peer/admin Shutdown calls even start — killing
-		// precisely the relay connections a draining node should close cleanly.
-		var wg sync.WaitGroup
-		errs := make(chan error, len(servers))
-		for _, tr := range servers {
-			wg.Add(1)
-			go func(tr tracked) {
-				defer wg.Done()
-				shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				err := tr.srv.Shutdown(shutCtx)
-				if err != nil {
-					// The drain deadline expired with handlers still running:
-					// close the gate FIRST (new handler entries 503 instead of
-					// touching the store), force-close the connections, then
-					// wait for the handlers that had already entered — Close
-					// does not join handler goroutines. The 2s grace is the
-					// last-resort bound: a handler still stuck after 10s drain
-					// + force-close + 2s grace is abandoned (the process is
-					// exiting); anything longer would hang shutdown on a wedged
-					// handler, which is worse.
-					tr.draining.Store(true)
-					tr.srv.Close()
-					done := make(chan struct{})
-					go func() { tr.wg.Wait(); close(done) }()
-					select {
-					case <-done:
-					case <-time.After(2 * time.Second):
-					}
-				}
-				errs <- err
-			}(tr)
-		}
-		wg.Wait()
-		close(errs)
-		for err := range errs {
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+	// Resource-lifetime contract (issue #45): the store and cache-dir lock are
+	// closed on return ONLY when every admitted handler has exited. If the
+	// final join grace expires with a handler still live, closing the store
+	// under it would trade a clean error path for use-after-close; the
+	// resources are deliberately left open instead — the shipped commands exit
+	// right after Run returns, so the OS reclaims them, and the held lock
+	// keeps another node from opening the cache dir while a handler may still
+	// write.
+	finish := func(runErr error, abandoned int) error {
+		return finishRun(n, out, runErr, abandoned)
 	}
 
 	select {
 	case err := <-errCh:
-		// A server died early: the deferred closer is about to close the store
-		// and release the cache-dir lock — the siblings must not keep serving
-		// (admin would still answer /admin/stats over a closed store). Shut
-		// them down before returning.
-		_ = shutdownAll()
-		return err
+		// A server died early: the siblings must not keep serving over the
+		// store that is about to be released. Shut them down before returning.
+		shutErr, abandoned := ss.shutdown(drainBudget, joinGrace)
+		if runErr := err; runErr != nil {
+			_ = shutErr
+			return finish(runErr, abandoned)
+		}
+		return finish(shutErr, abandoned)
 	case <-ctx.Done():
 		fmt.Fprintln(out, "dart shutting down...")
-		return shutdownAll()
+		err, abandoned := ss.shutdown(drainBudget, joinGrace)
+		return finish(err, abandoned)
 	}
+}
+
+// finishRun applies the resource-lifetime contract at Run exit: the store and
+// cache-dir lock are closed only when no admitted handler was abandoned
+// mid-flight. On the abandon path the resources are deliberately left open —
+// closing a store under a live handler would trade a clean error path for
+// use-after-close (its contract says "must not be used afterwards"); the
+// shipped commands exit right after Run returns, so the OS reclaims them, and
+// the held lock keeps another node from opening the cache dir while a handler
+// may still write.
+func finishRun(n *node, out io.Writer, runErr error, abandoned int) error {
+	if abandoned == 0 {
+		n.closer.Close()
+		return runErr
+	}
+	fmt.Fprintf(out, "dart: %d handler(s) still running after forced shutdown; "+
+		"store and cache-dir lock deliberately left open (process exit reclaims them)\n", abandoned)
+	return runErr
+}
+
+// Shutdown budgets, as package variables so tests can shrink them.
+var (
+	drainBudget = 10 * time.Second
+	joinGrace   = 2 * time.Second
+)
+
+// serverSet bundles the node's HTTP servers with per-server admission gates.
+type serverSet struct {
+	servers []gatedServer
+}
+
+type gatedServer struct {
+	srv  *http.Server
+	gate *admissionGate
+}
+
+func newServerSet() *serverSet { return &serverSet{} }
+
+// add registers one server; its handler is wrapped in the admission gate so a
+// request admitted before the gate closes is counted, and one arriving after
+// gets a 503 without touching the store.
+func (ss *serverSet) add(addr string, h http.Handler) {
+	gate := newAdmissionGate()
+	ss.servers = append(ss.servers, gatedServer{
+		gate: gate,
+		srv: &http.Server{
+			Addr: addr,
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !gate.enter() {
+					http.Error(w, "dart: shutting down", http.StatusServiceUnavailable)
+					return
+				}
+				defer gate.exit()
+				h.ServeHTTP(w, r)
+			}),
+			ReadHeaderTimeout: 15 * time.Second,
+		},
+	})
+}
+
+// serve starts all servers and returns a channel carrying the first fatal
+// serve error (buffered; http.ErrServerClosed is normal and never reported).
+func (ss *serverSet) serve() <-chan error {
+	errCh := make(chan error, len(ss.servers))
+	for _, gs := range ss.servers {
+		go func(s *http.Server) {
+			if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}(gs.srv)
+	}
+	return errCh
+}
+
+// shutdown drains every server concurrently, each with its own drain budget
+// (a shared sequential budget would let a long client drain expire the
+// context before the peer/admin Shutdown calls even start). A server whose
+// drain exceeds the budget is force-closed: its gate closes first (new
+// admissions 503 without touching the store), then connections, then the
+// already-admitted handlers are joined for up to grace — Close does not join
+// handler goroutines, hence the explicit wait. It returns the first error and
+// how many handlers were still live when the grace expired (the caller must
+// not close shared resources underneath them).
+func (ss *serverSet) shutdown(drain, grace time.Duration) (error, int) {
+	var wg sync.WaitGroup
+	type result struct {
+		err       error
+		abandoned int
+	}
+	results := make(chan result, len(ss.servers))
+	for _, gs := range ss.servers {
+		wg.Add(1)
+		go func(gs gatedServer) {
+			defer wg.Done()
+			shutCtx, cancel := context.WithTimeout(context.Background(), drain)
+			defer cancel()
+			err := gs.srv.Shutdown(shutCtx)
+			abandoned := 0
+			if err != nil {
+				gs.gate.close()
+				gs.srv.Close()
+				done := make(chan struct{})
+				go func() { gs.gate.wait(); close(done) }()
+				select {
+				case <-done:
+				case <-time.After(grace):
+					gs.gate.mu.Lock()
+					abandoned = gs.gate.active
+					gs.gate.mu.Unlock()
+				}
+			}
+			results <- result{err, abandoned}
+		}(gs)
+	}
+	wg.Wait()
+	close(results)
+	var firstErr error
+	totalAbandoned := 0
+	for r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		}
+		totalAbandoned += r.abandoned
+	}
+	return firstErr, totalAbandoned
 }
 
 func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config, error) {

@@ -60,6 +60,24 @@ one line per minute with a suppression count. `version` is what `-version`
 prints — commands stamp
 theirs via `-ldflags "-X main.version=..."` and pass it through.
 
+**Handler-lifetime contract** (the precise statement behind "nothing keeps
+serving over the closed store"): every server handler runs behind a closeable
+**admission gate** — a mutex-serialized counter, not a WaitGroup, so "admit +
+count" and "close admission" cannot interleave (an `Add` after the count hit
+zero racing `Wait` would be outside the WaitGroup contract). A server whose
+drain exceeds its budget is force-closed: the gate closes first (new requests
+get 503 without touching the store), connections close, then the handlers that
+had already been admitted are joined for up to a 2s grace — `Server.Close`
+closes connections but does not join handler goroutines, hence the explicit
+wait. If the grace expires with a handler still live, `Run` returns **without
+closing the store or releasing the cache-dir lock** and logs the abandon:
+closing a store under a live handler would be use-after-close (its contract
+says "must not be used afterwards"), while leaving them open is reclaimed by
+the OS when the command exits — and the held lock keeps another node from
+opening the cache dir meanwhile. In practice every dart handler unwinds on
+request-context cancellation, so the abandon path is only reachable by a
+handler that ignores cancellation past 10s drain + force-close + 2s grace.
+
 `schemes` is the discovery-scheme table for `-discover`; see §3.2. Errors from
 flag parsing, validation, store/engine construction and `ListenAndServe` are
 returned, not logged-and-continued.
@@ -172,6 +190,9 @@ the extraction:
 | `TestDiscoveryErrorsRoutedAndThrottled` | discovery errors go to `out`, one line/minute with a suppression count |
 | `TestOutWriterIsSerialized` | all out writes are serialized through the lockedWriter |
 | `TestEarlyListenerFailureShutsSiblings` | an early bind failure shuts down the peer/admin servers before Run returns |
+| `TestAdmissionGateRejectsAfterCloseWithoutCounting` / `TestAdmissionGateStress` | the admission gate rejects post-close entries without touching the count; 20 rounds of concurrent enter/exit/close/wait under -race |
+| `TestServerSetAbandonsWedgedHandler` / `TestServerSetJoinsCooperativeHandler` | a handler ignoring cancellation is abandoned (not closed-under) after drain+grace; a cooperative handler is joined cleanly |
+| `TestFinishRunLeavesStoreOpenWhenAbandoned` | abandon path: store/cache-dir lock deliberately left open (LockDir still fails); clean path: lock released |
 | `TestRedactURLUserinfo` | the startup banner strips URL userinfo (no credentials in logs) |
 | `TestBuildKeepsSeederForLifecycle` | the built node retains its seeder and its optional `Run(ctx)` stays assertable |
 | `TestSchemes` (in `cmd/dart` and `providers/k8s/cmd/dart-k8s`) | each binary wires exactly its intended scheme set |
