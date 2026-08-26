@@ -93,3 +93,28 @@ func TestServerHopValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestParseHop exercises the decoder directly, including the values strconv
+// accepts that the wire never produces (a leading plus).
+func TestParseHop(t *testing.T) {
+	cases := []struct {
+		in      string
+		wantHop int
+		wantOK  bool
+	}{
+		{"", 0, true},
+		{"0", 0, true},
+		{"7", 7, true},
+		{"+5", 5, true}, // strconv.Atoi semantics; harmless and accepted
+		{"-1", 0, false},
+		{"-0", 0, true}, // Atoi("-0") == 0, which is in domain
+		{"abc", 0, false},
+		{"9223372036854775808", 0, false},
+	}
+	for _, tc := range cases {
+		hop, ok := parseHop(tc.in)
+		if ok != tc.wantOK || (ok && hop != tc.wantHop) {
+			t.Errorf("parseHop(%q) = (%d, %v), want (%d, %v)", tc.in, hop, ok, tc.wantHop, tc.wantOK)
+		}
+	}
+}
