@@ -9,5 +9,7 @@ description: >-
 type: application
 # version is the chart version; bump it on every chart change.
 version: 0.2.0
-# appVersion tracks the DART image tag the chart defaults to.
+# appVersion names the DART release (image tag) this chart version targets;
+# the default image.tag stays "dev" (source-build convention) — set it to this
+# value when deploying a tagged release.
 appVersion: "v0.2.0"
