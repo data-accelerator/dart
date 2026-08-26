@@ -357,6 +357,123 @@ func TestBreakerSweepsCleanEntries(t *testing.T) {
 	}
 }
 
+// TestBreakerCapHardUnderFailedChurn pins issue #54: the sweep only removes
+// information-free entries, so churning distinct addresses that all carry
+// failure state used to grow the map past maxTrackedPeers without bound. The
+// cap is now a hard bound: once the sweep frees nothing, the
+// least-recently-active entry is evicted instead. Each flavor below builds
+// dirty entries a different way; all must stay within the cap.
+func TestBreakerCapHardUnderFailedChurn(t *testing.T) {
+	const churn = maxTrackedPeers + 100
+	flavors := []struct {
+		name string
+		// dirty gives addr state that survives the information-free sweep.
+		dirty func(b *Breaker, clk *brkClock, addr string)
+		// check pins the surviving behavior of a recently-touched address.
+		check func(t *testing.T, b *Breaker, addr string)
+	}{
+		{
+			name:  "failures below threshold",
+			dirty: func(b *Breaker, clk *brkClock, addr string) { b.RecordFailure(addr) },
+			check: func(t *testing.T, b *Breaker, addr string) {
+				b.RecordFailure(addr) // second of three: must still be closed
+				if b.State(addr) != BreakerClosed {
+					t.Fatalf("addr with failures below threshold = %v, want closed", b.State(addr))
+				}
+			},
+		},
+		{
+			name:  "open circuits",
+			dirty: func(b *Breaker, clk *brkClock, addr string) { b.RecordHardFailure(addr) },
+			check: func(t *testing.T, b *Breaker, addr string) {
+				if b.State(addr) != BreakerOpen {
+					t.Fatalf("recently hard-failed addr = %v, want open", b.State(addr))
+				}
+				if b.Allow(addr) {
+					t.Fatal("an open circuit must reject requests")
+				}
+			},
+		},
+		{
+			name: "half-open probes in flight",
+			dirty: func(b *Breaker, clk *brkClock, addr string) {
+				b.RecordHardFailure(addr)
+				clk.advance(time.Minute + time.Millisecond) // past cooldown
+				if !b.Allow(addr) {                         // reserves the probe slot
+					t.Fatalf("addr %s should admit a probe after cooldown", addr)
+				}
+			},
+			check: func(t *testing.T, b *Breaker, addr string) {
+				if b.State(addr) != BreakerHalfOpen {
+					t.Fatalf("addr with a probe in flight = %v, want half-open", b.State(addr))
+				}
+			},
+		},
+	}
+	for _, f := range flavors {
+		t.Run(f.name, func(t *testing.T) {
+			clk := newBrkClock()
+			b := NewBreaker(BreakerOptions{FailureThreshold: 3, Cooldown: time.Minute, Now: clk.now})
+			for i := 0; i < churn; i++ {
+				clk.advance(time.Millisecond) // distinct lastActive per address
+				f.dirty(b, clk, fmt.Sprintf("peer-%d", i))
+			}
+			b.mu.Lock()
+			n := len(b.peers)
+			b.mu.Unlock()
+			if n > maxTrackedPeers {
+				t.Fatalf("peers map = %d entries after churning %d dirty addresses, want <= %d (hard bound)", n, churn, maxTrackedPeers)
+			}
+			// The most recently touched address must survive eviction with
+			// its breaker behavior intact.
+			f.check(t, b, fmt.Sprintf("peer-%d", churn-1))
+		})
+	}
+}
+
+// TestBreakerEvictionDropsStalest pins the eviction victim choice under issue
+// #54: under map pressure with no sweepable entries, the least-recently-active
+// entry goes first, so a peer that is still being routed to never loses its
+// circuit state.
+func TestBreakerEvictionDropsStalest(t *testing.T) {
+	clk := newBrkClock()
+	b := NewBreaker(BreakerOptions{FailureThreshold: 3, Cooldown: time.Hour, Now: clk.now})
+	// Fill the map to the cap with dirty entries, oldest first.
+	for i := 0; i < maxTrackedPeers; i++ {
+		clk.advance(time.Millisecond)
+		b.RecordFailure(fmt.Sprintf("stale-%d", i))
+	}
+	// A sick peer that stays in rotation: opened, then touched again most
+	// recently of all.
+	for i := 0; i < 3; i++ {
+		b.RecordFailure("sick-peer")
+	}
+	clk.advance(time.Millisecond)
+	b.Allow("sick-peer") // rejected (open) but still activity: freshest entry
+	// Churn more dirty addresses to force LRU evictions.
+	for i := 0; i < 100; i++ {
+		clk.advance(time.Millisecond)
+		b.RecordFailure(fmt.Sprintf("churn-%d", i))
+	}
+	b.mu.Lock()
+	n := len(b.peers)
+	_, stale0Present := b.peers["stale-0"] // the stalest entry
+	_, sickPresent := b.peers["sick-peer"]
+	b.mu.Unlock()
+	if n > maxTrackedPeers {
+		t.Fatalf("peers map = %d entries, want <= %d", n, maxTrackedPeers)
+	}
+	if stale0Present {
+		t.Fatal("the stalest entry must be the first eviction victim")
+	}
+	if !sickPresent {
+		t.Fatal("an actively routed-to peer must never be evicted")
+	}
+	if b.State("sick-peer") != BreakerOpen {
+		t.Fatal("the active peer's open circuit must survive eviction pressure")
+	}
+}
+
 // TestCallerCancelNotChargedToPeer pins issue #9 (P2a): a caller-aborted read
 // (hedging loser, client disconnect) used to record a soft failure against the
 // healthy peer — one cancel with FailureThreshold 1 opened the circuit. Caller

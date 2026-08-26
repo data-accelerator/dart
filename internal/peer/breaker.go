@@ -85,6 +85,12 @@ type breakerEntry struct {
 	failures int       // consecutive failures
 	openedAt time.Time // when the circuit last opened
 	inFlight int       // half-open probes currently outstanding
+	// lastActive stamps the last request activity (Allow or a Record*
+	// report). It keys LRU eviction under map pressure: an entry nobody
+	// routes to anymore is stale state for a departed address. Read-only
+	// observers (State/Healthy/OpenCount) do not stamp it — a metrics
+	// scrape must not launder every entry into "recently used".
+	lastActive time.Time
 }
 
 // NewBreaker creates a Breaker.
@@ -111,10 +117,15 @@ func NewBreaker(opt BreakerOptions) *Breaker {
 	return b
 }
 
-// maxTrackedPeers bounds the peer map; past it, information-free entries
-// (closed, no failures, no probes in flight) are swept before a new entry is
-// created. Entries with state are never evicted: a sick peer's circuit must
-// not silently reset.
+// maxTrackedPeers is a hard bound on the peer map. Past it, a new entry first
+// triggers a sweep of information-free entries (closed, no failures, no probes
+// in flight); if the sweep frees nothing — every tracked address still carries
+// failure state, as under failed-address churn — the least-recently-active
+// entry is evicted instead, so the map can never grow past the cap. Evicting a
+// dirty entry resets that peer's circuit to closed, which is safe: the victim
+// is by construction the address no request has touched for the longest time,
+// and if it is genuinely sick and still in rotation, the next request
+// re-creates the entry and re-accumulates the failures.
 const maxTrackedPeers = 4096
 
 // entryLocked returns (creating if needed) the peer's circuit, first applying any
@@ -124,6 +135,9 @@ func (b *Breaker) entryLocked(addr string) *breakerEntry {
 	if e == nil {
 		if len(b.peers) >= maxTrackedPeers {
 			b.sweepLocked()
+			if len(b.peers) >= maxTrackedPeers {
+				b.evictStalestLocked()
+			}
 		}
 		e = &breakerEntry{state: BreakerClosed}
 		b.peers[addr] = e
@@ -146,6 +160,23 @@ func (b *Breaker) sweepLocked() {
 	}
 }
 
+// evictStalestLocked drops the entry with the oldest lastActive stamp — the
+// address no request has touched for the longest time. It runs only when the
+// sweep found nothing to free, i.e. the map is full of stateful entries, so
+// the cost of the O(n) scan is paid once per eviction at the cap, never on
+// the hot path. Caller must hold b.mu.
+func (b *Breaker) evictStalestLocked() {
+	var stalest string
+	var at time.Time
+	first := true
+	for addr, e := range b.peers {
+		if first || e.lastActive.Before(at) {
+			stalest, at, first = addr, e.lastActive, false
+		}
+	}
+	delete(b.peers, stalest)
+}
+
 // Allow reports whether a request to addr may proceed. When it returns true in
 // the half-open state it has reserved a probe slot, so the caller MUST report the
 // outcome via RecordSuccess or RecordFailure.
@@ -153,6 +184,7 @@ func (b *Breaker) Allow(addr string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e := b.entryLocked(addr)
+	e.lastActive = b.now() // a routing attempt is activity, even when rejected
 	switch e.state {
 	case BreakerOpen:
 		return false
@@ -173,6 +205,7 @@ func (b *Breaker) RecordSuccess(addr string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e := b.entryLocked(addr)
+	e.lastActive = b.now()
 	if e.inFlight > 0 {
 		e.inFlight--
 	}
@@ -187,6 +220,7 @@ func (b *Breaker) RecordFailure(addr string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e := b.entryLocked(addr)
+	e.lastActive = b.now()
 	if e.inFlight > 0 {
 		e.inFlight--
 	}
@@ -218,6 +252,7 @@ func (b *Breaker) RecordHardFailure(addr string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	e := b.entryLocked(addr)
+	e.lastActive = b.now()
 	if e.inFlight > 0 {
 		e.inFlight--
 	}

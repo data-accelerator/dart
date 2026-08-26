@@ -179,10 +179,19 @@ request dies: a late failure arriving while already open does not restamp
 `openedAt`, so a trickle of late completions cannot pin the circuit open. Only
 the Closed→Open threshold transition and a failed half-open probe stamp it.
 
-**The peer map is bounded.** Past 4096 tracked addresses, entries that carry no
-information (closed, zero failures, no probes in flight) are swept before a new
-entry is created; entries with state are never evicted, so a sick peer's circuit
-cannot silently reset.
+**The peer map is hard-bounded at 4096 tracked addresses.** Past the cap,
+creating an entry first sweeps entries that carry no information (closed, zero
+failures, no probes in flight). If the sweep frees nothing — every tracked
+address still carries failure state, as happens under failed-address churn in
+a long-lived dynamic cluster — the **least-recently-active** entry is evicted
+instead, so the map can never grow past the cap. Activity is stamped by
+request paths only (`Allow` and the `Record*` reports); read-only observers
+(`State`/`Healthy`/`OpenCount`) never stamp, so a metrics scrape cannot
+launder stale entries into "recently used". Evicting a dirty entry resets
+that peer's circuit to closed, which is safe: the victim is by construction
+the address no request has touched for the longest time — almost always a
+departed node — and if it is genuinely sick and still in rotation, the next
+request re-creates the entry and re-accumulates the failures.
 
 Failures are split by how conclusive they are, which `Client` classifies
 automatically:
@@ -348,6 +357,8 @@ go test ./internal/peer/ -race -count=1
 | `TestBreakerHalfOpenFailureReopens` | a failed probe re-opens and restarts the cooldown |
 | `TestLateFailureDoesNotExtendCooldown` | a failure arriving while open does not slide the cooldown; a failed probe does |
 | `TestBreakerSweepsCleanEntries` | the peer map is bounded: clean entries are swept past the cap, dirty ones kept |
+| **`TestBreakerCapHardUnderFailedChurn`** | **the cap is a HARD bound even when every churned address carries failure state (below-threshold / open / half-open); recently-touched addresses keep their breaker behavior** |
+| **`TestBreakerEvictionDropsStalest`** | **eviction picks the least-recently-active entry; an actively routed-to sick peer never loses its open circuit** |
 | `TestCallerCancelNotChargedToPeer` | a caller-aborted read records answered, not a soft failure |
 | `TestBreakerIsolatesPeers` | one sick peer does not affect others |
 | `TestBreakerDefaultsAndStateNames` / `TestBreakerConcurrent` | defaults; concurrency (`-race`) |
