@@ -134,7 +134,10 @@ type Handler struct {
 - `Resolve` failure → `400`; origin/size failure → `502`.
 - Parses a **single** Range header (`bytes=a-b`, `bytes=a-`, `bytes=-n`); a
   missing Range serves the whole object; unsatisfiable/multi-range → `416` with
-  `Content-Range: bytes */size`.
+  `Content-Range: bytes */size`. Every Range form — suffix included — is
+  unsatisfiable on an empty object: a suffix `bytes=-n` would otherwise clamp
+  to the inverted interval `[0, -1]`, so the parser rejects it instead of
+  emitting a `206` with an invalid `Content-Range`.
 - **Always sets an explicit `Content-Length`** and `Accept-Ranges: bytes`;
   responds `206` + `Content-Range` for a range, else `200`. The explicit
   Content-Length guarantees a **non-chunked** response even though the body is
@@ -300,7 +303,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
    block engine always use Content-Length framing. Verbatim passthrough of a
    Range-blind origin forwards the origin's own framing, chunked included.
    An empty object is a valid `200` with `Content-Length: 0`; a Range request
-   on it is `416`.
+   on it is `416` (`bytes */0`), suffix ranges included.
 4. **Range semantics**: standard `200`/`206`/`416` with correct `Content-Range`.
 
 ## 5. Concurrency & Call Permissions
@@ -383,6 +386,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestReaderSetCacheFollowsGrantedLease` | the reader-set cache renews at half the granted lease, never lapsing mid-read |
 | `TestStreamRelayParentErrorFallsBackToOrigin` | an open-circuit/errored parent is skipped to origin, not propagated as a 500 |
 | `TestEmptyObjectGetServes200` | empty object: 200 empty on both paths; a Range request stays 416 |
+| `TestParseRangeSuffixEmptyObject` | a suffix range on an empty object is unsatisfiable (no inverted `[0,-1]` interval); non-empty suffix behavior unchanged |
+| `TestEmptyObjectSuffixRangeServes416` | `bytes=-n` on an empty object → 416 + `Content-Range: bytes */0` for GET and HEAD, never a 206 with `bytes 0--1/0` |
 | `TestNamespaceWithSeparatorRejected` | a namespace containing the chunk-key separator fails engine construction |
 | `TestHedgeFallsBackWhenBothMiss` | both contenders 404 → ok=false → origin |
 | `TestHedgeTargetsPickParentAndGrandparent` | primary=parent, backup=grandparent/root; root has no upstream; non-member asks the owner |

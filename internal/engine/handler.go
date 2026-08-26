@@ -91,7 +91,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //	""            -> whole object, isRange=false
 //	bytes=a-b     -> [a, min(b, size-1)]
 //	bytes=a-      -> [a, size-1]
-//	bytes=-n      -> last n bytes
+//	bytes=-n      -> last n bytes (unsatisfiable on an empty object)
 //
 // Multiple ranges, malformed input, or a start beyond the object are not
 // satisfiable (ok=false).
@@ -124,6 +124,11 @@ func parseRange(header string, size int64) (start, end int64, isRange, ok bool) 
 		}
 		if n > size {
 			n = size
+		}
+		if n == 0 {
+			// An empty object has no bytes to suffix into; without this the
+			// clamp above would fabricate the inverted interval [0, -1].
+			return 0, 0, true, false
 		}
 		return size - n, size - 1, true, true
 	case hi == "": // bytes=a-
