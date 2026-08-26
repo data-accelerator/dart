@@ -92,7 +92,11 @@ func (s *StreamServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad block path", http.StatusBadRequest)
 		return
 	}
-	hop, _ := strconv.Atoi(r.Header.Get(HeaderHop))
+	hop, ok := parseHop(r.Header.Get(HeaderHop))
+	if !ok {
+		http.Error(w, "bad "+HeaderHop+" header", http.StatusBadRequest)
+		return
+	}
 	req := BlockRequest{Key: key, URL: r.Header.Get(HeaderOrigin), Hop: hop}
 
 	// Buffer the head of the stream so a "not held" or an immediate error can

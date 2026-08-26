@@ -62,7 +62,8 @@ type BlockRequest struct {
 	// (the peer should serve only what it already holds).
 	URL string
 	// Hop is the relay depth (X-DART-Hop); incremented at each relay to bound
-	// recursion and detect loops.
+	// recursion and detect loops. Always non-negative on the wire: the servers
+	// reject a malformed or negative header with 400 before calling the Source.
 	Hop int
 }
 
@@ -100,7 +101,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad block path", http.StatusBadRequest)
 		return
 	}
-	hop, _ := strconv.Atoi(r.Header.Get(HeaderHop))
+	hop, ok := parseHop(r.Header.Get(HeaderHop))
+	if !ok {
+		http.Error(w, "bad "+HeaderHop+" header", http.StatusBadRequest)
+		return
+	}
 	req := BlockRequest{Key: key, URL: r.Header.Get(HeaderOrigin), Hop: hop}
 
 	data, held, err := s.Src(r.Context(), req)
@@ -126,6 +131,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// parseHop decodes the X-DART-Hop header. The header is optional: absent means
+// depth 0 (a direct, non-relayed request). Any value outside the valid
+// domain — malformed, negative, or out of int range — is rejected: the engine
+// bounds relay recursion with `hop >= maxHop`, and each relay increments the
+// value, so a negative start would delay that cutoff (a huge negative one
+// effectively forever), weakening the loop-safety bound exactly when
+// membership skew creates a relay cycle.
+func parseHop(h string) (int, bool) {
+	if h == "" {
+		return 0, true
+	}
+	hop, err := strconv.Atoi(h)
+	if err != nil || hop < 0 {
+		return 0, false
+	}
+	return hop, true
 }
 
 // parseBlockPath parses "/peer/v1/block/<chunkHex>/<blockIndex>".
