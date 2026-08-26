@@ -351,7 +351,11 @@ func (a *AuthTransport) dropTokenIf(key, rejected string) {
 
 // fetchTokenShared singleflights the exchange per cache key: concurrent cold
 // pulls of one repository share one token endpoint round trip. The first
-// caller leads; followers wait for its result.
+// caller starts the flight; every caller — the leader included — then waits
+// for its result, and each caller's own ctx only bounds how long THAT caller
+// waits. The flight itself runs on a bounded background context
+// (runTokenExchange): one caller's cancellation must not poison the other
+// waiters (issue #51) — the same flight semantics as fetch.Coalescing.
 func (a *AuthTransport) fetchTokenShared(ctx context.Context, key string, ch challenge, cred Credential) (string, time.Time, error) {
 	a.mu.Lock()
 	// Double-check the cache: a sibling request may have completed the exchange
@@ -360,28 +364,50 @@ func (a *AuthTransport) fetchTokenShared(ctx context.Context, key string, ch cha
 		a.mu.Unlock()
 		return tok.value, tok.expiresAt, nil
 	}
-	if c, ok := a.inflight[key]; ok {
-		a.mu.Unlock()
-		select {
-		case <-c.done:
-			return c.value, c.expiresAt, c.err
-		case <-ctx.Done():
-			return "", time.Time{}, ctx.Err()
+	c, joined := a.inflight[key]
+	if !joined {
+		c = &tokenCall{done: make(chan struct{})}
+		if a.inflight == nil {
+			a.inflight = make(map[string]*tokenCall)
 		}
+		a.inflight[key] = c
 	}
-	c := &tokenCall{done: make(chan struct{})}
-	if a.inflight == nil {
-		a.inflight = make(map[string]*tokenCall)
-	}
-	a.inflight[key] = c
 	a.mu.Unlock()
+	if !joined {
+		go a.runTokenExchange(key, c, ch, cred)
+	}
+	select {
+	case <-c.done:
+		return c.value, c.expiresAt, c.err
+	case <-ctx.Done():
+		return "", time.Time{}, ctx.Err()
+	}
+}
 
-	c.value, c.expiresAt, c.err = a.fetchToken(ctx, ch, cred)
+// maxTokenExchange bounds one shared token-exchange flight: a stalled token
+// endpoint (accepted, then silent) must not pin the cache key forever. The
+// bound is generous — the exchange is one small JSON GET — and expiring it
+// fails the flight, unpublishes the key, and lets the next caller lead a
+// fresh exchange.
+const maxTokenExchange = 1 * time.Minute
 
-	// Publish the result to the cache BEFORE removing the in-flight marker:
-	// a follower arriving after the delete but before a later store would see
-	// neither and lead a second exchange. Under this one critical section a
-	// new entrant always sees either the in-flight call or the warm cache.
+// runTokenExchange completes one in-flight exchange and publishes the result.
+// It runs detached from every caller's context (bounded by maxTokenExchange)
+// so a cancelled caller cannot abort work its peers still wait on; a
+// completed flight still warms the cache even if no waiter remains.
+//
+// The result goes to the cache BEFORE the in-flight marker is removed: a
+// follower arriving after the delete but before a later store would see
+// neither and lead a second exchange. Under this one critical section a new
+// entrant always sees either the in-flight call or the warm cache. done is
+// closed only after the result fields are written and the lock is released,
+// so waiters observe a happens-before edge on the result and nothing runs
+// under a.mu.
+func (a *AuthTransport) runTokenExchange(key string, c *tokenCall, ch challenge, cred Credential) {
+	flightCtx, cancel := context.WithTimeout(context.Background(), maxTokenExchange)
+	c.value, c.expiresAt, c.err = a.fetchToken(flightCtx, ch, cred)
+	cancel()
+
 	a.mu.Lock()
 	if c.err == nil {
 		a.storeTokenLocked(key, c.value, c.expiresAt)
@@ -389,7 +415,6 @@ func (a *AuthTransport) fetchTokenShared(ctx context.Context, key string, ch cha
 	delete(a.inflight, key)
 	a.mu.Unlock()
 	close(c.done)
-	return c.value, c.expiresAt, c.err
 }
 
 func tokenKey(host, scope string) string { return host + "|" + scope }

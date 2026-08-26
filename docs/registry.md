@@ -166,6 +166,13 @@ Behavior:
   is consulted before any challenge is seen, so only a request-computable key
   keeps store and lookup symmetric; keying on the advertised scope would make a
   registry that formats it differently miss the cache on every block.
+- **Token exchanges are singleflighted** per cache key, and the shared flight
+  runs on a **bounded background context** (1 minute) — the same semantics as
+  `fetch.Coalescing`: a caller's own context bounds only how long that caller
+  waits, never the exchange itself. A cancelled leader therefore cannot poison
+  still-live followers with `context.Canceled` (issue #51), a completed flight
+  warms the cache even if no waiter remains, and a stalled token endpoint
+  cannot pin the cache key beyond the bound.
 - **Near-expiry tokens are not reused** (30 s leeway), and a token the registry
   stops accepting triggers re-authentication rather than a failed read.
 - **A `Basic` challenge is satisfied directly**, no token endpoint (Harbor and
@@ -250,6 +257,8 @@ asserted.
 | `TestProxyForwardsAuthorization` | client credentials reach the upstream on the pass-through path |
 | `TestClientAuthorizationTakesPrecedence` | a client's own Authorization is never overwritten/substituted by the operator credential |
 | `TestConcurrentColdRequestsShareOneExchange` | token exchange is singleflighted per repository |
+| **`TestLeaderCancellationDoesNotPoisonFollowers`** | **a cancelled singleflight leader cannot fail still-live followers; the cohort still costs one exchange** |
+| `TestCancelledFollowerDoesNotAbortFlight` | a departing follower does not cancel the shared exchange |
 | `TestExpiredTokensPurged` | the token cache sweeps expired entries and stays bounded |
 | `TestPercentEncodedPathReachesUpstreamVerbatim` | a %3F in a repository name is never decoded into a query |
 | `TestPullOnly` | POST/PUT/PATCH/DELETE → `405` with `Allow`, and never reach the upstream |
@@ -257,7 +266,8 @@ asserted.
 | `TestUpstreamPathPrefixPreserved` | an upstream subpath is prepended |
 | **`TestBlobDedupAcrossRegistries`** | **the same digest via two mirrors/repos is fetched once** |
 
-Authentication (`auth_test.go`), against a fake registry that speaks the token
+Authentication (`auth_test.go`, plus the issue-pinning `issue16_test.go` and
+`issue51_test.go`), against a fake registry that speaks the token
 flow and derives its advertised scope per repository:
 
 | Test | Property guarded |
