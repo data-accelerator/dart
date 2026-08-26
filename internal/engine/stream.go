@@ -54,6 +54,10 @@ func asRelayError(err error) error {
 // rather than depth × block-transfer time.
 func (e *Engine) PeerStreamSource() peer.StreamSource {
 	return func(ctx context.Context, req peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+		if !e.relayableBlockIndex(req.Key.Block) {
+			e.mx.recordRelay(false)
+			return 0, false, nil // malformed wire index: decline cheaply
+		}
 		// Local hit: serve from the store. Get copies the block out under the
 		// store lock, so a concurrent eviction that reuses the slot cannot tear the
 		// bytes while they stream to the peer (a slot-backed GetReader could). The

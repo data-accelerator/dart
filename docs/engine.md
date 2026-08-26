@@ -160,6 +160,18 @@ block it does not hold, it fetches the block via its own tree parent/origin
 makes intermediate tree nodes offload the owner. A store-only node can use
 `peer.StoreSource` instead (no relay).
 
+**Malformed block indices are declined, not relayed (issue #52).** The wire
+carries the block index as an unrestricted `uint64`, while block geometry is
+int64 arithmetic. An index above `chunk.Config.MaxBlockIndex()` — above
+`MaxInt64`, or large enough that `index*BlockSize` would overflow int64 — can
+never come from a legitimate same-config peer, and computing with it would wrap
+(wrapped-to-0 start silently serves block 0's bytes; a wrapped-negative start
+drops the Range header and pulls the whole object). `PeerSource` and
+`PeerStreamSource` decline such requests (`held=false`, recorded as a refused
+relay) **before** cache lookup, relay selection, size probe, or origin I/O.
+Declined, not errored: the malformed index is the requester's fault, and a 500
+would charge this healthy relay on the requester's circuit breaker.
+
 ### 3.6 `func (e *Engine) PeerStreamSource() peer.StreamSource`
 
 The **cut-through** counterpart of `PeerSource`, for a `peer.StreamServer`:
@@ -169,6 +181,9 @@ The **cut-through** counterpart of `PeerSource`, for a `peer.StreamServer`:
 - a missing block is relayed from this node's tree parent, copying bytes to the
   requester **as they arrive** while tee-ing them into the local cache;
 - the tree root (no parent) fetches from origin, caches, then streams.
+
+The malformed-index decline of §3.5 applies identically here: nothing is
+streamed, the sizer is not called, and no origin request is made.
 
 This is what `cmd/dart` mounts, so a multi-hop chain pipelines: the tail node
 starts receiving after roughly one block-transfer time instead of
@@ -305,6 +320,12 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
    An empty object is a valid `200` with `Content-Length: 0`; a Range request
    on it is `416` (`bytes */0`), suffix ranges included.
 4. **Range semantics**: standard `200`/`206`/`416` with correct `Content-Range`.
+5. **No wrapped geometry on the relay path**: a peer-supplied block index that
+   cannot be represented in int64 range arithmetic
+   (`> chunk.Config.MaxBlockIndex()`) is declined before any cache lookup,
+   relay selection, size probe, or origin I/O — never served, never cached,
+   never turned into a whole-object origin GET (issue #52; the fetch-layer
+   arithmetic guard is in docs/fetch.md §3.4).
 
 ## 5. Concurrency & Call Permissions
 
@@ -404,6 +425,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestPassthroughCountsMetrics` | `dart_passthrough_total` increments; bytes count as client+origin wire bytes, not as any block source |
 | `TestPassthroughUnavailableWithoutOpener` | a non-streaming fetcher fails the passthrough cleanly with 502 |
 | `TestRelayDeclinesRangeBlindOrigin` | a relay declines (held=false) a block of a Range-unsupported object |
+| **`TestPeerSourceRejectsMalformedBlockIndex`** | **wire indices above `MaxBlockIndex` (2^63, 2^64-1, first window-overflowing index) are declined before cache lookup/size probe/origin I/O; nothing cached; legitimate control still relays (issue #52)** |
+| **`TestPeerStreamSourceRejectsMalformedBlockIndex`** | **same decline on the cut-through path: nothing streamed, sizer not called, zero origin requests; legitimate control still streams** |
 
 ## 8. Limitations & TODO
 

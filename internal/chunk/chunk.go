@@ -18,6 +18,7 @@ package chunk
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 	"net/url"
 	"strings"
 )
@@ -66,6 +67,22 @@ func (c Config) ChunkOfBlock(blockIndex int64) int64 { return blockIndex / c.Blo
 
 // BlockStart returns the absolute byte offset at which the given block begins.
 func (c Config) BlockStart(blockIndex int64) int64 { return blockIndex * c.BlockSize }
+
+// MaxBlockIndex returns the largest block index whose whole byte range
+// [index*BlockSize, index*BlockSize+BlockSize-1] is representable in int64
+// arithmetic. Indices above it wrap: the start-offset multiplication (or the
+// end-offset addition) overflows int64, and a wrapped start can silently
+// recycle to 0 (fetching the wrong block) or go negative (where an HTTP
+// fetcher reads start < 0 as "no Range header", degrading a one-block fetch
+// into a whole-object GET — see issue #52).
+//
+// Block indices arrive from two places: byte offsets of a clamped client
+// range (BlockIndex(offset), always <= MaxInt64/BlockSize, which is <= this
+// bound for the power-of-two block sizes DART uses) and the peer wire, which
+// carries an unrestricted uint64. Callers accepting a peer-supplied index
+// must reject anything above this bound before doing range geometry with it.
+// Requires BlockSize > 0.
+func (c Config) MaxBlockIndex() int64 { return (math.MaxInt64 - c.BlockSize + 1) / c.BlockSize }
 
 // Segment is the intersection of a requested byte range with a single block:
 // which chunk and block it belongs to, and the absolute inclusive byte range
