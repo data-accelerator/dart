@@ -8,7 +8,10 @@ image:
   # repository is used as-is for discovery.mode=dns and gets a "-k8s" suffix
   # appended for discovery.mode=k8s (the Dockerfile's dart-k8s target), so the
   # default values below resolve to "dart:dev" and "dart-k8s:dev" respectively.
-  # Point this at your registry for production (e.g. ghcr.io/acme/dart).
+  # DART images are not published to any registry: build from source
+  # (docker build -t dart:<tag> .) or point repository at your own registry.
+  # For a tagged release build, set tag to the chart's appVersion (e.g.
+  # v0.2.0) so the deployed image matches what the chart was written for.
   repository: dart
   tag: dev
   pullPolicy: IfNotPresent
