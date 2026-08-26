@@ -53,9 +53,22 @@ func (c Config) ChunkIndex(offset int64) int64    // chunk containing offset
 func (c Config) BlockIndex(offset int64) int64    // global block containing offset
 func (c Config) ChunkOfBlock(blockIndex int64) int64
 func (c Config) BlockStart(blockIndex int64) int64 // absolute byte offset of block start
+func (c Config) MaxBlockIndex() int64              // largest index whose window fits int64
 ```
 
 All are O(1) integer arithmetic; `offset`/`blockIndex` must be ≥ 0.
+
+`MaxBlockIndex` is `(MaxInt64-BlockSize+1)/BlockSize`: the largest block index
+whose whole window `[i*BlockSize, i*BlockSize+BlockSize-1]` stays inside int64.
+Above it the start multiplication (or the end addition) wraps — a wrapped start
+recycles to 0 (silently addressing block 0) or goes negative (where an HTTP
+range fetcher reads `start < 0` as "no Range header" and pulls the whole
+object). Indices derived from clamped client ranges can never exceed it (an
+offset is at most `MaxInt64`, so `BlockIndex(offset) <= MaxInt64/BlockSize`,
+which equals the bound for the power-of-two block sizes DART uses), but the
+peer wire carries the index as an unrestricted `uint64`, so relay code must
+reject `Block > uint64(MaxBlockIndex())` before doing signed geometry with it
+(see docs/engine.md §3.5, issue #52). Requires `BlockSize > 0`.
 
 ### 3.3 `func (c Config) Segments(start, end int64) []Segment`
 
@@ -211,6 +224,7 @@ go test ./internal/chunk/ -cover -count=1
 | `TestChunkKeyAgainstPythonReference` | CI diffs the ChunkKey goldens against the tracked Python script |
 | `TestConfigValidate` | valid/invalid configs; `BlocksPerChunk` |
 | `TestGridMath` | ChunkIndex/BlockIndex/ChunkOfBlock/BlockStart across boundaries |
+| **`TestMaxBlockIndexGolden`** | **`MaxBlockIndex` pinned against arbitrary-precision goldens; the bound's window fits int64 and the next index does not (issue #52)** |
 | `TestSegmentsSingleBlock` | a small read maps to exactly one block/sub-range |
 | `TestSegmentsCrossBlockAndChunk` | a range crossing block and chunk boundaries splits correctly |
 | `TestSegmentsInvalidRange` | negative start / end<start return nil |

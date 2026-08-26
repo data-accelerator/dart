@@ -287,6 +287,25 @@ func (e *Engine) Serve(ctx context.Context, w io.Writer, url string, start, end 
 // maxHop bounds relay recursion depth (loop safety under membership skew).
 const maxHop = 64
 
+// relayableBlockIndex reports whether a peer-supplied block index can be
+// represented in signed range geometry. The wire carries the index as an
+// unrestricted uint64, but block byte offsets are int64 arithmetic
+// (fetch.FetchBlock): an index above MaxInt64 wraps negative on conversion,
+// and a smaller index whose window start index*BlockSize would exceed MaxInt64
+// wraps in the multiplication. A wrapped start silently recycles to 0
+// (serving the wrong block) or goes negative (where the fetcher omits the
+// Range header and a one-block fetch degrades into a whole-object GET —
+// issue #52). A legitimate same-config peer never sends such an index: a real
+// block of a real object always satisfies index <= chunk.Config.MaxBlockIndex,
+// so anything above it is malformed and must be declined before cache lookup,
+// relay selection, or origin I/O.
+//
+// Declined, not errored: the malformed index is the requester's fault, and a
+// 500 would charge this healthy relay on the requester's circuit breaker.
+func (e *Engine) relayableBlockIndex(b uint64) bool {
+	return b <= uint64(e.cfg.MaxBlockIndex())
+}
+
 // block returns the bytes of one block: from the local cache, else (with P2P)
 // from its parent in the distribution tree, else from origin. Fetched bytes are
 // cached. hop is the relay depth (0 when serving a local client).
@@ -429,6 +448,10 @@ func (e *Engine) fileKey(objectID string) uint64 {
 // P2P node; a store-only node can use peer.StoreSource instead.
 func (e *Engine) PeerSource() peer.Source {
 	return func(ctx context.Context, req peer.BlockRequest) ([]byte, bool, error) {
+		if !e.relayableBlockIndex(req.Key.Block) {
+			e.mx.recordRelay(false)
+			return nil, false, nil // malformed wire index: decline cheaply
+		}
 		if data, ok, err := e.store.Get(req.Key); err != nil {
 			return nil, false, err
 		} else if ok {

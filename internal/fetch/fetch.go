@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -308,7 +309,21 @@ func startFromContentRange(v string) (int64, bool) {
 // > 0 the final (tail) block's end is clamped to size-1; when size <= 0 the
 // natural block range is requested and the returned Range.Total may reveal the
 // size.
+//
+// blockIndex must be non-negative and small enough that the whole block window
+// [blockIndex*blockSize, blockIndex*blockSize+blockSize-1] is representable in
+// int64 (the same bound chunk.Config.MaxBlockIndex states in grid terms).
+// Anything else is a caller bug — on the peer relay path it is a malformed
+// wire index, since the protocol carries the index as an unrestricted uint64:
+// the int64 conversion or the start-offset multiplication would wrap, and a
+// wrapped start either recycles to 0 (silently fetching the wrong block) or
+// goes negative, where Fetch reads start < 0 as "no Range header" and a
+// one-block fetch degrades into a whole-object GET (issue #52). Such geometry
+// is rejected here, before any origin I/O.
 func FetchBlock(ctx context.Context, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error) {
+	if blockSize <= 0 || blockIndex < 0 || blockIndex > (math.MaxInt64-blockSize+1)/blockSize {
+		return Range{}, fmt.Errorf("fetch: %s: block index %d out of range for block size %d", Redact(url), blockIndex, blockSize)
+	}
 	start := blockIndex * blockSize
 	end := start + blockSize - 1
 	if size > 0 {

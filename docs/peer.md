@@ -28,7 +28,13 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
 ```
 
 - `<chunkKey-hex>` is `store.BlockKey.Chunk` in base-16; `<blockIndex>` is
-  `store.BlockKey.Block` in base-10.
+  `store.BlockKey.Block` in base-10. The index is an **unrestricted uint64 on
+  the wire**: transport (`parseBlockPath`) accepts any uint64, and it is the
+  relay-capable Source's job to reject indices that cannot be represented in
+  signed range geometry before doing arithmetic with them — the engine's
+  sources decline anything above `chunk.Config.MaxBlockIndex()` with a `404`
+  (issue #52, see docs/engine.md §3.5). `StoreSource` never does range
+  arithmetic with the index, so it needs no such check.
 - `X-DART-Origin` lets a relay-capable Source fetch a block it does not hold
   (via its own parent/origin); `X-DART-Hop` bounds relay recursion.
 - Responses: `200` + block bytes (with `X-DART-Node`; `Content-Length` when

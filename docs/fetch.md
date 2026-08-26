@@ -102,6 +102,17 @@ RFC-clamped 206 on the tail block (`Content-Range` shows `end = total-1` below
 the requested end, body length matching) is accepted, so the unknown-size flow
 covers the final block too. Any other length mismatch stays a hard error.
 
+**Geometry that cannot wrap (issue #52).** `blockIndex` must be non-negative
+with the whole window representable in int64, i.e. `blockSize > 0` and
+`blockIndex <= (MaxInt64-blockSize+1)/blockSize` (the same bound
+`chunk.Config.MaxBlockIndex` states in grid terms). Anything else — a negative
+index (what `int64()` makes of a peer-wire `uint64` above `MaxInt64`), or an
+index whose start multiplication or end addition would overflow — is an
+**error before the fetcher is invoked**: a wrapped start would otherwise
+recycle to 0 (silently fetching block 0's bytes) or go negative, which
+`HTTPFetcher.Fetch` reads as "no Range header" — a one-block fetch degrading
+into a whole-object GET.
+
 ### 3.5 `type Coalescing`
 
 ```go
@@ -281,6 +292,8 @@ go test ./internal/fetch/ -cover -count=1
 | `TestUncontendedFetchNotMarkedCoalesced` | an uncontended fetch is not marked coalesced |
 | `TestFetchBlockPastEndErrors` | a block wholly past the object (or an inverted range) errors without contacting origin |
 | `TestFetchBlockUnknownSizeTailBlock` | an RFC-clamped 206 on the tail block is accepted and reveals Total |
+| **`TestFetchBlockRejectsOverflowGeometry`** | **negative / int64-overflowing block indices (and non-positive block size) error before the fetcher is invoked, size known or unknown (issue #52)** |
+| **`TestFetchBlockMaxInt64Window`** | **the largest representable index reaches the fetcher with the exact golden window `[9223372036854771712, MaxInt64]`; ordinary tail clamping unaffected** |
 
 ## 8. Limitations & TODO
 
