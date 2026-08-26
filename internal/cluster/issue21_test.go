@@ -5,6 +5,7 @@ package cluster
 // ValidMemberID defines the alphabet; roster ingest enforces it.
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,16 +71,51 @@ func TestEpochCollisionInputsRejected(t *testing.T) {
 	if ValidMemberID(crafted) {
 		t.Fatal("the crafted collision ID must fail alphabet validation")
 	}
-	// Sanity: the two views really do collide when constructed directly,
-	// proving why the ingress guard matters.
+	// The two pre-guard views MUST still collide when constructed directly: that
+	// is the defect the ingress guard exists for. An unconditional assertion —
+	// if a future protocol change intentionally reframes the epoch, it must
+	// update this assertion deliberately, not pass silently (issue #46).
 	two := NewView([]Member{
 		{ID: "a", Weight: 1},
 		{ID: "b", Weight: 1},
 	})
 	one := NewView([]Member{{ID: crafted, Weight: 1}})
-	if two.Epoch() == one.Epoch() {
-		t.Log("collision confirmed (expected): 2-member view vs crafted 1-member view share an epoch")
-	} else {
-		t.Log("no collision on this input set; the ingress guard still stands on its own")
+	if two.Epoch() != one.Epoch() {
+		t.Fatal("crafted pre-guard views no longer demonstrate the framing collision")
+	}
+}
+
+// TestInvalidRosterIDReportedViaOnError pins #46 item 1: a mixed roster feed
+// must learn the valid member AND emit exactly one diagnostic naming the
+// invalid one (safely quoted) — a silently dropped ID hides a mixed-version
+// cluster behind a mysteriously missing member.
+func TestInvalidRosterIDReportedViaOnError(t *testing.T) {
+	now := time.Now()
+	var diags []error
+	d := NewDynamicProvider(DynamicConfig{
+		Self:            Member{ID: "self", Addr: "127.0.0.1:9000", Weight: 1},
+		Seeder:          StaticSeeder{},
+		RefreshInterval: time.Hour,
+		ForgetAfter:     time.Hour,
+		Now:             func() time.Time { return now },
+		OnError:         func(err error) { diags = append(diags, err) },
+	})
+
+	d.Learn(
+		Member{ID: "bad\x1fid", Addr: "127.0.0.1:9001", Weight: 1},
+		Member{ID: "honest", Addr: "127.0.0.1:9002", Weight: 1},
+		Member{ID: "self", Addr: "127.0.0.1:9000", Weight: 1}, // self: silent
+	)
+	if len(diags) != 1 {
+		t.Fatalf("got %d diagnostics, want exactly 1 (self must stay silent)", len(diags))
+	}
+	if !strings.Contains(diags[0].Error(), "bad") || !strings.Contains(diags[0].Error(), "invalid ID") {
+		t.Fatalf("diagnostic does not describe the rejected member: %v", diags[0])
+	}
+	d.mu.Lock()
+	_, honestKnown := d.known["honest"]
+	d.mu.Unlock()
+	if !honestKnown {
+		t.Fatal("the valid sibling must still be learned")
 	}
 }

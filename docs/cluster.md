@@ -238,7 +238,9 @@ guess costs a hop, never correctness.
   and roster ingest). The serialization frames fields with 0x1F/0x1E, so an ID
   containing those bytes could make two different memberships hash to the same
   epoch; the alphabet restriction keeps framing unambiguous without a protocol
-  change.
+  change. A rejected roster ID is reported through `DynamicConfig.OnError`
+  (safely quoted; the valid siblings are still learned) — a silently dropped
+  ID would hide a mixed-version cluster behind a missing member.
 - **Wart, documented not "fixed"**: `Weight <= 0` is normalized to 1 for
   placement but hashed *verbatim* into the epoch by `NewView` (the roster
   ingest path normalizes first, so only direct `NewView` callers can observe
@@ -274,7 +276,7 @@ go test ./internal/cluster/ -cover -count=1
 | `TestEpochChangesOnMutation` | an id or weight change bumps the epoch; a state change does not |
 | **`TestEpochExcludesState`** | **any combination of states yields one epoch, so the epoch can serve as a convergence token** |
 | `TestReadyLiveFilters` | Ready=Ready only, Live=Ready+Suspect, sorted, weights carried |
-| `TestValidMemberID` / `TestRosterIngestRejectsControlByteIDs` / `TestEpochCollisionInputsRejected` | member-ID alphabet; control-byte IDs rejected at roster ingest; the crafted epoch collision is unreachable |
+| `TestValidMemberID` / `TestRosterIngestRejectsControlByteIDs` / `TestEpochCollisionInputsRejected` / `TestInvalidRosterIDReportedViaOnError` | member-ID alphabet; control-byte IDs rejected at roster ingest; the crafted epoch collision stays asserted (fails loudly if framing ever changes); invalid IDs surface one diagnostic each via OnError |
 | `TestDedupDeterministic` | duplicate IDs collapse deterministically regardless of order |
 | `TestDedupKeepsServingStateOverJoining` | duplicate IDs keep the most authoritative serving state (Ready > Suspect > Joining > Leaving) |
 | `TestHearsayAddrChangeDoesNotRefreshLiveness` | hearsay address changes are adopted but never refresh the liveness clock; flip-flops still expire |

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -258,12 +259,19 @@ func (d *DynamicProvider) Learn(members ...Member) {
 		return
 	}
 	now := d.cfg.Now()
+	var rejected []string
 	d.mu.Lock()
 	for _, m := range members {
-		if !ValidMemberID(m.ID) || m.ID == d.cfg.Self.ID {
-			// Self is always present; an anonymous member is unusable. A control-
-			// byte ID is rejected outright: it could collide the epoch framing
-			// (see ValidMemberID), making different memberships look equal.
+		if m.ID == d.cfg.Self.ID {
+			continue // self is always present; hearing about ourselves is normal
+		}
+		if !ValidMemberID(m.ID) {
+			// Rejected outright: a control-byte ID could collide the epoch
+			// framing (see ValidMemberID). But silently dropping it hides a
+			// mixed-version cluster or a bad discovery adapter behind a
+			// mysteriously missing member — report it (collected and delivered
+			// after the lock: the callback is user code).
+			rejected = append(rejected, m.ID)
 			continue
 		}
 		// NaN cannot arrive here (JSON cannot represent it; A4).
@@ -288,6 +296,11 @@ func (d *DynamicProvider) Learn(members ...Member) {
 		t.member = m
 	}
 	d.mu.Unlock()
+	if d.cfg.OnError != nil {
+		for _, id := range rejected {
+			d.cfg.OnError(fmt.Errorf("cluster: roster member with invalid ID %q dropped (epoch-framing safety)", id))
+		}
+	}
 }
 
 // LearnPeer records an inbound contact: a peer asked us for our roster, which is
