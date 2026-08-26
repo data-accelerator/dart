@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -803,37 +804,92 @@ func TestJoinerRetrySkippedWhenCallerGone(t *testing.T) {
 	}
 }
 
-// TestAbandonedWaitersReleasedAtDeadline pins the review-found residual of
-// issue #4: a joiner whose caller gave up must not block in the flight wait
-// forever when the leader ignores cancellation — even when no later caller
-// ever arrives for the key. At the flight deadline the waiter re-checks,
-// evicts the stale flight, and leads a replacement.
-func TestAbandonedWaitersReleasedAtDeadline(t *testing.T) {
-	var calls int64
+// TestCancelledWaitersRetainNoGoroutines pins issue #53: every Fetch used to
+// start a per-caller goroutine that waited inside the singleflight group, so a
+// caller whose context was cancelled returned while its goroutine stayed
+// blocked until the flight finished or hit MaxFlight — a cancellation storm on
+// one stalled key retained one goroutine per abandoned caller. Now joiners
+// wait inline: a flight keeps exactly one worker goroutine no matter how many
+// callers come and go.
+func TestCancelledWaitersRetainNoGoroutines(t *testing.T) {
 	stall := make(chan struct{})
-	t.Cleanup(func() { close(stall) }) // release all stuck fn calls at test end
+	t.Cleanup(func() { close(stall) }) // release the flight worker at test end
+	var calls int64
 	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
 		atomic.AddInt64(&calls, 1)
-		<-stall // ignores ctx: simulates a permanently stuck origin
+		<-stall // ignores ctx: simulates an origin that accepted then went silent
+		return Range{Data: blob(8), Total: 8}, nil
+	})
+	c := &Coalescing{F: f, MaxFlight: time.Minute}
+
+	time.Sleep(50 * time.Millisecond) // let the runtime settle
+	base := runtime.NumGoroutine()
+
+	const callers = 64
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			if _, err := c.Fetch(ctx, "u", 0, 7); !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("caller: want its own ctx deadline, got %v", err)
+			}
+		}()
+	}
+	wg.Wait() // every caller has already returned on its own deadline
+
+	// Prompt release is the contract: only the flight's single worker may
+	// outlive the callers (plus nothing else). On the old code the delta was
+	// one goroutine per caller.
+	time.Sleep(200 * time.Millisecond)
+	if held := runtime.NumGoroutine() - base; held > 4 {
+		t.Errorf("goroutines retained after all %d callers returned = %d, want <= 4 (one flight worker)",
+			callers, held)
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Errorf("underlying calls = %d, want 1 (all callers shared one flight)", got)
+	}
+}
+
+// TestStaleFlightReplacedOnlyByALiveCaller pins the lifecycle contract that
+// replaces the issue #4 residual: with the per-caller waiter goroutine gone
+// (issue #53), a flight everyone abandoned is *not* replaced at its deadline —
+// nobody is left wanting the bytes, so firing a fresh origin fetch would be
+// pure waste. The stale entry is evicted lazily, by the next real caller.
+func TestStaleFlightReplacedOnlyByALiveCaller(t *testing.T) {
+	var calls int64
+	stall := make(chan struct{})
+	t.Cleanup(func() { close(stall) }) // release any stuck fn call at test end
+	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
+		if atomic.AddInt64(&calls, 1) == 1 {
+			<-stall // stuck leader: ignores ctx
+		}
 		return Range{Data: blob(8), Total: 8}, nil
 	})
 	c := &Coalescing{F: f, MaxFlight: 40 * time.Millisecond}
 
-	// Two callers join the same stuck flight and give up; no later caller ever
-	// arrives for the key.
-	for i := 0; i < 2; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		if _, err := c.Fetch(ctx, "u", 0, 7); err == nil {
-			t.Fatal("caller: want its own ctx deadline, got nil")
-		}
-		cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := c.Fetch(ctx, "u", 0, 7); err == nil {
+		t.Fatal("caller: want its own ctx deadline, got nil")
 	}
 
-	// After the deadline the abandoned waiter must have been released and led
-	// a replacement flight — not be blocked in the wait forever.
+	// Well past the flight deadline, with no live caller: no replacement
+	// flight may have been led.
 	time.Sleep(200 * time.Millisecond)
-	if got := atomic.LoadInt64(&calls); got < 2 {
-		t.Fatalf("underlying calls = %d, want >= 2 (abandoned waiter must be released at the deadline)", got)
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("underlying calls = %d, want 1 (an abandoned flight must not respawn without a caller)", got)
+	}
+
+	// The next real caller evicts the stale entry and leads the replacement.
+	r, err := c.Fetch(context.Background(), "u", 0, 7)
+	if err != nil || len(r.Data) != 8 {
+		t.Fatalf("replacement flight: err=%v len=%d", err, len(r.Data))
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("underlying calls = %d, want 2 (stale flight evicted and replaced by the live caller)", got)
 	}
 }
 
