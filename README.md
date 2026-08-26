@@ -244,6 +244,8 @@ HTTP-backed mounts are documented in the files' headers.
 
 ## Documentation
 
+Release history and upgrade notes live in [`CHANGELOG.md`](./CHANGELOG.md).
+
 [`docs/`](./docs) has a reference document per package — API, semantics,
 concurrency contract, test status and known limitations. Start with
 [`docs/README.md`](./docs/README.md) for the index, or
