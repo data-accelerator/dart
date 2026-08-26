@@ -8,6 +8,6 @@ description: >-
   variant, RBAC created automatically).
 type: application
 # version is the chart version; bump it on every chart change.
-version: 0.1.0
+version: 0.2.0
 # appVersion tracks the DART image tag the chart defaults to.
-appVersion: "dev"
+appVersion: "v0.2.0"
