@@ -135,8 +135,10 @@ for doc in docs/*.md; do
     esac
     rx=$(kw_regex "$kw")
     # Alternatives are anchored on non-letter boundaries: "## Instability
-    # notes" must NOT satisfy the Stability requirement.
-    if ! grep -qiE "^#{1,4} +[0-9.]* +(.* |)($rx)([^A-Za-z]|$)" "$doc"; then
+    # notes" must NOT satisfy the Stability requirement. The numeric
+    # "N. " prefix used by convention is optional, so a plain "## Overview"
+    # (no number) still matches.
+    if ! grep -qiE "^#{1,4} +([0-9.]+ +)?(.* )?($rx)([^A-Za-z]|$)" "$doc"; then
       err "check4: $doc (shape $shape) lacks a required '$kw' section heading"
     fi
   done
