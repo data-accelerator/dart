@@ -46,6 +46,10 @@ func (c Config) BlocksPerChunk() int64
 Constants `MiB` and `GiB` are provided for convenience. All grid methods below
 assume a valid Config.
 
+`ErrInvalidConfig` is the sentinel `Validate` returns for a malformed `Config`
+(`BlockSize>0`, `ChunkSize>0`, `ChunkSize%BlockSize==0` required); wrap-check
+with `errors.Is`.
+
 ### 3.2 Grid math
 
 ```go
@@ -110,6 +114,11 @@ rejected at engine construction, and derived object identities have `0x1F`
 stripped (a URL can smuggle one in via a percent-encoded `%1F` in the path).
 Note that cross-field collisions are the only case: within one namespace the
 fixed 8-byte chunk-index suffix forces equal objectIDs anyway.
+
+`UnitSep` (0x1F) is the field separator `ChunkKey` mixes between fields; it is
+why `namespace` is rejected at engine construction when it contains 0x1F and
+why derived object identities have it stripped (`stripUnitSep`): the separator
+must never appear inside a field, or serialization would not be injective.
 
 ### 3.4.1 `func IsDigest(s string) bool`
 

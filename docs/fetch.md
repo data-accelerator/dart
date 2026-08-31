@@ -91,6 +91,11 @@ and close; the fetcher's `Header` is applied first, then the per-request
 is proxying verbatim. This backs the engine's passthrough fallback for
 Range-ignoring origins. Time complexity is O(1); no body bytes are buffered.
 
+`DefaultMaxFlight` bounds how long a shared flight may run before a later call
+starts a new one (the fix for issue #4's permanently-poisoned cache key: a
+stalled flight expires instead of blocking the key forever). Joiners of a
+flight wait inline, one worker goroutine per flight (#60).
+
 ### 3.4 `func FetchBlock(ctx, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error)`
 
 Fetches one block: `start = blockIndex*blockSize`, `end = start+blockSize-1`.

@@ -50,6 +50,32 @@ This directory holds DART's **official documentation** (tracked in git). It targ
 7. **Testing** — the test list with each test's intent; coverage number; `go vet` / `-race` results; how to run; sources of any golden / cross-validated values.
 8. **Limitations & TODO**.
 
+### Sanctioned document shapes
+
+The 8-section template above is the default **package** shape. Three shapes
+are sanctioned; every document's shape is assigned here (unlisted documents
+default to `package`). The machine-readable block is the enforcement source
+for `scripts/check-docs.sh` — keep it in sync with the prose.
+
+<!-- DOC-SHAPES
+package: Overview; Concepts; Public API; Invariants & Guarantees; Concurrency & Call Permissions; Stability Contract; Testing; Limitations & TODO
+cmd: Overview; Usage; Behavior & guarantees (with Concurrency & lifecycle and Stability Contract as subsections); Testing; Limitations & TODO
+multi: Overview; per-package API sections; Concurrency & Call Permissions; Stability Contract; Testing; Limitations & TODO
+assignments: docs/dart.md=cmd; docs/observability.md=multi
+heading-aliases: Concepts <=> Wire form; Determinism / Stability Contract <=> Stability Contract
+-->
+
+- **package** (default): the 8 required sections in §"Required sections".
+- **cmd** (assigned: `docs/dart.md`): a binary document — `Usage` replaces
+  the API section; Concurrency and Stability may live as subsections of
+  "Behavior & guarantees".
+- **multi** (assigned: `docs/observability.md`): one document covering
+  several packages uses per-package API sections instead of unified
+  Concepts/Public-API/Invariants sections.
+- **Heading aliases**: the Concepts section may be titled by its domain
+  content (e.g. peer.md's "Wire form"); the Stability Contract may be titled
+  "Determinism / Stability Contract".
+
 ### What "Testing" must record
 
 "Testing" is not a single line saying "tests exist". It must let the reader judge **trustworthiness**: list the specific property each test guards, the coverage number, and whether `vet`/`-race` pass, plus reproduction commands. If a function is left uncovered, state why explicitly.

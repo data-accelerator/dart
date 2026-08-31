@@ -81,7 +81,9 @@ type Server struct {
 }
 ```
 
-An `http.Handler` for the wire form above.
+An `http.Handler` for the wire form above: `ServeHTTP` dispatches
+`/peer/v1/block` (and rejects invalid `X-DART-Hop` values, §2); unknown paths
+get 404. Safe for concurrent use, as any handler must be.
 
 ### 3.3 `type Client` / `func NewClient() *Client`
 
@@ -161,7 +163,7 @@ func (b *Breaker) Allow(addr string) bool
 func (b *Breaker) RecordSuccess(addr string)
 func (b *Breaker) RecordFailure(addr string)      // soft: spends one unit of budget
 func (b *Breaker) RecordHardFailure(addr string)  // definitive: opens at once
-func (b *Breaker) State(addr string) BreakerState   // closed | open | half-open
+func (b *Breaker) State(addr string) BreakerState   // closed | open | half-open (String() prints those words)
 func (b *Breaker) Healthy(addr string) bool         // usable now (no probe reserved)
 func (b *Breaker) OpenCount() int
 var ErrCircuitOpen = errors.New("peer: circuit open")
@@ -269,6 +271,8 @@ const HeaderPeerAddr = "X-DART-Peer-Addr"
 type Roster struct { Epoch string; Members []RosterMember }
 type RosterMember struct { ID, Addr string; Weight float64 }
 type RosterServer struct { NodeID string; Src func() Roster; Learn func(id, addr string) }
+// RosterServer.ServeHTTP answers GET RosterPath with Src() as JSON, and feeds
+// the fetcher's self-identification headers to Learn (hearsay).
 func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, string, error)
 ```
 

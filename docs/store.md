@@ -108,7 +108,7 @@ no-op stub.
 ### 3.4 Two budgets: `Tiered` (owned / borrowed) with TinyLFU admission
 
 ```go
-type Class uint8            // Owned | Borrowed
+type Class uint8            // Owned | Borrowed; String() prints "owned"/"borrowed" for logs/metrics
 type ClassStore interface {
     Store
     PutClass(k BlockKey, data []byte, c Class) (admitted bool, err error)

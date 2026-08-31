@@ -36,6 +36,7 @@ err := r.Render(w) // Prometheus text format
 | `Gauge` | `Set(float64)`, `Value() float64` | atomic float bits |
 | `Histogram` | `Observe(float64)` | cumulative `le` buckets + `_sum`/`_count`; bounds sorted/de-duplicated; `+Inf` implicit |
 | `Registry` | `NewCounter/NewGauge/NewHistogram`, `NewGaugeFunc/NewCounterFunc`, `Render(io.Writer)` | `HELP`/`TYPE` emitted once per metric name |
+| `ErrInvalidName` | `Error() string` | returned by the `New*` constructors when a metric or label name is not a valid Prometheus name (`[a-zA-Z_:][a-zA-Z0-9_:]*` / label `[a-zA-Z_][a-zA-Z0-9_]*`) |
 
 `NewGaugeFunc`/`NewCounterFunc` register a metric whose value is **sampled at
 scrape time** by a callback. That is how state owned elsewhere — cache occupancy,
