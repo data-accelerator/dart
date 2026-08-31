@@ -61,7 +61,8 @@ prints — commands stamp
 theirs via `-ldflags "-X main.version=..."` and pass it through.
 
 **Handler-lifetime contract** (the precise statement behind "nothing keeps
-serving over the closed store"): every server handler runs behind a closeable
+serving over the closed store"; established by
+[ADR-0003](./adr/0003-shutdown-safe-join-contract.md)): every server handler runs behind a closeable
 **admission gate** — a mutex-serialized counter, not a WaitGroup, so "admit +
 count" and "close admission" cannot interleave (an `Add` after the count hit
 zero racing `Wait` would be outside the WaitGroup contract). A server whose
