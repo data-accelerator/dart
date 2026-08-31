@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-26 (backfilled; implemented in PR #48, issue #45)
+- Supersedes: none
 - Binds: docs/node.md §3.1 (handler-lifetime contract), internal/node serverSet/finishRun
 
 ## Context

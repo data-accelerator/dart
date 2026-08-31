@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-26 (backfilled; implemented in PR #44, issue #21)
+- Supersedes: none
 - Binds: docs/cluster.md §3.3.1 / §6, internal/node flag parsing (`-self-id`, `-peers`)
 
 ## Context
@@ -11,8 +12,9 @@ with the control bytes 0x1F (unit separator) and 0x1E (record separator). A
 member ID containing those bytes could make two genuinely different
 memberships serialize identically — two nodes would believe they agree on the
 epoch while disagreeing on membership, and placement would silently diverge.
-A crafted two-byte ID was shown to collide a real two-member view with a
-crafted one-member view (regression: TestEpochCollisionInputsRejected).
+A crafted 12-byte ID — `"a"` + 0x1F + eight weight bytes + 0x1E + `"b"` —
+was shown to collide a real two-member view with a crafted one-member view
+(regression: TestEpochCollisionInputsRejected).
 
 ## Decision
 

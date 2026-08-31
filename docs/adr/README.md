@@ -48,6 +48,8 @@ table below inside the same PR that adds the file.
 
 - Status: proposed | accepted | superseded by ADR-XXXX | rejected
 - Date: YYYY-MM-DD (of the status)
+- Supersedes: <ADR-XXXX or "none"> (required: the lifecycle's supersession
+  audit keys off this line; it must pair with the old record's status change)
 - Binds: <files/sections this decision constrains>
 
 ## Context

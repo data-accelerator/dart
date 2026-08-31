@@ -2,6 +2,7 @@
 
 - Status: accepted
 - Date: 2026-08-26 (backfilled; principle in force since docs/design-assumptions.md, PR #28)
+- Supersedes: none
 - Binds: docs/design-assumptions.md (A1–A6), SECURITY.md, every package document
 
 ## Context
