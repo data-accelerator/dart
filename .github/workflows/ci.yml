@@ -126,6 +126,20 @@ jobs:
           fi
         working-directory: .
 
+  docs:
+    name: docs governance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+
+      - name: check-docs
+        run: bash scripts/check-docs.sh
+
   cross-build:
     name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest

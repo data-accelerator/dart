@@ -38,7 +38,7 @@ front-end satisfies the other from cache. Requests are routed on `RequestURI`
 rather than by an `http.ServeMux`, because the prefix paths embed a full URL and
 a ServeMux would path-clean the `//` in `https://`.
 
-## 2. What is cacheable, and why only that
+## 2. Concepts: what is cacheable, and why only that
 
 **Only digest-addressed blobs are cached.** A blob URL names its own content
 hash, so it is immutable: caching it can never serve the wrong bytes, and the
