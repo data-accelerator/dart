@@ -135,8 +135,8 @@ rather than plain Basic:
 func LoadCredentials(path string) (map[string]Credential, error)
 func NewAuthTransport(base http.RoundTripper, creds map[string]Credential) *AuthTransport
 // AuthTransport.RoundTrip attaches/caches/exchanges the bearer token per
-// request (singleflight per realm+scope, conditional drop-on-rejection) and
-// otherwise delegates to base. Safe for concurrent use.
+// request (singleflight per (host, scope), conditional drop-on-rejection)
+// and otherwise delegates to base. Safe for concurrent use.
 ```
 
 **Why a RoundTripper rather than threading a credential through the read path.**
