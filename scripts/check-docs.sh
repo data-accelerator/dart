@@ -19,7 +19,10 @@
 # This is a FLOOR check: it guarantees presence and lockstep, not quality or
 # semantics. Known limits: check 3 covers single-line const/var declarations
 # and methods, not grouped const members without individual doc comments, and
-# a symbol only appearing in example code still counts as "documented".
+# a symbol only appearing in example code still counts as "documented";
+# check 4 matches required words at non-letter boundaries in heading text
+# (first-word aliases included), so "## Instability notes" does not satisfy
+# Stability but "## 6. Determinism / Stability Contract" does.
 # Meaning stays with human/agent review.
 #
 # Requires: bash, grep, awk, go (for check 3). No network, no LLM.
@@ -51,6 +54,7 @@ ok "check1: index <-> files"
 # ---------------------------------------------------------------- check 2
 # Backticked test names in docs exist as test functions.
 testfiles=$(find internal cmd providers -name '*_test.go' 2>/dev/null)
+[ -n "$testfiles" ] || err "check2: no *_test.go files found at all"
 for doc in docs/*.md; do
   names=$(grep -oE '`(Test|Benchmark|Example|Fuzz)[A-Za-z0-9_]+`' "$doc" | tr -d '`' | sort -u)
   while IFS= read -r n; do
@@ -130,8 +134,9 @@ for doc in docs/*.md; do
       *) continue ;;
     esac
     rx=$(kw_regex "$kw")
-    # Invariants spec word is "Invariants & Guarantees" (matched via Invariants).
-    if ! grep -qiE "^#{1,4} .*($rx)" "$doc"; then
+    # Alternatives are anchored on non-letter boundaries: "## Instability
+    # notes" must NOT satisfy the Stability requirement.
+    if ! grep -qiE "^#{1,4} +[0-9.]* +(.* |)($rx)([^A-Za-z]|$)" "$doc"; then
       err "check4: $doc (shape $shape) lacks a required '$kw' section heading"
     fi
   done
@@ -173,17 +178,18 @@ for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   if [ -f "$adr_readme" ] && ! grep -q "$n" "$adr_readme"; then
     err "check5: ADR-$n is not listed in $adr_readme"
   fi
-  # Binds path existence: path-like tokens must resolve.
-  sed -n 's/^- Binds: //p' "$f" | grep -oE '(docs|internal|cmd|providers)/[A-Za-z0-9_/.,-]+' | \
+  # Binds path existence: path-like tokens must resolve. (Process
+  # substitution, not a pipe: err() must run in THIS shell — a piped loop is
+  # a subshell and its failure count would be silently lost.)
   while IFS= read -r tok; do
     tok=${tok%,}; tok=${tok%.}
     if [ "${tok%.md}" != "$tok" ]; then
-      [ -f "$tok" ] || echo "BINDSFAIL: $f binds $tok, which does not exist"
+      [ -f "$tok" ] || err "check5: $f binds $tok, which does not exist"
     else
-      [ -d "$tok" ] || [ -f "$tok" ] || echo "BINDSFAIL: $f binds $tok, which does not exist"
+      [ -d "$tok" ] || [ -f "$tok" ] || err "check5: $f binds $tok, which does not exist"
     fi
-  done
-done | { while IFS= read -r l; do err "check5: ${l#BINDSFAIL: }"; done; }
+  done < <(sed -n 's/^- Binds: //p' "$f" | grep -oE '(docs|internal|cmd|providers)/[A-Za-z0-9_/.,-]+' || true)
+done
 ok "check5: ADR integrity"
 
 # ---------------------------------------------------------------- check 6
