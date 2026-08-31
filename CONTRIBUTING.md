@@ -24,15 +24,20 @@ waits for membership to converge, and reports what they are doing. See the
 
 ## Before you open a pull request
 
-All three must pass:
+All three must pass (verbatim copy of the canonical list in AGENTS.md — edit
+both or neither):
 
+<!-- CANONICAL-COPY source="AGENTS.md" id="verify-trio" -->
 ```bash
 go vet ./...
 go test ./... -race -count=1
 go test ./... -cover -count=1
 ```
+<!-- /CANONICAL-COPY source="AGENTS.md" id="verify-trio" -->
 
-CI runs exactly these, so a green local run should mean a green CI run.
+CI runs exactly these, so a green local run should mean a green CI run. See
+AGENTS.md's "Authority and canonical sources" for how rule conflicts between
+repository documents are resolved.
 
 Alongside the code, please include:
 

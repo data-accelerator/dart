@@ -59,11 +59,16 @@ This directory holds DART's **official documentation** (tracked in git). It targ
 DART has no external dependencies, so the standard commands are all that is
 needed:
 
+<!-- CANONICAL-COPY source="AGENTS.md" id="verify-trio" -->
 ```bash
 go vet ./...
 go test ./... -race -count=1
 go test ./... -cover -count=1
 ```
+<!-- /CANONICAL-COPY source="AGENTS.md" id="verify-trio" -->
+
+(canonical list: AGENTS.md; the copies here and in CONTRIBUTING.md are marked
+verbatim copies kept in lockstep by `scripts/check-docs.sh`)
 
 If you work in a sandbox that only permits writes under the workspace, redirect
 the Go caches there first (these directories are gitignored):

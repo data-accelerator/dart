@@ -194,10 +194,12 @@ query and fragment are cut at the first `?`/`#` before the identity is derived.
 
 ## 6. Determinism / Stability Contract
 
+<!-- CANONICAL id="chunkkey-wire" -->
 - The `ChunkKey` construction is **part of the wire protocol**: it selects chunk
   owners. Changing it reshuffles placement across the cluster and must be treated
   as a breaking change (bump the epoch). It is pinned by a cross-language golden
   test computed with an independent Python implementation.
+<!-- /CANONICAL id="chunkkey-wire" -->
 - `ObjectID`'s digest-extraction and URL-canonicalization rules affect cache
   identity and dedup; changing them changes cache keys and should be versioned
   deliberately.

@@ -166,11 +166,13 @@ Callers may rely on the following (each is guarded by a test, see §7):
 
 ## 6. Determinism / Stability Contract
 
+<!-- CANONICAL id="hash64-wire" -->
 - The construction of `Hash64` (FNV-1a byte order + fmix64 constants) and the
   `score` formula are **part of the protocol**. Any change reshuffles the ring /
   changes tree shapes — a **breaking change**: it must bump the cluster epoch and
   rely on epoch convergence under the read-only semantics (while old and new
   views coexist, only routing efficiency is affected, never correctness).
+<!-- /CANONICAL id="hash64-wire" -->
 - **Floating point note**: `score` uses `math.Log` — assembly on amd64/s390x,
   portable Go elsewhere; the implementations are bit-identical across platforms
   today (verified: 0 bit-differences over 50M samples, and 0 weighted-order

@@ -73,11 +73,13 @@ explicit `node.Run(..., schemes...)` registration — never `init()`.
    anything determinism-sensitive, pin behavior with **golden values computed by
    an independent implementation** (not by the Go code itself).
 3. **Verify** (all must pass before you consider the change done):
+<!-- CANONICAL id="verify-trio" -->
    ```bash
    go vet ./...
    go test ./... -race -count=1
    go test ./... -cover -count=1
    ```
+<!-- /CANONICAL id="verify-trio" -->
 4. **Document**: add/update `docs/<pkg>.md` per the required sections, and add a
    row to the `docs/README.md` index for a new package. Documentation is part of
    the change, not optional.
@@ -102,10 +104,21 @@ explicit `node.Run(..., schemes...)` registration — never `init()`.
 DART has no coordinator; every node must derive byte-identical placement and
 tree structure from the same inputs. Therefore:
 
-- The `Hash64` construction and the HRW `score` formula in `internal/hashring`
-  are **part of the wire protocol**. Changing either reshuffles the whole ring /
-  changes tree shapes — a **breaking change** that must bump the cluster epoch,
-  and you must regenerate the golden values with an independent implementation.
+<!-- CANONICAL-COPY source="docs/hashring.md" id="hash64-wire" -->
+- The construction of `Hash64` (FNV-1a byte order + fmix64 constants) and the
+  `score` formula are **part of the protocol**. Any change reshuffles the ring /
+  changes tree shapes — a **breaking change**: it must bump the cluster epoch and
+  rely on epoch convergence under the read-only semantics (while old and new
+  views coexist, only routing efficiency is affected, never correctness).
+<!-- /CANONICAL-COPY source="docs/hashring.md" id="hash64-wire" -->
+  Any such change must also regenerate the golden values with an independent
+  implementation.
+<!-- CANONICAL-COPY source="docs/chunk.md" id="chunkkey-wire" -->
+- The `ChunkKey` construction is **part of the wire protocol**: it selects chunk
+  owners. Changing it reshuffles placement across the cluster and must be treated
+  as a breaking change (bump the epoch). It is pinned by a cross-language golden
+  test computed with an independent Python implementation.
+<!-- /CANONICAL-COPY source="docs/chunk.md" id="chunkkey-wire" -->
 - Keep orderings a **strict total order** (score desc, then ID asc). Never rely
   on input order or non-stable sorts producing a canonical result by accident.
 - Node identity (`Node.ID`) must be stable and cluster-consistent; never derive
@@ -137,3 +150,16 @@ tree structure from the same inputs. Therefore:
   `sudo`. Use the dedicated file tools for file operations.
 - Read-only cache semantics are a core assumption; do not introduce write-back or
   mutable-origin behavior without explicit design agreement.
+
+## Authority and canonical sources
+
+Normative rules have exactly one canonical home, marked
+`<!-- CANONICAL id="..." -->`; marked copies (`CANONICAL-COPY`) exist only for
+safety-critical redundancy and must stay identical with their source, modulo
+leading indentation (edit both or neither — `scripts/check-docs.sh` enforces
+this). If repository
+documents disagree, precedence is: `docs/design-assumptions.md` →
+`docs/README.md` (the documentation policy) → the package documents
+(`docs/<pkg>.md`) → this file → `CONTRIBUTING.md`. Decisions behind
+contract-level rules live in `docs/adr/`; the newest accepted ADR resolves
+ambiguity.
