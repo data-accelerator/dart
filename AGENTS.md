@@ -158,7 +158,8 @@ Normative rules have exactly one canonical home, marked
 safety-critical redundancy and must stay identical with their source, modulo
 leading indentation (edit both or neither — `scripts/check-docs.sh` enforces
 this). If repository
-documents disagree, precedence is: `docs/design-assumptions.md` → the package
-documents (`docs/<pkg>.md`) → this file → `CONTRIBUTING.md`. Decisions behind
+documents disagree, precedence is: `docs/design-assumptions.md` →
+`docs/README.md` (the documentation policy) → the package documents
+(`docs/<pkg>.md`) → this file → `CONTRIBUTING.md`. Decisions behind
 contract-level rules live in `docs/adr/`; the newest accepted ADR resolves
 ambiguity.
