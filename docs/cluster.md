@@ -94,6 +94,8 @@ owner := hashring.Rank(chunkKey, v.Ready())[0] // placement over Ready members
 
 ### 3.3.1 `func ValidMemberID(s string) bool`
 
+Established by [ADR-0002](./adr/0002-visible-ascii-member-ids.md).
+
 The member-ID alphabet: every byte in [0x21, 0x7E] (visible ASCII, no spaces,
 no control bytes). Enforced at both ingress points — `-self-id`/`-peers`
 parsing in `internal/node` and roster ingest in `DynamicProvider.Learn` — so

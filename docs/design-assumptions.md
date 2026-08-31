@@ -11,6 +11,8 @@ configuration/contract extension — never silent degradation.
 
 ## A1. The origin is trusted, read-only, and the single source of truth
 
+Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
+
 Content-addressed objects (e.g. `sha256:` blobs) are immutable at the origin.
 DART does not detect, verify, or repair origin-side content changes or
 corruption; a cached block is never re-validated against the origin.
@@ -28,6 +30,8 @@ corruption; a cached block is never re-validated against the origin.
 
 ## A2. The deployment network is a trusted domain
 
+Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
+
 The peer, client, and admin planes are plaintext and unauthenticated by
 design; so is the path to an internal upstream unless the operator secures it
 (TLS, network policy). See SECURITY.md's trust model — it is part of this
@@ -44,6 +48,8 @@ contract.
 
 ## A3. Cluster configuration is uniform
 
+Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
+
 All nodes run the same `BlockSize`, `ChunkSize`, namespace, fanout, and
 feature set. Rolling changes that mix geometries are allowed to happen, but
 byte-level guarantees across a mixed-geometry window are out of scope.
@@ -57,6 +63,8 @@ byte-level guarantees across a mixed-geometry window are out of scope.
 - Relied on by: docs/chunk.md, docs/engine.md, docs/peer.md.
 
 ## A4. Weights are finite; non-positive ones are normalized to 1
+
+Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
 
 Placement math assumes a **finite** weight: the score formula `w / -ln(u)`
 scales a logarithmic term by it, so a non-finite weight yields an invalid
@@ -80,6 +88,8 @@ all, so non-finite weights cannot arrive through any current path.
 
 ## A5. Operator-supplied configuration values are sane
 
+Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
+
 Namespace, self ID, advertised addresses, seed lists, and registry endpoint
 come from trusted deployment configuration. DART validates only where a
 mistake would produce *silent corruption* rather than a clean startup or
@@ -91,6 +101,8 @@ would silently make peers dial themselves).
   exceptions have their own validation and docs (docs/node.md, docs/cluster.md).
 
 ## A6. The block cache is write-once; eviction is the only invalidation
+
+Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
 
 A cached block is never refreshed, re-validated, or overwritten. This is what
 makes wrong bytes at ingest permanent — which is exactly why ingest-side
@@ -104,5 +116,8 @@ validation (block-length geometry, §3.3 of docs/engine.md) is load-bearing.
 
 ## Changing an assumption
 
-Dropping or weakening one of these is a design change: say so explicitly in
-the proposal, update this file, and audit the "relied on by" documents.
+Dropping or weakening one of these is a design change: it requires a new ADR
+that supersedes [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md)'s
+coverage of the entry (see [docs/adr/README.md](./adr/README.md) for the
+lifecycle), an update to this file, and an audit of the "relied on by"
+documents.

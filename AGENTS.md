@@ -58,6 +58,11 @@ explicit `node.Run(..., schemes...)` registration — never `init()`.
   package must have a `docs/<pkg>.md`. See `docs/README.md` for the mandatory
   section template and the documentation policy. Documentation is part of a
   change, not optional.
+- **Contract-level changes need an ADR.** If your change touches the wire
+  protocol, a design assumption, any Stability Contract section, establishes a
+  cross-package convention, or rejects a significant alternative, include an
+  Architecture Decision Record in the same PR. See `docs/adr/README.md` for
+  the trigger list (T1–T5), the template, and the lifecycle.
 
 ## Mandatory workflow for any code change
 
