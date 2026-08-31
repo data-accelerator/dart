@@ -116,9 +116,12 @@ capped at 64 KiB.
 - **Deterministic wire form**: the frozen set is sorted by node ID; every
   observer of the same registry state reads the same epoch and reader list.
 - **Membership by liveness only**: a reader is in the set iff its lease is
-  unexpired at freeze time. `Leave` deletes the lease immediately (the
-  published set follows at the next freeze); an empty file entry disappears
-  at once, and an idle one is forgotten after `IdleGrace`.
+  unexpired at freeze time. `Leave` deletes the lease immediately; for a file
+  with remaining readers the published set follows at the next freeze, but
+  removing the **last** lease deletes the whole file entry, so `Readers` then
+  reports `(nil, 0)` without waiting for a tick (the tick-freeze guarantee
+  covers joins and lease expiries, not this deletion edge). An idle entry is
+  forgotten after `IdleGrace`.
 - **No collision with placement keys**: the file key uses the sentinel chunk
   index -1, which no real chunk's `ChunkKey` input can carry.
 - **Client-supplied TTLs are clamped** to the configured lease range;

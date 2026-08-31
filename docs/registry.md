@@ -95,9 +95,9 @@ func BlobDigest(path string) (string, bool)
   segment after the digest, a non-lowercase algorithm, or a leading/trailing
   separator in the algorithm.
 - `Mirror.ServeHTTP` is the single dispatch point: blob paths go to the engine
-  (or to the upstream with a conditional-304 dance when the engine declines),
-  everything else passes through. It is safe for concurrent use, as any
-  `http.Handler` must be.
+  (when the engine declines — e.g. the origin cannot serve ranges — it answers
+  via a direct passthrough proxy to the upstream), everything else passes
+  through. It is safe for concurrent use, as any `http.Handler` must be.
 - Blob responses carry `Docker-Content-Digest` (echoed from the path, which *is*
   the digest) and `Content-Type: application/octet-stream`.
 - Pass-through uses `httputil.ReverseProxy` with `SetXForwarded`, and rewrites
@@ -240,7 +240,9 @@ nodes (see docs/dart.md).
   be; it holds no per-request mutable state of its own — blob serving defers
   to the engine's own concurrency contract (docs/engine.md §5).
 - `AuthTransport.RoundTrip` is safe for concurrent use: the token cache is
-  mutex-guarded; token exchanges are singleflight-shared per (realm, scope);
+  mutex-guarded; token exchanges are singleflight-shared per (registry host,
+  path-derived scope) — the cache and inflight maps key on `tokenKey(host,
+  scope)`, the challenge realm is trusted as delivered (§5);
   a stored cache entry is never mutated, and drop-on-rejection is conditional
   on the rejected value (`dropTokenIf`), so a concurrent fresh store always
   survives.
