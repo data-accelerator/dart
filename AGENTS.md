@@ -63,6 +63,10 @@ explicit `node.Run(..., schemes...)` registration — never `init()`.
   cross-package convention, or rejects a significant alternative, include an
   Architecture Decision Record in the same PR. See `docs/adr/README.md` for
   the trigger list (T1–T5), the template, and the lifecycle.
+- When you touch `docs/`, `AGENTS.md`, or `CONTRIBUTING.md`, also run
+  `bash scripts/check-docs.sh` — CI enforces the documentation floor checks
+  (index sync, test-name and exported-symbol presence, required sections,
+  ADR integrity, canonical-copy lockstep).
 
 ## Mandatory workflow for any code change
 

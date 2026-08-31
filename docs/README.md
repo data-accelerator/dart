@@ -61,7 +61,8 @@ for `scripts/check-docs.sh` — keep it in sync with the prose.
 package: Overview; Concepts; Public API; Invariants & Guarantees; Concurrency & Call Permissions; Stability Contract; Testing; Limitations & TODO
 cmd: Overview; Usage; Behavior & guarantees (with Concurrency & lifecycle and Stability Contract as subsections); Testing; Limitations & TODO
 multi: Overview; per-package API sections; Concurrency & Call Permissions; Stability Contract; Testing; Limitations & TODO
-assignments: docs/dart.md=cmd; docs/observability.md=multi
+policy: free-form policy document (no required sections)
+assignments: docs/dart.md=cmd; docs/observability.md=multi; docs/design-assumptions.md=policy
 heading-aliases: Concepts <=> Wire form; Determinism / Stability Contract <=> Stability Contract
 -->
 
@@ -72,6 +73,8 @@ heading-aliases: Concepts <=> Wire form; Determinism / Stability Contract <=> St
 - **multi** (assigned: `docs/observability.md`): one document covering
   several packages uses per-package API sections instead of unified
   Concepts/Public-API/Invariants sections.
+- **policy** (assigned: `docs/design-assumptions.md`): a free-form policy
+  document; the section template does not apply.
 - **Heading aliases**: the Concepts section may be titled by its domain
   content (e.g. peer.md's "Wire form"); the Stability Contract may be titled
   "Determinism / Stability Contract".
