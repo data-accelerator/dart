@@ -13,7 +13,7 @@ Building the tree over **all** Ready members means a node's parent may be a
 member that is not reading the object at all, so it has to fetch-on-behalf just
 to pass bytes along. Building it over the **readers** makes every parent a node
 that actually wants the data (it either holds it or is already fetching it),
-which is the design's active-reader-set optimization (§4.2, §6.2).
+which is the design's active-reader-set optimization (docs/hashring.md §2/§3).
 
 Three properties make this safe and cheap:
 
@@ -90,6 +90,11 @@ POST /tracker/v1/join    {"file","node","ttlMs"} -> {"epochS","readers","ttlMs"}
 POST /tracker/v1/leave   {"file","node"}         -> 204
 ```
 
+The join body is `JoinRequest{File, Node, TTLMs}`: `File` is the opaque object
+key, `Node` the reader's stable cluster ID, and `TTLMs` the requested lease in
+milliseconds — 0 means the tracker default, and client-supplied values are
+clamped to the configured range (see §2; duration-overflow guarded).
+
 ```go
 mux := (&tracker.Server{R: reg}).Handler()   // serve
 c := tracker.NewClient()                     // 2s timeout: control plane fails fast
@@ -100,7 +105,29 @@ err = c.Leave(ctx, addr, file, node)
 Non-POST is `405`; malformed JSON or missing `file`/`node` is `400`. Bodies are
 capped at 64 KiB.
 
-## 4. Engine integration
+## 4. Invariants & Guarantees
+
+- **Tick freeze**: the published reader set changes only at tick boundaries
+  (recomputation is lazy — on activity, at most once per tick; there is no
+  background goroutine). Between ticks the topology and `epochS` are stable,
+  so TCP connections to readers do not churn.
+- **`epochS` bumps only when the frozen set actually changes** — joins that
+  refresh an existing lease, and leaves of absent readers, never bump it.
+- **Deterministic wire form**: the frozen set is sorted by node ID; every
+  observer of the same registry state reads the same epoch and reader list.
+- **Membership by liveness only**: a reader is in the set iff its lease is
+  unexpired at freeze time. `Leave` deletes the lease immediately; for a file
+  with remaining readers the published set follows at the next freeze, but
+  removing the **last** lease deletes the whole file entry, so `Readers` then
+  reports `(nil, 0)` without waiting for a tick (the tick-freeze guarantee
+  covers joins and lease expiries, not this deletion edge). An idle entry is
+  forgotten after `IdleGrace`.
+- **No collision with placement keys**: the file key uses the sentinel chunk
+  index -1, which no real chunk's `ChunkKey` input can carry.
+- **Client-supplied TTLs are clamped** to the configured lease range;
+  arithmetic is duration-overflow guarded.
+
+## 5. Engine integration
 
 `engine.Options.TrackerRegistry` (this node's local tracker) and
 `TrackerClient` (to reach remote trackers) enable the feature; leaving both nil
@@ -115,14 +142,14 @@ keeps all-member routing. The engine then:
 unreachable, or the reader set has fewer than two usable members, routing falls
 back to all Ready members.
 
-## 5. Concurrency & Call Permissions
+## 6. Concurrency & Call Permissions
 
 - `Registry` is safe for concurrent use (single mutex); `Readers`/`Join` return
   copies, never internal slices. Verified with `-race`.
 - `Client` is safe for concurrent use.
 - The engine's reader-set cache is mutex-guarded and holds only IDs.
 
-## 6. Stability Contract
+## 7. Stability Contract
 
 - The JSON shapes and paths (`/tracker/v1/join`, `/leave`) are the tracker wire
   protocol; changing them is a protocol change.
@@ -131,7 +158,7 @@ back to all Ready members.
 - `epochS` must change only when the set changes (readers rely on it to detect
   topology changes cheaply).
 
-## 7. Testing
+## 8. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
 - **Coverage**: **89.5%** of statements.
@@ -172,7 +199,7 @@ Engine-side (in `internal/engine`):
 | `TestTreeNodesFallsBackToAllMembers` | no tracker, or a single reader, falls back to all-member routing |
 | `TestReaderSetTreeEndToEnd` | 3 nodes sharing one tracker all read correct bytes |
 
-## 8. Limitations & TODO
+## 9. Limitations & TODO
 
 - **Tracker liveness**: a tracker that dies is replaced by HRW on the next
   membership change, and `S` rebuilds from renewals — but in-flight reads during

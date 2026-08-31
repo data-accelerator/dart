@@ -94,6 +94,10 @@ func BlobDigest(path string) (string, bool)
   (`/v2/<name>/blobs/uploads/...`), an empty name or digest, an extra path
   segment after the digest, a non-lowercase algorithm, or a leading/trailing
   separator in the algorithm.
+- `Mirror.ServeHTTP` is the single dispatch point: blob paths go to the engine
+  (when the engine declines — e.g. the origin cannot serve ranges — it answers
+  via a direct passthrough proxy to the upstream), everything else passes
+  through. It is safe for concurrent use, as any `http.Handler` must be.
 - Blob responses carry `Docker-Content-Digest` (echoed from the path, which *is*
   the digest) and `Content-Type: application/octet-stream`.
 - Pass-through uses `httputil.ReverseProxy` with `SetXForwarded`, and rewrites
@@ -130,6 +134,9 @@ rather than plain Basic:
 ```go
 func LoadCredentials(path string) (map[string]Credential, error)
 func NewAuthTransport(base http.RoundTripper, creds map[string]Credential) *AuthTransport
+// AuthTransport.RoundTrip attaches/caches/exchanges the bearer token per
+// request (singleflight per (host, scope), conditional drop-on-rejection)
+// and otherwise delegates to base. Safe for concurrent use.
 ```
 
 **Why a RoundTripper rather than threading a credential through the read path.**
@@ -227,7 +234,39 @@ automatically if the mirror is unavailable, so a DART outage degrades to a direc
 pull rather than a failed one. Add `-peers`/`-self-id` to enable P2P between
 nodes (see docs/dart.md).
 
-## 7. Testing
+## 7. Concurrency & Call Permissions
+
+- `Mirror.ServeHTTP` is safe for concurrent use, as any `http.Handler` must
+  be; it holds no per-request mutable state of its own — blob serving defers
+  to the engine's own concurrency contract (docs/engine.md §5).
+- `AuthTransport.RoundTrip` is safe for concurrent use: the token cache is
+  mutex-guarded; token exchanges are singleflight-shared per (registry host,
+  path-derived scope) — the cache and inflight maps key on `tokenKey(host,
+  scope)`, the challenge realm is trusted as delivered (§5);
+  a stored cache entry is never mutated, and drop-on-rejection is conditional
+  on the rejected value (`dropTokenIf`), so a concurrent fresh store always
+  survives.
+- The pass-through reverse proxy is stateless between requests.
+- Call order: `New` first; there is no `Close` — the mirror owns no resources
+  beyond its transport.
+
+## 8. Stability Contract
+
+- **Breaking**: widening or narrowing the path set `BlobDigest` accepts as
+  cacheable. The classifier must stay exactly aligned with `chunk.IsDigest`
+  (§3.4.1 of docs/chunk.md); changing either side without the other splits
+  cache identity between the mirror and content-addressed clients.
+- **Breaking**: the blob response contract — `Docker-Content-Digest` echoed
+  from the path, `Content-Type: application/octet-stream`, and range
+  semantics inherited from the engine (200/206/416, Content-Length framed).
+- **Contract (assumption-backed)**: the trust model of §5 — the trusted
+  read-only origin (A1) and the realm-as-delivered rule — is part of this
+  stability contract. Weakening it is a T2/T3-triggered change requiring an
+  ADR (docs/adr/README.md).
+- Pass-through behavior (Host rewrite, X-Forwarded-* via `SetXForwarded`) is
+  observable to upstreams and treated as stable.
+
+## 9. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
 - **Coverage**: **86.4%** of statements.
@@ -296,7 +335,7 @@ In `cmd/dart`:
 | `TestBuildRegistryMirror` | `-registry` mounts the mirror; a bad upstream fails the build without leaking the cache-dir lock |
 | **`TestBuildRegistryAuth`** | **a token-demanding private upstream is served end-to-end; bad/missing credential files fail the build without leaking the lock** |
 
-## 8. Limitations & TODO
+## 10. Limitations & TODO
 
 - **No per-request credential**: authentication is per upstream, not per client.
   A client-supplied token is forwarded on the **pass-through** path but not used

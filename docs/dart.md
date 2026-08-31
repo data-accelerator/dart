@@ -149,6 +149,28 @@ but immediate and readiness-aware (see [k8s.md](./k8s.md)). `-discover`'s help
 text lists exactly what the running binary was linked with.
 
 
+### 3.7 Concurrency & lifecycle
+
+All servers (client, peer, admin) run concurrently; every write to the
+operator's `out` stream is serialized through a locked writer. Handler
+lifetime follows the node-level admission-gate contract — nothing is closed
+under a live handler (docs/node.md §3.1, ADR-0003). The binary's version is
+stamped at build time (`-ldflags "-X main.version=..."`) and reported by
+`-version` and on startup.
+
+### 3.8 Stability contract
+
+- The flag set, defaults, and their validation rules are the operator-facing
+  contract; changing a default is a breaking change for existing deployments
+  and must be called out in the changelog.
+- Wire-visible behavior (range semantics, the registry-mirror path set, peer
+  headers) is governed by the Stability Contract sections of the engine,
+  registry, and peer package documents — this binary adds no wire rules of
+  its own beyond the wiring documented here.
+- The discovery-scheme set is a property of the binary (`dns`+`static` for
+  `dart`, plus `k8s` for `dart-k8s`); embedding applications choose it via
+  `node.Run`'s scheme registration.
+
 ## 4. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.

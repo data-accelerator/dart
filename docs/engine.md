@@ -251,7 +251,9 @@ Together these bound abrupt node death: the dial timeout makes the first affecte
 read fail in ~1 s, a dial failure opens the circuit on that single observation, and
 every later read skips the departed peer entirely.
 
-Metrics: `dart_hedge_total{event=fired|primary_won|backup_won}` and
+`NewMetrics(r *metrics.Registry) *Metrics` allocates and registers the
+engine's metric set; `Engine` accepts it via `Options.Metrics` (a nil one
+disables engine metrics). Metrics: `dart_hedge_total{event=fired|primary_won|backup_won}` and
 `dart_peer_failover_total`. Comparing `backup_won` against `fired` shows whether
 hedging is paying for itself; `dart_peer_failover_total` rising marks peers
 actually going away. `primary_won`/`backup_won` are recorded **only when a hedge
