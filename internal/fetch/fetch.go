@@ -594,16 +594,25 @@ func (g *group) acquire(key string, maxFlight time.Duration) (c *call, lead bool
 	return c, true
 }
 
-// finish publishes a led flight's result and wakes its waiters: the writes
-// happen-before the close of done, hence before any waiter's read. A
-// late-finishing stale leader deletes only its own entry, never the
-// replacement's.
+// finish publishes a led flight's result and wakes its waiters. The entry is
+// deleted BEFORE done is closed: the map holds only uncompleted flights, so
+// once a call has returned, its flight is unreachable and a strictly
+// sequential caller for the same key always leads a fresh fetch — an error
+// result can never be served twice (issue #69; the engine's size probe pins
+// "failures are not cached" on this). Publishing first would open a window
+// in which a woken leader returns and its caller's next call joins the
+// completed flight. The cost is the mirror image: a caller that arrives in
+// the window between the delete and the close leads a duplicate fetch rather
+// than sharing the just-finished result — bounded extra traffic, by design.
+// The result writes still happen-before the close of done, hence before any
+// waiter's read. A late-finishing stale leader deletes only its own entry,
+// never the replacement's.
 func (g *group) finish(key string, c *call, v Range, err error) {
-	c.val, c.err = v, err
-	close(c.done)
 	g.mu.Lock()
 	if g.m[key] == c {
 		delete(g.m, key)
 	}
 	g.mu.Unlock()
+	c.val, c.err = v, err
+	close(c.done)
 }

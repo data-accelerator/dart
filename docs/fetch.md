@@ -147,6 +147,16 @@ used to be retained until the flight bound). A corollary of inline waiting: a
 flight everyone abandoned is *not* replaced at its deadline — nobody is left
 wanting the bytes — the stale entry is evicted lazily by the next real caller.
 
+Sharing stops at completion: the worker removes the flight from the group
+**before** publishing its result, so once any call has returned, its flight is
+unreachable and a later — even immediately sequential — call for the same key
+leads a fresh fetch. An error is therefore never replayed to a caller that was
+not still waiting for it (the engine's size probe relies on this: a failed
+probe is re-issued against origin, never served twice — issue #69). The mirror
+cost: a caller arriving in the window between removal and publication leads a
+duplicate fetch instead of sharing the just-finished result — bounded extra
+traffic, by design.
+
 Each caller's own `ctx` only bounds how long that caller waits (a cancelled
 caller returns `ctx.Err()`).
 
@@ -219,9 +229,12 @@ bucket), and that changes three things:
    `start` discarded, at most `end-start+1` read) — the full body is never
    buffered.
 2. **Coalescing**: N concurrent `Coalescing.Fetch` for the same key ⇒ exactly 1
-   call to the underlying `Fetcher`; all callers receive the same result. The one
-   exception is an authorization refusal (401/403), where each joiner re-fetches
-   once with its own credential (§3.6).
+   call to the underlying `Fetcher`; all callers receive the same result.
+   Coalescing never crosses completion: a call issued after its key's flight
+   has returned leads a fresh fetch, so a failure can never be replayed to a
+   later caller (issue #69, §3.5). The one exception is an authorization
+   refusal (401/403), where each joiner re-fetches once with its own
+   credential (§3.6).
 3. **Cancellation isolation**: a caller cancelling its `ctx` neither aborts the
    shared fetch nor affects other callers. The shared flight is itself bounded
    by `MaxFlight` (§3.5), so a stalled origin fails all waiters within the
@@ -253,7 +266,7 @@ bucket), and that changes three things:
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **93.1%** of statements. The remaining uncovered lines are rare
+- **Coverage**: **91.8%** of statements. The remaining uncovered lines are rare
   I/O-error branches (e.g. a mid-body read error) that need fault injection.
 - **Reproduce**:
 
@@ -307,6 +320,7 @@ go test ./internal/fetch/ -cover -count=1
 | `TestStartFromContentRange` | Content-Range start parsing incl. rejects |
 | `TestCoalescedResultIsMarked` | joined callers see Coalesced=true; the leader does not |
 | `TestUncontendedFetchNotMarkedCoalesced` | an uncontended fetch is not marked coalesced |
+| **`TestSequentialFetchNeverJoinsCompletedFlight`** | **strictly sequential identical fetches never join a completed flight — each reaches the inner fetcher, so an error can never be replayed to a later caller (issue #69; time-boxed `-race` stress)** |
 | `TestFetchBlockPastEndErrors` | a block wholly past the object (or an inverted range) errors without contacting origin |
 | `TestFetchBlockUnknownSizeTailBlock` | an RFC-clamped 206 on the tail block is accepted and reveals Total |
 | **`TestFetchBlockRejectsOverflowGeometry`** | **negative / int64-overflowing block indices (and non-positive block size) error before the fetcher is invoked, size known or unknown (issue #52)** |
