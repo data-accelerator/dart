@@ -13,6 +13,8 @@
 #      symmetry, index coverage, Binds path existence
 #   6. CANONICAL-COPY blocks are identical to their CANONICAL source
 #      (modulo leading indentation)
+#   7. every non-superseded ADR is referenced by number from current law
+#      (docs/*.md or AGENTS.md, excluding docs/adr/)
 #
 # Plus one warning (never fails): relative .md links that point nowhere.
 #
@@ -22,7 +24,10 @@
 # a symbol only appearing in example code still counts as "documented";
 # check 4 matches required words at non-letter boundaries in heading text
 # (first-word aliases included), so "## Instability notes" does not satisfy
-# Stability but "## 6. Determinism / Stability Contract" does.
+# Stability but "## 6. Determinism / Stability Contract" does; check 7 sees
+# only that a reference EXISTS, not that it sits where a reader needs it —
+# anchoring policy (temptation sites for rejected records) stays with
+# docs/adr/README.md and review.
 # Meaning stays with human/agent review.
 #
 # Requires: bash, grep, awk, go (for check 3). No network, no LLM.
@@ -219,6 +224,32 @@ for id in $ids; do
   done
 done
 ok "check6: canonical copies in lockstep"
+
+# ---------------------------------------------------------------- check 7
+# ADR back-references: every non-superseded ADR is cited by number from at
+# least one current-law document (docs/*.md or AGENTS.md — never docs/adr/,
+# whose index would make the check vacuous). An ADR nothing references is
+# invisible to the entry-file + links reading path: the real failure mode is
+# not unwritten decisions but unread ones. Superseded records are exempt —
+# they stay reachable through the Supersedes chain check 5 validates.
+law_files=$(ls docs/*.md AGENTS.md 2>/dev/null || true)
+if [ -z "$law_files" ]; then
+  err "check7: no current-law documents found (docs/*.md, AGENTS.md)"
+fi
+for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
+  [ -e "$f" ] || continue
+  n=$(basename "$f" | cut -c1-4)
+  status=$(sed -n 's/^- Status: //p' "$f" | head -1)
+  case "$status" in "superseded by ADR-"*) continue ;; esac
+  # The digit guard stops a longer number satisfying a shorter one
+  # (ADR-00010 must not count for ADR-0001); the boundary is otherwise
+  # deliberately loose — "ADR-0001." and "(see ADR-0001)" are the normal
+  # citation shapes. NB: the \$ EOL anchor relies on double-quote collapse.
+  if [ -n "$law_files" ] && ! grep -qE "ADR-$n([^0-9]|\$)" $law_files; then
+    err "check7: $f ($status) is not referenced from any current-law document (docs/*.md or AGENTS.md)"
+  fi
+done
+ok "check7: ADR back-references"
 
 # ------------------------------------------------- link warning (soft)
 for doc in docs/*.md docs/adr/*.md AGENTS.md CONTRIBUTING.md README.md; do
