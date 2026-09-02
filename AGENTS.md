@@ -62,7 +62,10 @@ explicit `node.Run(..., schemes...)` registration — never `init()`.
   protocol, a design assumption, any Stability Contract section, establishes a
   cross-package convention, or rejects a significant alternative, include an
   Architecture Decision Record in the same PR. See `docs/adr/README.md` for
-  the trigger list (T1–T5), the template, and the lifecycle.
+  the trigger list (T1–T5), the template, and the lifecycle. **Search first:**
+  before changing an existing convention or proposing a new direction, look
+  through `docs/adr/` — including rejected records, which exist precisely so
+  rejected alternatives are not re-proposed (T5).
 - When you touch `docs/`, `AGENTS.md`, or `CONTRIBUTING.md`, also run
   `bash scripts/check-docs.sh` — CI enforces the documentation floor checks
   (index sync, test-name and exported-symbol presence, required sections,

@@ -83,6 +83,40 @@ proposed ──(PR merges)──> accepted ──(a new ADR overrides it)──>
 - If two PRs race for the same number, the merge conflict in the index below
   forces a renumber. At this repository's change rate that is sufficient.
 
+## References and anchoring
+
+**Back-references are mandatory (the push channel).** A reader navigates this
+repository by entry file + current file + whatever is linked from them; an ADR
+nothing references is effectively invisible. Every non-superseded ADR must
+therefore be cited by number (`ADR-NNNN`) from at least one current-law
+document (`docs/*.md` or `AGENTS.md`) — `scripts/check-docs.sh` check 7
+enforces this. Superseded records are exempt: they stay reachable through the
+`Supersedes` chain. Anchor where a reader of the current rule needs the
+rationale. For **rejected** records the anchor belongs at the *temptation
+site* — the current-law entry whose rule the rejected alternative would
+violate (e.g. a `Rejected: ADR-XXXX` note inside the matching
+`docs/design-assumptions.md` assumption) — never in "see also" link piles.
+
+**ADR bodies carry no live code anchors.** An accepted ADR's body is frozen;
+a live anchor must stay valid. Those rules are mutually exclusive — one
+forces edits to frozen text, the other a permanently red CI — so the body
+must be **self-contained**: describe behavior semantically, in prose that
+needs no code reference to be understood. `Context` may optionally
+link an "as of this PR" commit snapshot: the ADR and the code it discusses
+land in the same PR, the writing cost is ~0, and a frozen reference is a
+*feature* for historical claims. Verifying "what did the code look like then"
+goes through standard archaeology (`git log -S`, blame, the snapshot link);
+`git log -- docs/adr/NNNN-*.md` and the merge commit already supply the time
+context for free. Live, drift-checked anchors are for current-law documents,
+which are few and read every session — the cost-benefit closes only there.
+
+**Current law vs case law, editorially.** Current-law documents state what
+the rule is *today*; ADRs state *why*, and what was rejected. Sentences built
+around "used to / originally / we considered / rejected" belong in ADRs, not
+in `docs/*.md`. One explicit exception: a single-clause issue/ADR reference
+kept inline as a reader signpost (e.g. "the issue #53 gap: …") stays
+acceptable in current law — it is a pointer, not a narrative.
+
 ## Index
 
 | ADR | Title | Status |
