@@ -15,6 +15,9 @@
 #      (modulo leading indentation)
 #   7. every non-superseded ADR is referenced by number from current law
 #      (docs/*.md or AGENTS.md, excluding docs/adr/)
+#   8. evidence anchors: backticked `path::symbol` references in docs/*.md
+#      resolve — the file exists and declares the symbol (opt-in anchors;
+#      pilot convention, see docs/README.md)
 #
 # Plus one warning (never fails): relative .md links that point nowhere.
 #
@@ -22,6 +25,12 @@
 # semantics. Known limits: check 3 covers single-line const/var declarations
 # and methods, not grouped const members without individual doc comments, and
 # a symbol only appearing in example code still counts as "documented";
+# check 8 likewise matches only single-line declarations (func/method/type/
+# const/var), not grouped const members — anchor individually declared
+# symbols; check 8 sees that a declaration exists, never that the anchored
+# prose describes it correctly, and its greps are not comment-aware (a
+# `type Foo` inside a comment would satisfy it — same class of limit as
+# check 3's example-code caveat).
 # check 4 matches required words at non-letter boundaries in heading text
 # (first-word aliases included), so "## Instability notes" does not satisfy
 # Stability but "## 6. Determinism / Stability Contract" does; check 7 sees
@@ -250,6 +259,32 @@ for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   fi
 done
 ok "check7: ADR back-references"
+
+# ---------------------------------------------------------------- check 8
+# Evidence anchors: backticked `path::symbol` references in docs/*.md must
+# resolve — the file exists and declares the symbol. Anchors are opt-in: the
+# check never requires writing one, it only keeps written anchors valid, so
+# contract prose cannot silently outlive the symbol it describes. No line
+# numbers, by design: symbol names drift far less than lines, and existence
+# is grep-checkable — the same granularity as checks 2/3.
+for doc in docs/*.md; do
+  anchors=$(grep -oE '`[A-Za-z0-9_/.-]+::[A-Za-z_][A-Za-z0-9_]*`' "$doc" | tr -d '`' | sort -u)
+  while IFS= read -r a; do
+    [ -z "$a" ] && continue
+    af=${a%%::*}; as=${a##*::}
+    if [ ! -f "$af" ]; then
+      err "check8: $doc anchors \`$a\`, but $af does not exist"
+      continue
+    fi
+    # func/method:  func Symbol(  or  func (recv) Symbol(
+    # otherwise:    type|const|var Symbol<boundary>
+    if ! grep -qE "func +(\([^)]*\) +)?$as\(" "$af" \
+      && ! grep -qE "(type|const|var) +$as([^A-Za-z0-9_]|\$)" "$af"; then
+      err "check8: $doc anchors \`$a\`, but $as is not declared in $af"
+    fi
+  done <<<"$anchors"
+done
+ok "check8: evidence anchors resolve"
 
 # ------------------------------------------------- link warning (soft)
 for doc in docs/*.md docs/adr/*.md AGENTS.md CONTRIBUTING.md README.md; do
