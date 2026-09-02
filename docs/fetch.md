@@ -63,6 +63,7 @@ type HTTPFetcher struct {
   or the wrong offset would otherwise have its bytes cached under the block's
   key, and the block cache is write-once per key, so that corruption would be
   permanent. `Content-Range` is also parsed for `Total`.
+  Anchor: `internal/fetch/fetch.go::Fetch`.
 - If the origin **ignores** the Range and returns `200`, the window is sliced
   out of the stream **without buffering the whole object**: bytes before `start`
   are discarded, at most `end-start+1` are read, and the rest of the response is
@@ -95,6 +96,7 @@ Range-ignoring origins. Time complexity is O(1); no body bytes are buffered.
 starts a new one (the fix for issue #4's permanently-poisoned cache key: a
 stalled flight expires instead of blocking the key forever). Joiners of a
 flight wait inline, one worker goroutine per flight (#60).
+Anchor: `internal/fetch/fetch.go::DefaultMaxFlight`.
 
 ### 3.4 `func FetchBlock(ctx, f Fetcher, url string, blockSize, blockIndex, size int64) (Range, error)`
 
@@ -116,7 +118,7 @@ index whose start multiplication or end addition would overflow — is an
 **error before the fetcher is invoked**: a wrapped start would otherwise
 recycle to 0 (silently fetching block 0's bytes) or go negative, which
 `HTTPFetcher.Fetch` reads as "no Range header" — a one-block fetch degrading
-into a whole-object GET.
+into a whole-object GET. Anchor: `internal/fetch/fetch.go::FetchBlock`.
 
 ### 3.5 `type Coalescing`
 
@@ -137,6 +139,7 @@ first) the flight becomes **stale**: a caller still waiting re-checks, evicts
 the stale entry, and leads a replacement; a late-finishing stale leader never
 deletes the replacement's entry. Without the bound, one half-dead origin
 connection would poison the cache key for the process lifetime.
+Anchor: `internal/fetch/fetch.go::acquire`.
 
 A flight keeps **exactly one worker goroutine** — started by whoever leads it —
 no matter how many callers join or abandon it: joiners wait inline on the
@@ -155,7 +158,7 @@ not still waiting for it (the engine's size probe relies on this: a failed
 probe is re-issued against origin, never served twice — issue #69). The mirror
 cost: a caller arriving in the window between removal and publication leads a
 duplicate fetch instead of sharing the just-finished result — bounded extra
-traffic, by design.
+traffic, by design. Anchor: `internal/fetch/fetch.go::finish`.
 
 Each caller's own `ctx` only bounds how long that caller waits (a cancelled
 caller returns `ctx.Err()`).

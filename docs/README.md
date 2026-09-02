@@ -83,6 +83,26 @@ heading-aliases: Concepts <=> Wire form; Determinism / Stability Contract <=> St
 
 "Testing" is not a single line saying "tests exist". It must let the reader judge **trustworthiness**: list the specific property each test guards, the coverage number, and whether `vet`/`-race` pass, plus reproduction commands. If a function is left uncovered, state why explicitly.
 
+### Experimental: evidence anchors (pilot)
+
+A contract-level entry (e.g. a Public API or Stability Contract entry) may
+carry an **evidence anchor** — a backticked
+"path::symbol" reference (file + symbol, **never a line number**: line
+numbers drift on every edit; symbol names are stable and their existence is
+grep-checkable, the same granularity as the test-name and exported-symbol
+checks). `scripts/check-docs.sh` check 8 keeps written anchors valid: the
+file must exist and declare the symbol (function, method, or
+`type`/`const`/`var`). Anchors are **opt-in** — the check never requires
+writing one; it only stops contract prose from silently outliving the symbol
+it describes.
+
+Status: **pilot**, currently only in `docs/fetch.md` (see the `Anchor:`
+sentences there for live examples) — evaluating signal-to-noise before any
+wider adoption. Promotion to a repository-wide convention, if it happens,
+goes through an ADR. Point-in-time historical claims anchor a commit SHA
+instead of a live symbol — frozen is a feature there. ADR bodies never carry
+live anchors (see `docs/adr/README.md`).
+
 ## Running the tests locally
 
 DART has no external dependencies, so the standard commands are all that is
