@@ -79,6 +79,29 @@ heading-aliases: Concepts <=> Wire form; Determinism / Stability Contract <=> St
   content (e.g. peer.md's "Wire form"); the Stability Contract may be titled
   "Determinism / Stability Contract".
 
+### Enforcement tiers
+
+The floor enforced by `scripts/check-docs.sh` is split into two tiers, by one
+principle: **a claim that is false or broken blocks; a demand for more
+documentation advises.**
+
+- **Hard gate (fails CI):** index ↔ files sync (check 1); documented test
+  names exist (2); ADR integrity (5); canonical-copy lockstep (6); written
+  evidence anchors resolve (8). These catch something that *is* wrong — a
+  name that does not exist, a copy that drifted, an anchor that does not
+  resolve.
+- **Advisory notes (never fail CI; reported as a single sticky PR
+  comment):** exported-symbol naming (check 3); required sections (4); ADR
+  back-references (7). These ask for *more* documentation, and their
+  satisfaction involves judgment (where a symbol is best named, where an
+  ADR's back-reference belongs).
+
+**Dispositions.** A PR may merge with open advisory notes only when each
+note has a disposition in the PR thread: fixed, or waived with a stated
+reason. Waivers are explicit, auditable decisions — never silent merges.
+Repository-internal work (maintainer and agents) holds itself to the same
+rule: fix or waive in-thread, do not let notes accumulate.
+
 ### What "Testing" must record
 
 "Testing" is not a single line saying "tests exist". It must let the reader judge **trustworthiness**: list the specific property each test guards, the coverage number, and whether `vet`/`-race` pass, plus reproduction commands. If a function is left uncovered, state why explicitly.

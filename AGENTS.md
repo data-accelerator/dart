@@ -67,9 +67,13 @@ explicit `node.Run(..., schemes...)` registration — never `init()`.
   through `docs/adr/` — including rejected records, which exist precisely so
   rejected alternatives are not re-proposed (T5).
 - When you touch `docs/`, `AGENTS.md`, or `CONTRIBUTING.md`, also run
-  `bash scripts/check-docs.sh` — CI enforces the documentation floor checks
-  (index sync, test-name and exported-symbol presence, required sections,
-  ADR integrity, canonical-copy lockstep).
+  `bash scripts/check-docs.sh` — the documentation floor is two-tier: a
+  **hard gate** that fails CI (index sync, documented test names, ADR
+  integrity, canonical-copy lockstep, written evidence anchors) and
+  **advisory notes** (exported-symbol naming, required sections, ADR
+  back-references) that arrive as a non-blocking PR comment. Each advisory
+  note needs a disposition in the PR thread — fixed, or waived with a stated
+  reason. Canonical statement: `docs/README.md`, "Enforcement tiers".
 
 ## Mandatory workflow for any code change
 
