@@ -90,7 +90,10 @@ repository by entry file + current file + whatever is linked from them; an ADR
 nothing references is effectively invisible. Every non-superseded ADR must
 therefore be cited by number (`ADR-NNNN`) from at least one current-law
 document (`docs/*.md` or `AGENTS.md`) — `scripts/check-docs.sh` check 7
-enforces this. Superseded records are exempt: they stay reachable through the
+reports missing references as an advisory (non-blocking) PR note; a PR may
+merge with an open note only once the PR thread records a disposition
+(fixed, or waived with a reason). Superseded records are exempt: they stay
+reachable through the
 `Supersedes` chain. Anchor where a reader of the current rule needs the
 rationale. For **rejected** records the anchor belongs at the *temptation
 site* — the current-law entry whose rule the rejected alternative would

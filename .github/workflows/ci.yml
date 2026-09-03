@@ -129,6 +129,10 @@ jobs:
   docs:
     name: docs governance
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write  # PR comments go through the issues comments API
     steps:
       - uses: actions/checkout@v4
 
@@ -137,8 +141,36 @@ jobs:
           go-version: stable
           check-latest: true
 
+      # The floor is two-tier (scripts/check-docs.sh header; canonical
+      # statement in docs/README.md, "Enforcement tiers"): the exit code
+      # carries only hard-gate failures, advisory notes never block. Capture
+      # the full output so the advisory notes can still be reported on the PR
+      # when hard failures are also present.
       - name: check-docs
-        run: bash scripts/check-docs.sh
+        id: checkdocs
+        run: |
+          rc=0
+          bash scripts/check-docs.sh > check-docs.out 2>&1 || rc=$?
+          cat check-docs.out
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+      # Best-effort sticky PR comment with the advisory notes (the script
+      # itself tolerates fork PRs' read-only token and always exits 0).
+      - name: report advisory notes
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/report-docs-advisories.sh check-docs.out "${{ github.event.pull_request.number }}"
+
+      - name: gate on hard-gate failures
+        if: always()
+        run: |
+          rc='${{ steps.checkdocs.outputs.rc }}'
+          if [ "$rc" != "0" ]; then
+            echo "documentation floor: hard-gate failure(s) — see the check-docs output above"
+            exit 1
+          fi
+          echo "documentation floor: hard gate clean"
 
   cross-build:
     name: cross-build ${{ matrix.goos }}/${{ matrix.goarch }}

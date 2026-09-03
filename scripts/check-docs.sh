@@ -1,23 +1,31 @@
 #!/usr/bin/env bash
 # check-docs.sh — documentation governance floor checks.
 #
-# What this enforces (hard failures):
-#   1. docs/README.md index <-> docs files stay in sync
-#   2. backticked Test*/Benchmark*/Example*/Fuzz* names in docs exist as test
-#      functions in *_test.go files
-#   3. every exported top-level identifier and exported method (go doc -all)
-#      is named (word-boundary match) in its package document
-#   4. every docs/*.md carries the required sections of its sanctioned shape
-#      (DOC-SHAPES block in docs/README.md is the single source of truth)
-#   5. ADR integrity: unique numbers, required metadata fields, Supersedes
-#      symmetry, index coverage, Binds path existence
-#   6. CANONICAL-COPY blocks are identical to their CANONICAL source
-#      (modulo leading indentation)
-#   7. every non-superseded ADR is referenced by number from current law
-#      (docs/*.md or AGENTS.md, excluding docs/adr/)
-#   8. evidence anchors: backticked `path::symbol` references in docs/*.md
-#      resolve — the file exists and declares the symbol (opt-in anchors;
-#      pilot convention, see docs/README.md)
+# The floor is split into two enforcement tiers (canonical statement:
+# docs/README.md, "Enforcement tiers"). Principle: a claim that is FALSE or
+# BROKEN blocks; a demand for MORE documentation advises.
+#
+#   HARD GATE (exit 1, fails CI):
+#     1. docs/README.md index <-> docs files stay in sync
+#     2. backticked Test*/Benchmark*/Example*/Fuzz* names in docs exist as
+#        test functions in *_test.go files
+#     5. ADR integrity: unique numbers, required metadata fields, Supersedes
+#        symmetry, index coverage, Binds path existence
+#     6. CANONICAL-COPY blocks are identical to their CANONICAL source
+#        (modulo leading indentation)
+#     8. evidence anchors: backticked `path::symbol` references in docs/*.md
+#        resolve — the file exists and declares the symbol (opt-in anchors;
+#        pilot convention, see docs/README.md)
+#
+#   ADVISORY (never affects the exit code; CI reports them as a non-blocking
+#   PR comment, and each note needs a disposition in the PR thread — fixed,
+#   or waived with a stated reason):
+#     3. every exported top-level identifier and exported method (go doc -all)
+#        is named (word-boundary match) in its package document
+#     4. every docs/*.md carries the required sections of its sanctioned shape
+#        (DOC-SHAPES block in docs/README.md is the single source of truth)
+#     7. every non-superseded ADR is referenced by number from current law
+#        (docs/*.md or AGENTS.md, excluding docs/adr/)
 #
 # Plus one warning (never fails): relative .md links that point nowhere.
 #
@@ -44,13 +52,29 @@
 set -u
 cd "$(dirname "$0")/.."
 
-fail=0
-err()  { echo "FAIL: $*" >&2; fail=$((fail+1)); }
-warn() { echo "WARN: $*" >&2; }
-ok()   { echo "ok: $*"; }
+fail=0      # hard-gate findings; alone decide the exit code
+advisory=0  # advisory findings; reported, never block
+err()    { echo "FAIL: $*" >&2; fail=$((fail+1)); }
+advise() { echo "ADVISORY: $*"; advisory=$((advisory+1)); }
+warn()   { echo "WARN: $*" >&2; }
+ok()     { echo "ok: $*"; }
+# Per-check status line. Usage: snapshot `fb=$fail ab=$advisory` before the
+# check body, then `status N "label" $fb $ab` after it. Fixes the old wart of
+# printing "ok:" for a check that had just emitted findings.
+status() { # $1=check number  $2=label  $3=fail-before  $4=advisory-before
+  local df=$((fail - $3)) da=$((advisory - $4))
+  if [ "$df" -gt 0 ]; then
+    echo "FAILED: check$1: $2 ($df hard-gate failure(s))" >&2
+  elif [ "$da" -gt 0 ]; then
+    echo "advisory: check$1: $2 ($da note(s), non-blocking)"
+  else
+    ok "check$1: $2"
+  fi
+}
 
 # ---------------------------------------------------------------- check 1
-# Index <-> files.
+# Index <-> files.  [HARD GATE]
+fb=$fail ab=$advisory
 index_links=$(grep -oE '\]\(\./[A-Za-z0-9_/-]+\.md\)' docs/README.md | sed 's/^](\.\///; s/)$//' | sort -u)
 for f in docs/*.md docs/adr/README.md; do
   rel=${f#docs/}
@@ -63,10 +87,11 @@ while IFS= read -r rel; do
   [ -z "$rel" ] && continue
   [ -f "docs/$rel" ] || err "check1: index links docs/$rel, which does not exist"
 done <<<"$index_links"
-ok "check1: index <-> files"
+status 1 "index <-> files" $fb $ab
 
 # ---------------------------------------------------------------- check 2
-# Backticked test names in docs exist as test functions.
+# Backticked test names in docs exist as test functions.  [HARD GATE]
+fb=$fail ab=$advisory
 testfiles=$(find internal cmd providers -name '*_test.go' 2>/dev/null)
 [ -n "$testfiles" ] || err "check2: no *_test.go files found at all"
 for doc in docs/*.md; do
@@ -78,10 +103,11 @@ for doc in docs/*.md; do
     fi
   done <<<"$names"
 done
-ok "check2: documented test names exist"
+status 2 "documented test names exist" $fb $ab
 
 # ---------------------------------------------------------------- check 3
-# Exported symbols appear in their package document.
+# Exported symbols appear in their package document.  [ADVISORY]
+fb=$fail ab=$advisory
 doc_for_pkg() {
   case "$1" in
     metrics|admin) echo "docs/observability.md" ;;
@@ -91,7 +117,7 @@ doc_for_pkg() {
 for d in internal/*/; do
   pkg=${d%/}; pkg=${pkg#internal/}
   doc=$(doc_for_pkg "$pkg")
-  [ -f "$doc" ] || { err "check3: no document for internal/$pkg (expected $doc)"; continue; }
+  [ -f "$doc" ] || { advise "check3: no document for internal/$pkg (expected $doc)"; continue; }
   syms=$(go doc -all "./internal/$pkg" 2>/dev/null | awk '
     /^(func|type|var|const) [A-Z][A-Za-z0-9_]*/ { s=$2; sub(/\(.*/, "", s); print s }
     /^func \([a-z]+ \*?[A-Z][A-Za-z0-9_]*\) [A-Z][A-Za-z0-9_]*/ {
@@ -100,16 +126,18 @@ for d in internal/*/; do
   while IFS= read -r s; do
     [ -z "$s" ] && continue
     if ! grep -qE "(^|[^A-Za-z0-9_])${s}([^A-Za-z0-9_]|\$)" "$doc"; then
-      err "check3: exported symbol $s (internal/$pkg) is not named in $doc"
+      advise "check3: exported symbol $s (internal/$pkg) is not named in $doc"
     fi
   done <<<"$syms"
 done
-ok "check3: exported symbols named in package docs"
+status 3 "exported symbols named in package docs" $fb $ab
 
 # ---------------------------------------------------------------- check 4
-# Required sections per sanctioned shape, sourced from the DOC-SHAPES block.
+# Required sections per sanctioned shape, sourced from the DOC-SHAPES
+# block.  [ADVISORY]
+fb=$fail ab=$advisory
 shapes=$(awk '/<!-- DOC-SHAPES/{on=1; next} /-->/&&on{exit} on' docs/README.md)
-[ -n "$shapes" ] || { err "check4: DOC-SHAPES block missing in docs/README.md"; shapes=""; }
+[ -n "$shapes" ] || { advise "check4: DOC-SHAPES block missing in docs/README.md"; shapes=""; }
 
 shape_line() { grep -E "^$1:" <<<"$shapes" | sed "s/^$1: *//"; }
 # Canonical keyword -> regex of heading alternatives (aliases included).
@@ -141,7 +169,7 @@ for doc in docs/*.md; do
     [ "${kv%%=*}" = "docs/$base" ] && shape=${kv#*=}
   done
   line=$(shape_line "$shape")
-  [ -n "$line" ] || { err "check4: shape '$shape' (for $doc) is not defined in DOC-SHAPES"; continue; }
+  [ -n "$line" ] || { advise "check4: shape '$shape' (for $doc) is not defined in DOC-SHAPES"; continue; }
   for kw in $KEYWORDS; do
     case " $line " in
       *" $kw"*) : ;;   # keyword appears in this shape's spec -> required
@@ -153,14 +181,15 @@ for doc in docs/*.md; do
     # "N. " prefix used by convention is optional, so a plain "## Overview"
     # (no number) still matches.
     if ! grep -qiE "^#{1,4} +([0-9.]+ +)?(.* )?($rx)([^A-Za-z]|$)" "$doc"; then
-      err "check4: $doc (shape $shape) lacks a required '$kw' section heading"
+      advise "check4: $doc (shape $shape) lacks a required '$kw' section heading"
     fi
   done
 done
-ok "check4: required sections per sanctioned shape"
+status 4 "required sections per sanctioned shape" $fb $ab
 
 # ---------------------------------------------------------------- check 5
-# ADR integrity.
+# ADR integrity.  [HARD GATE]
+fb=$fail ab=$advisory
 adr_readme=docs/adr/README.md
 [ -f "$adr_readme" ] || err "check5: $adr_readme missing"
 nums=""
@@ -206,10 +235,12 @@ for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
     fi
   done < <(sed -n 's/^- Binds: //p' "$f" | grep -oE '(docs|internal|cmd|providers)/[A-Za-z0-9_/.,-]+' || true)
 done
-ok "check5: ADR integrity"
+status 5 "ADR integrity" $fb $ab
 
 # ---------------------------------------------------------------- check 6
-# Canonical copies match their sources (modulo leading indentation).
+# Canonical copies match their sources (modulo leading
+# indentation).  [HARD GATE]
+fb=$fail ab=$advisory
 canon_files=$(grep -rl '<!-- CANONICAL' AGENTS.md CONTRIBUTING.md docs 2>/dev/null || true)
 ids=$(grep -rhoE '<!-- CANONICAL id="[a-z0-9-]+" -->' $canon_files 2>/dev/null | sed 's/.*id="//; s/".*//' | sort -u)
 dedent() { sed 's/^[[:space:]]*//'; }
@@ -232,7 +263,7 @@ for id in $ids; do
     [ "$copy" = "$src" ] || err "check6: CANONICAL-COPY '$id' in $f has drifted from its source $srcfile"
   done
 done
-ok "check6: canonical copies in lockstep"
+status 6 "canonical copies in lockstep" $fb $ab
 
 # ---------------------------------------------------------------- check 7
 # ADR back-references: every non-superseded ADR is cited by number from at
@@ -241,9 +272,12 @@ ok "check6: canonical copies in lockstep"
 # invisible to the entry-file + links reading path: the real failure mode is
 # not unwritten decisions but unread ones. Superseded records are exempt —
 # they stay reachable through the Supersedes chain check 5 validates.
+# [ADVISORY] — detection stays enforced; the coercion is a PR-comment note,
+# because anchor placement (the temptation site) is a judgment call.
+fb=$fail ab=$advisory
 law_files=$(ls docs/*.md AGENTS.md 2>/dev/null || true)
 if [ -z "$law_files" ]; then
-  err "check7: no current-law documents found (docs/*.md, AGENTS.md)"
+  advise "check7: no current-law documents found (docs/*.md, AGENTS.md)"
 fi
 for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   [ -e "$f" ] || continue
@@ -255,10 +289,10 @@ for f in docs/adr/[0-9][0-9][0-9][0-9]-*.md; do
   # deliberately loose — "ADR-0001." and "(see ADR-0001)" are the normal
   # citation shapes. NB: the \$ EOL anchor relies on double-quote collapse.
   if [ -n "$law_files" ] && ! grep -qE "ADR-$n([^0-9]|\$)" $law_files; then
-    err "check7: $f ($status) is not referenced from any current-law document (docs/*.md or AGENTS.md)"
+    advise "check7: $f ($status) is not referenced from any current-law document (docs/*.md or AGENTS.md)"
   fi
 done
-ok "check7: ADR back-references"
+status 7 "ADR back-references" $fb $ab
 
 # ---------------------------------------------------------------- check 8
 # Evidence anchors: backticked `path::symbol` references in docs/*.md must
@@ -266,7 +300,8 @@ ok "check7: ADR back-references"
 # check never requires writing one, it only keeps written anchors valid, so
 # contract prose cannot silently outlive the symbol it describes. No line
 # numbers, by design: symbol names drift far less than lines, and existence
-# is grep-checkable — the same granularity as checks 2/3.
+# is grep-checkable — the same granularity as checks 2/3.  [HARD GATE]
+fb=$fail ab=$advisory
 for doc in docs/*.md; do
   anchors=$(grep -oE '`[A-Za-z0-9_/.-]+::[A-Za-z_][A-Za-z0-9_]*`' "$doc" | tr -d '`' | sort -u)
   while IFS= read -r a; do
@@ -284,7 +319,7 @@ for doc in docs/*.md; do
     fi
   done <<<"$anchors"
 done
-ok "check8: evidence anchors resolve"
+status 8 "evidence anchors resolve" $fb $ab
 
 # ------------------------------------------------- link warning (soft)
 for doc in docs/*.md docs/adr/*.md AGENTS.md CONTRIBUTING.md README.md; do
@@ -299,7 +334,12 @@ done
 
 echo
 if [ "$fail" -gt 0 ]; then
-  echo "check-docs: $fail check failure(s)" >&2
+  echo "check-docs: $fail hard-gate failure(s)" >&2
+  [ "$advisory" -gt 0 ] && echo "check-docs: plus $advisory advisory note(s)" >&2
   exit 1
+fi
+if [ "$advisory" -gt 0 ]; then
+  echo "check-docs: floor checks passed; $advisory advisory note(s) — non-blocking, each needs a disposition in the PR thread"
+  exit 0
 fi
 echo "check-docs: all floor checks passed"
