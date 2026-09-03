@@ -46,14 +46,19 @@ if [ -z "$repo" ]; then
   exit 0
 fi
 
-# Find a prior sticky comment by the FULL marker literal, so a user comment
-# merely quoting the phrase is never mistaken for the bot's own comment.
+# Find a prior sticky comment. Only a BOT-authored comment carrying the
+# FULL marker literal counts: a user comment that merely quotes the marker
+# must not be mistaken for ours (we could not edit it anyway, and treating
+# it as ours would silently suppress the advisory).
 existing=$(gh api "repos/$repo/issues/$pr/comments" --paginate \
-  --jq '.[] | select(.body | contains("<!-- check-docs-advisory -->")) | .id' 2>/dev/null | head -1 || true)
+  --jq '.[] | select(.user.type == "Bot") | select(.body | contains("<!-- check-docs-advisory -->")) | .id' 2>/dev/null | head -1 || true)
 
 if [ -n "$existing" ]; then
+  # If the update fails (e.g. the marker was hijacked between the lookup and
+  # now), post a fresh comment rather than dropping the notes on the floor.
   gh api "repos/$repo/issues/comments/$existing" -X PATCH -f body="$body" >/dev/null 2>&1 \
-    || echo "report-advisories: could not update comment (read-only token?); notes are in the job log"
+    || gh api "repos/$repo/issues/$pr/comments" -f body="$body" >/dev/null 2>&1 \
+    || echo "report-advisories: could not update or post comment (read-only token?); notes are in the job log"
 elif [ -n "$notes" ]; then
   gh api "repos/$repo/issues/$pr/comments" -f body="$body" >/dev/null 2>&1 \
     || echo "report-advisories: could not post comment (read-only token?); notes are in the job log"

@@ -242,7 +242,10 @@ status 5 "ADR integrity" $fb $ab
 # indentation).  [HARD GATE]
 fb=$fail ab=$advisory
 canon_files=$(grep -rl '<!-- CANONICAL' AGENTS.md CONTRIBUTING.md docs 2>/dev/null || true)
-ids=$(grep -rhoE '<!-- CANONICAL id="[a-z0-9-]+" -->' $canon_files 2>/dev/null | sed 's/.*id="//; s/".*//' | sort -u)
+# Collect ids from BOTH source and copy markers: a CANONICAL-COPY whose id
+# has no CANONICAL source anywhere is an orphan and must be flagged, which
+# only happens if its id enters this set.
+ids=$(grep -rhoE '<!-- CANONICAL(-COPY)?[^>]*id="[a-z0-9-]+" -->' $canon_files 2>/dev/null | sed 's/.*id="//; s/".*//' | sort -u)
 dedent() { sed 's/^[[:space:]]*//'; }
 block() { # file, open-regex, id
   awk -v id="$3" -v open="$2" '
@@ -311,9 +314,10 @@ for doc in docs/*.md; do
       err "check8: $doc anchors \`$a\`, but $af does not exist"
       continue
     fi
-    # func/method:  func Symbol(  or  func (recv) Symbol(
+    # func/method:  func Symbol(  or  func (recv) Symbol(  — a generic
+    # function's [type-params] may sit between the name and the paren.
     # otherwise:    type|const|var Symbol<boundary>
-    if ! grep -qE "func +(\([^)]*\) +)?$as\(" "$af" \
+    if ! grep -qE "func +(\([^)]*\) +)?$as(\(|\[)" "$af" \
       && ! grep -qE "(type|const|var) +$as([^A-Za-z0-9_]|\$)" "$af"; then
       err "check8: $doc anchors \`$a\`, but $as is not declared in $af"
     fi
