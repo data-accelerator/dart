@@ -329,7 +329,7 @@ go test ./internal/fetch/ -cover -count=1
 | **`TestFetchBlockRejectsOverflowGeometry`** | **negative / int64-overflowing block indices (and non-positive block size) error before the fetcher is invoked, size known or unknown (issue #52)** |
 | **`TestFetchBlockMaxInt64Window`** | **the largest representable index reaches the fetcher with the exact golden window `[9223372036854771712, MaxInt64]`; ordinary tail clamping unaffected** |
 
-## 8. Limitations & TODO
+## 8. Open items
 
 - **Readahead**: prefetching subsequent blocks belongs to the serve/engine layer
   (it knows the access pattern); not implemented here.
