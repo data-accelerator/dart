@@ -119,16 +119,20 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // for the cooldown, and with a cyclic seed list it stalls every node at once.
 //
 // Outcomes are still *recorded*, which makes this doubly useful: because discovery
-// keeps probing at a bounded interval, a peer that comes back has its circuit
-// closed by the next successful roster fetch, so the data path recovers without
-// waiting for a request to be spent on discovering it.
+// keeps probing at a bounded interval, a current-generation success can restore
+// reachability without waiting for a block request. Outstanding data probes still
+// own their slots and must finish before their circuit can recover.
 func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string) (Roster, string, error) {
+	var permit breakerPermit
+	if c.Breaker != nil {
+		permit, _ = c.Breaker.begin(addr, false)
+	}
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+RosterPath, nil)
 	if err != nil {
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", err
 	}
 	if selfID != "" {
@@ -140,23 +144,23 @@ func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string)
 
 	resp, err := c.http().Do(req)
 	if err != nil {
-		c.record(addr, classify(err))
+		c.record(addr, permit, classify(err))
 		return Roster{}, "", fmt.Errorf("peer %s: roster: %w", addr, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", fmt.Errorf("peer %s: roster: unexpected status %s", addr, resp.Status)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBody))
 	if err != nil {
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", fmt.Errorf("peer %s: roster: read: %w", addr, err)
 	}
 	var roster Roster
 	if err := json.Unmarshal(body, &roster); err != nil {
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", fmt.Errorf("peer %s: roster: decode: %w", addr, err)
 	}
 
@@ -174,7 +178,7 @@ func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string)
 	if responder != "" && !rosterHas(roster, responder) {
 		roster.Members = append(roster.Members, RosterMember{ID: responder, Addr: addr, Weight: 1})
 	}
-	c.record(addr, outcomeAnswered)
+	c.record(addr, permit, outcomeAnswered)
 	return roster, responder, nil
 }
 

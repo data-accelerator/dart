@@ -110,15 +110,17 @@ replicas. **Part of the wire protocol** — see §6.
 **Field exclusion**: the `0x1F` separator must never appear inside a field, or
 the serialization is not injective (`("a","b␟c")` would collide with
 `("a␟b","c")`). Enforced on both sides: a namespace containing `0x1F` is
-rejected at engine construction, and derived object identities have `0x1F`
-stripped (a URL can smuggle one in via a percent-encoded `%1F` in the path).
+rejected at engine construction, and derived object identities retain `0x1F` as an escape (`%1F`), never as a literal
+separator. Deleting it would conflate `/a%1Fb` with `/ab`. Parsed paths use
+`URL.EscapedPath`; malformed raw fallbacks escape both `%` and `0x1F`.
 Note that cross-field collisions are the only case: within one namespace the
 fixed 8-byte chunk-index suffix forces equal objectIDs anyway.
 
 `UnitSep` (0x1F) is the field separator `ChunkKey` mixes between fields; it is
 why `namespace` is rejected at engine construction when it contains 0x1F and
-why derived object identities have it stripped (`stripUnitSep`): the separator
-must never appear inside a field, or serialization would not be injective.
+why derived object identities encode it (`escapeUnitSep` in malformed raw
+fallbacks): a literal separator must never appear inside a field, or serialization
+would not be injective.
 
 ### 3.4.1 `func IsDigest(s string) bool`
 
@@ -135,8 +137,14 @@ Derives the caching identity of a blob URL, preferring content addressing:
   `sha256:<64 hex>`), returns that digest lower-cased with
   `contentAddressed=true` (enables cross-origin/registry dedup; marks the object
   immutable);
-- otherwise returns a canonical URL (lower-cased scheme+host, path without
-  query/fragment) with `contentAddressed=false`.
+- otherwise returns a canonical URL (lower-cased scheme+host, **escaped** path
+  without query/fragment) with `contentAddressed=false`.
+
+Path segments are split **before** percent-decoding, so an encoded slash does
+not expose a digest segment that is absent from the actual origin path.
+Fallback identities preserve `/a%2Fb` versus `/a/b` and `%1F` versus `%251F`;
+these may name different immutable objects at the origin. Time and space are
+O(URL length); returned identities are owned strings and inputs are unchanged.
 
 Non-OCI integrity schemes (npm/pypi `sha512-<base64>`, etc.) are **not**
 recognized here; mapping those is a policy-layer concern.
@@ -201,6 +209,9 @@ query and fragment are cut at the first `?`/`#` before the identity is derived.
   `net/url`, `strings`).
 - `Config` is a small value passed by value.
 
+The identity correction and rollout decision are recorded in
+[ADR-0004](./adr/0004-preserve-escaped-origin-identities.md).
+
 ## 6. Determinism / Stability Contract
 
 <!-- CANONICAL id="chunkkey-wire" -->
@@ -212,12 +223,18 @@ query and fragment are cut at the first `?`/`#` before the identity is derived.
 - `ObjectID`'s digest-extraction and URL-canonicalization rules affect cache
   identity and dedup; changing them changes cache keys and should be versioned
   deliberately.
+- The escaped-path correction changes identities for affected non-digest URLs
+  (encoded separators, reserved characters and non-ASCII paths). Digest keys,
+  `ChunkKey`, HRW and their independent golden vectors remain unchanged.
+  Upgrade the cluster together when serving these URLs: mixed old/new nodes
+  may interpret the same path differently. Cache stores start cold on restart;
+  do not retain old URL-keyed entries through an external warm-cache layer.
 
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **97.9%** of statements. All functions 100% except `isDigest`
-  92.9% (one defensive branch uncovered).
+- **Coverage**: **99.1%** of statements. Remaining gaps are defensive digest-recognition
+  branches; escaped origin identities and cache isolation are covered.
 - **Reproduce**:
 
 ```bash
@@ -248,6 +265,8 @@ go test ./internal/chunk/ -cover -count=1
 | `TestObjectIDCaseNormalization` | digest and host are lower-cased |
 | `TestObjectID` | digest extraction, lower-casing, query stripping, host:port not a digest, fallbacks |
 | `TestObjectIDFallbackStripsQueryAndFragment` | the raw fallback cuts query/fragment too: signatures never move identity |
+| `TestObjectIDPreservesEscapedPath` | literal identities pin escaped slashes, separators, percent escapes and digest-boundary recognition |
+| `TestServeDistinctEscapedOrigins` (engine) | different same-length origin bodies stay distinct through the write-once cache |
 | `TestObjectIDNeverContainsSeparator` | a %1F-decoded separator never lands in a derived identity |
 | `TestIsDigest` | digest-shape recognition incl. rejects (bad hex, short, uppercase algo) |
 

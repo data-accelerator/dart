@@ -35,6 +35,11 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   sources decline anything above `chunk.Config.MaxBlockIndex()` with a `404`
   (issue #52, see docs/engine.md §3.5). `StoreSource` never does range
   arithmetic with the index, so it needs no such check.
+- When `X-DART-Origin` is present, engine sources verify that the wire chunk
+  key agrees with the URL's object identity, namespace and block's chunk index.
+  An inconsistent pair is a requester error and yields `404` before cache or
+  upstream access; it must not quarantine an honest parent. Cache-only requests
+  without this header remain valid.
 - `X-DART-Origin` lets a relay-capable Source fetch a block it does not hold
   (via its own parent/origin); `X-DART-Hop` bounds relay recursion.
 - `X-DART-Hop` is optional (absent = depth 0) and must be a non-negative
@@ -133,6 +138,7 @@ type StreamSource func(ctx context.Context, req BlockRequest, w io.Writer, sizer
 func StoreStreamSource(s store.Store) StreamSource
 type StreamServer struct { NodeID string; Src StreamSource }
 func (c *Client) Stream(ctx, addr string, req BlockRequest, w io.Writer) (n int64, held bool, err error)
+func (c *Client) StreamValidated(ctx context.Context, addr string, req BlockRequest, w io.Writer, validate func(context.Context, int64) error) (n int64, held bool, err error)
 ```
 
 These are the **cut-through** counterparts: a relay copies bytes from its
@@ -147,8 +153,28 @@ bytes after ~one block-transfer time rather than depth x block-transfer time).
 - The server defers the response header until the first byte is written, so a
   source that declines (`held=false`) or fails early still yields a clean
   `404`/`500` rather than a truncated `200`.
-- A `StreamSource` MUST NOT write anything when returning `held=false`.
+- A clean decline (`held=false`, `err=nil`) MUST NOT write anything. A failure
+  after partial writes returns an error; the server aborts the committed
+  response using `http.ErrAbortHandler`, which net/http handles without logging
+  a panic stack. Returning normally would emit a valid chunked terminator and
+  hide the failure. The same abort applies to incomplete Content-Length
+  responses. Once all advertised bytes have been flushed, a later source error
+  cannot be signaled through truncation; sources needing an end-of-stream failure
+  signal must omit the sizer and use chunked framing. Early failures still
+  produce the normal error status. Callers invoking `ServeHTTP`
+  directly must account for this sentinel panic (the normal HTTP server does).
 - Each write is flushed, pushing bytes downstream promptly.
+- `StreamValidated` calls the validator once on a clean `200` body, before
+  recording success. Nil validation is equivalent to `Stream`; misses and
+  body/transport errors do not call it. A validator error means a definitive
+  block protocol violation: the circuit opens and the method returns the byte
+  count, `held=true`, and a wrapped error. Return nil when validation is
+  unavailable. The callback runs inline with a timeout-bounded request context,
+  must honor that context for I/O, and must not retain/mutate caller-owned
+  stream state concurrently. Time is O(body length) plus validation work;
+  auxiliary memory is the same bounded copy buffer as `Stream`, plus the
+  validator's own allocations. The engine validates geometry this way before
+  admitting relayed bytes to its write-once cache.
 
 ```go
 srv := &peer.StreamServer{NodeID: myID, Src: engine.PeerStreamSource()}
@@ -162,7 +188,7 @@ func NewBreaker(BreakerOptions) *Breaker  // {FailureThreshold, Cooldown, HalfOp
 func (b *Breaker) Allow(addr string) bool
 func (b *Breaker) RecordSuccess(addr string)
 func (b *Breaker) RecordFailure(addr string)      // soft: spends one unit of budget
-func (b *Breaker) RecordHardFailure(addr string)  // definitive: opens at once
+func (b *Breaker) RecordHardFailure(addr string)  // definitive dial/protocol failure: opens at once
 func (b *Breaker) State(addr string) BreakerState   // closed | open | half-open (String() prints those words)
 func (b *Breaker) Healthy(addr string) bool         // usable now (no probe reserved)
 func (b *Breaker) OpenCount() int
@@ -176,8 +202,9 @@ immediately with `ErrCircuitOpen` (no dial at all), while still probing so a
 recovered peer is picked back up without operator action.
 
 States: `closed` → (`FailureThreshold` **consecutive** failures) → `open` → (after
-`Cooldown`) → `half-open`, admitting `HalfOpenProbes` probes; a probe success closes
-the circuit, a probe failure re-opens it and restarts the cooldown.
+`Cooldown`) → `half-open`, admitting `HalfOpenProbes` probes. After the first
+success, admission pauses until all admitted probes finish. All must succeed to
+close the circuit; a probe failure re-opens it and restarts the cooldown.
 
 **A `404` is not a failure.** It is a legitimate answer ("I do not hold that
 block") and blocks legitimately 404 all the time in a distributed cache — counting
@@ -224,6 +251,19 @@ spending the whole budget on it — five dial timeouts, serially — is exactly 
 made a departed node slow to route around. Opening on one observation stays safe
 because opening is cheap and **reversible**: the cooldown plus the half-open probe
 restores a recovered peer with no operator action.
+
+`StreamValidated` records a validated protocol violation as a hard failure,
+without first recording transport success. Every `Client` request (Get, Stream,
+StreamValidated and FetchRoster) binds its result to the breaker entry and
+generation captured when it starts. Opening a circuit or recovering from
+half-open invalidates older results. Checking the permit and recording the
+outcome occur under the same mutex: an old success cannot clear quarantine or
+consume a newer half-open probe slot; an old failure cannot undo recovery.
+Evicted entries are not recreated by their old requests' completions. Fresh
+roster requests still bypass admission and can restore discovery reachability,
+but do not consume data-probe slots or override outstanding probe outcomes.
+The public `Allow`/`Record*` API remains an explicit, unscoped reporting API;
+callers managing those reports themselves must synchronize their lifecycle.
 
 Defaults: `DefaultFailureThreshold` 5, `DefaultBreakerCooldown` 5s,
 `DefaultHalfOpenProbes` 1. `Options.Now` injects a clock for tests. The engine
@@ -303,8 +343,10 @@ A cluster booting together *always* has nodes dialing peers that are not listeni
 yet, and a dial failure opens a circuit on the first attempt; gating discovery on
 that stalls convergence, and with a cyclic seed list it stalls every node at once.
 This was observed in a live 3-node run. Because outcomes are still recorded, a
-successful roster fetch is also what closes a recovered peer's circuit, so discovery
-doubles as the health probe that restores the data path.
+successful current-generation roster fetch can close a recovered peer's circuit
+when no data probes remain outstanding. It never consumes their slots or overrides
+their pending outcomes, so discovery also restores reachability without hiding a
+data-probe failure.
 
 
 ## 4. Invariants & Guarantees
@@ -338,7 +380,7 @@ doubles as the health probe that restores the data path.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **87.1%** of statements. Uncovered lines are a couple of rare
+- **Coverage**: **90.5%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -367,6 +409,10 @@ go test ./internal/peer/ -race -count=1
 | `TestStoreStreamSourceRoundtrip` | streaming server/client returns exact block bytes |
 | `TestStreamServerSetsContentLength` | known-size block is Content-Length framed, not chunked |
 | `TestStreamServerMissAndErrors` | miss → 404 with nothing written; bad path → 400; non-GET → 405 |
+| `TestClientLateFailureCannotUndoRecovery` | an old failed request cannot reopen a circuit recovered by a current half-open probe |
+| `TestStreamValidatedUsesRequestContext` | validation receives the bounded peer request context and the streamed byte count |
+| `TestClientLateSuccessCannotClearProtocolQuarantine` | deterministic barriers cover stale Get/Stream/roster success during open and half-open states; only a current probe can recover the circuit |
+| `TestStreamServerAbortsCommittedErrors` | real HTTP clients detect unexpected EOF after partial source errors with either chunked or Content-Length framing |
 | `TestStreamServerEarlyErrorGives500` | source failing before any write → clean 500 |
 | `TestCutThroughPipelines` | **the first half reaches the client while the source still holds the second** (genuinely pipelined, not buffered) |
 | `TestStreamRelayChain` | two chained stream servers relay bytes intact |
@@ -420,3 +466,7 @@ go test ./internal/peer/ -race -count=1
   on; membership-skew convergence is a later addition.
 - **Zero-copy**: the server currently `Write`s a buffer; serving via
   `sendfile`/`splice` from the store slot is future optimization.
+
+Half-open regression tests: `TestHalfOpenProbesWaitForSiblingOutcome` covers
+concurrent recovery and a sibling hard-failure veto;
+`TestHalfOpenRosterSuccessCannotConsumeDataProbe` covers roster slot ownership.

@@ -125,8 +125,37 @@ into a whole-object GET. Anchor: `internal/fetch/fetch.go::FetchBlock`.
 ```go
 type Coalescing struct { F Fetcher /* ... */ }
 func (c *Coalescing) Fetch(ctx, url string, start, end int64) (Range, error)
+func (c *Coalescing) Probe(ctx context.Context, url string) (Range, error)
 func (c *Coalescing) Open(ctx, url string, header http.Header) (*http.Response, error)
 ```
+
+`Probe` implements the optional endpoint-metadata interface:
+
+```go
+type Prober interface { Probe(ctx context.Context, url string) (Range, error) }
+func OriginKey(rawURL string) string
+```
+
+`OriginKey` keeps the endpoint's escaped path and lower-cases scheme/host,
+excluding userinfo, query and fragment. It derives no digest: two origins or
+paths naming the same digest have distinct keys. Malformed input falls back
+to the raw URL without query/fragment; the HTTP fetch still validates it.
+Key derivation takes O(URL length) time/space and mutates no input.
+
+`Probe` performs GET `bytes=0-0`, using a separate singleflight group keyed by
+`OriginKey`, regardless of `Coalescing.Key`. `RangeIgnored` and an unknown
+`Total` describe the endpoint contacted, so they must never be shared across
+origins. Different signatures for one endpoint still coalesce; the upstream
+request retains its full credential. Probe flights do not join content
+flights, including a one-byte block read. `Probe` has `Fetch`'s deadlines,
+caller-cancellation and credential-refusal retry guarantees. Probe results
+have the same `Range`/error semantics and are not retained after completion;
+its shared bytes have the same ownership rules as `Fetch`.
+
+If the inner fetcher implements `Prober`, both the shared request and an
+authorization-refusal retry delegate to its `Probe`, preserving endpoint
+isolation through nested coalescing wrappers. Otherwise the inner fetcher
+receives `Fetch(ctx, url, 0, 0)` and must keep capability metadata endpoint-scoped.
 
 Wraps a `Fetcher` with singleflight keyed by `(url, start, end)`: concurrent
 identical fetches share one call to `F`. The **shared origin request runs on a
@@ -269,7 +298,7 @@ bucket), and that changes three things:
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.8%** of statements. The remaining uncovered lines are rare
+- **Coverage**: **92.4%** of statements (Go 1.27.0). The remaining uncovered lines are rare
   I/O-error branches (e.g. a mid-body read error) that need fault injection.
 - **Reproduce**:
 
@@ -299,6 +328,11 @@ go test ./internal/fetch/ -cover -count=1
 | `TestFetchBlockClampsTail` | tail block clamped to size-1 |
 | `TestFetchBlockUnknownSize` | unknown size fetches natural range; Total revealed |
 | `TestTotalFromContentRange` | Content-Range total parsing incl. `*`/garbage |
+| `TestOriginKey` | independent endpoint identities retain path escapes and strip credentials |
+| `TestCoalescingProbeSeparatesEndpointsAndContent` | probes for two endpoints and a one-byte content fetch each reach origin independently |
+| `TestCoalescingProbeDedupsSignatures` | signed URLs at one endpoint share one probe while retaining credentials on the upstream request |
+| `TestCoalescingProbeComposes` | nested digest-keyed wrappers contact both origin endpoints instead of joining an inner content flight |
+| `TestCoalescingProbeDelegatesRefusalRetry` | both the shared probe and a renewed-credential retry preserve the inner Prober interface |
 | `TestCoalescingDedups` | N concurrent identical fetches ⇒ 1 origin call (`-race`) |
 | `TestCoalescingDistinctKeys` | different url/range ⇒ separate calls |
 | **`TestCoalescingKeyCollapsesPresignedURLs`** | **20 concurrent callers with distinct signatures for one block cause 1 origin fetch** |

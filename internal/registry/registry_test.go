@@ -23,14 +23,15 @@ import (
 // fakeRegistry is a minimal Registry v2 upstream: one blob addressed by digest,
 // one mutable manifest, and per-path request counters.
 type fakeRegistry struct {
-	blob     []byte
-	digest   string
-	manifest atomic.Value // string, mutable so tag staleness is observable
-	blobHits atomic.Int64
-	manHits  atomic.Int64
-	pingHits atomic.Int64
-	gotHost  atomic.Value // string
-	gotAuth  atomic.Value // string
+	blob       []byte
+	digest     string
+	manifest   atomic.Value // string, mutable so tag staleness is observable
+	blobHits   atomic.Int64
+	blobProbes atomic.Int64
+	manHits    atomic.Int64
+	pingHits   atomic.Int64
+	gotHost    atomic.Value // string
+	gotAuth    atomic.Value // string
 }
 
 func newFakeRegistry(t *testing.T, blobSize int) (*fakeRegistry, *httptest.Server) {
@@ -53,6 +54,9 @@ func newFakeRegistry(t *testing.T, blobSize int) (*fakeRegistry, *httptest.Serve
 			w.WriteHeader(http.StatusOK)
 		case strings.Contains(r.URL.Path, "/blobs/"):
 			fr.blobHits.Add(1)
+			if r.Header.Get("Range") == "bytes=0-0" {
+				fr.blobProbes.Add(1)
+			}
 			// ServeContent gives us correct Range and Content-Length handling,
 			// matching what a real registry (or its CDN) provides.
 			http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(fr.blob))
@@ -459,12 +463,15 @@ func TestBlobDedupAcrossRegistries(t *testing.T) {
 
 	_, b1 := get(t, m1, pathA, nil)
 	afterFirst := fr.blobHits.Load()
+	probesAfterFirst := fr.blobProbes.Load()
 	_, b2 := get(t, m2, pathB, nil)
 
 	if !bytes.Equal(b1, fr.blob) || !bytes.Equal(b2, fr.blob) {
 		t.Fatal("blob bytes mismatch")
 	}
-	if got := fr.blobHits.Load(); got != afterFirst {
-		t.Errorf("upstream hit %d more times; the blob was not deduped by digest", got-afterFirst)
+	// A different endpoint needs its own one-byte capability probe. It must
+	// not fetch any data blocks: those are still deduplicated by digest.
+	if got := fr.blobHits.Load(); got != afterFirst+1 || fr.blobProbes.Load() != probesAfterFirst+1 {
+		t.Errorf("second endpoint made %d requests and %d probes; want only one probe", got-afterFirst, fr.blobProbes.Load()-probesAfterFirst)
 	}
 }

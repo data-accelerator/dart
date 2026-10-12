@@ -269,7 +269,8 @@ nodes (see docs/dart.md).
 ## 9. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **86.4%** of statements.
+- **Coverage**: **90.5%** of statements (Go 1.27.0). Remaining gaps are rare
+  transport and response-write error branches.
 - **Reproduce**:
 
 ```bash
@@ -303,7 +304,7 @@ asserted.
 | `TestPullOnly` | POST/PUT/PATCH/DELETE → `405` with `Allow`, and never reach the upstream |
 | `TestNonV2PathRejected` | non-registry paths → `404` |
 | `TestUpstreamPathPrefixPreserved` | an upstream subpath is prepended |
-| **`TestBlobDedupAcrossRegistries`** | **the same digest via two mirrors/repos is fetched once** |
+| **`TestBlobDedupAcrossRegistries`** | **the same digest via two mirrors/repos shares cached blocks; each endpoint only adds its own one-byte capability probe** |
 
 Authentication (`auth_test.go`, plus the issue-pinning `issue16_test.go` and
 `issue51_test.go`), against a fake registry that speaks the token

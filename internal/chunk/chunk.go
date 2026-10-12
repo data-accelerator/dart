@@ -198,8 +198,8 @@ const (
 // It prefers content addressing: if a content digest can be recovered from the
 // URL path, that digest (lower-cased) is returned and contentAddressed is true —
 // enabling dedup across origins/registries and marking the object immutable.
-// Otherwise a canonical form of the URL (lower-cased scheme+host, path without
-// query/fragment) is returned and contentAddressed is false.
+// Otherwise a canonical form of the URL (lower-cased scheme+host, escaped path
+// without query/fragment) is returned and contentAddressed is false.
 //
 // The query is always excluded, which matters beyond tidiness: a presigned
 // upstream carries a signature there that differs on every request, so including
@@ -210,7 +210,13 @@ const (
 func ObjectIDLayout(rawURL string, layout DigestLayout) (id string, contentAddressed bool) {
 	u, err := url.Parse(rawURL)
 	if err == nil {
-		segs := strings.Split(u.Path, "/")
+		// Split before unescaping: an encoded slash is part of a path
+		// segment, not a boundary that can expose a digest in a different
+		// origin object (e.g. /sha256:<hex>%2Fmetadata).
+		segs := strings.Split(u.EscapedPath(), "/")
+		for i, seg := range segs {
+			segs[i], _ = url.PathUnescape(seg)
+		}
 		for _, seg := range segs {
 			if IsDigest(seg) {
 				return strings.ToLower(seg), true
@@ -224,7 +230,10 @@ func ObjectIDLayout(rawURL string, layout DigestLayout) (id string, contentAddre
 		host := strings.ToLower(u.Host)
 		scheme := strings.ToLower(u.Scheme)
 		if scheme != "" || host != "" {
-			return stripUnitSep(scheme + "://" + host + u.Path), false
+			// Preserve encoded path boundaries: /a%2Fb and /a/b can be
+			// different origin objects. EscapedPath also retains %1F rather
+			// than dropping it and conflating /a%1Fb with /ab.
+			return scheme + "://" + host + u.EscapedPath(), false
 		}
 	}
 	// Unparseable or scheme/host-less: fall back to the raw string with the
@@ -239,30 +248,24 @@ func ObjectIDLayout(rawURL string, layout DigestLayout) (id string, contentAddre
 			return strings.ToLower(seg), true
 		}
 	}
-	return stripUnitSep(raw), false
+	if err == nil {
+		return u.EscapedPath(), false
+	}
+	return escapeUnitSep(raw), false
 }
 
 // UnitSep is the field separator ChunkKey mixes between namespace and
 // objectID. It must never appear inside either field, or serialization would
 // not be injective: ChunkKey("a","b␟c",0) would equal ChunkKey("a␟b","c",0).
 // Namespaces containing it are rejected at engine construction; derived object
-// identities have it stripped (stripUnitSep).
+// identities encode it rather than deleting it (escapeUnitSep).
 const UnitSep = 0x1F
 
-// stripUnitSep removes the ChunkKey field separator from a derived object
-// identity. A URL can deliver a literal 0x1F via a percent-encoded "%1F" in
-// the path; dropping it keeps ChunkKey injective. (Digest identities are pure
-// hex and never contain it.)
-func stripUnitSep(s string) string {
-	if strings.IndexByte(s, UnitSep) < 0 {
-		return s
-	}
-	return strings.Map(func(r rune) rune {
-		if r == UnitSep {
-			return -1
-		}
-		return r
-	}, s)
+// escapeUnitSep reversibly encodes separators in the raw fallback. Percent
+// must be escaped too, or a literal separator would collide with "%1F".
+// Parsed URLs use EscapedPath; this handles malformed input.
+func escapeUnitSep(s string) string {
+	return strings.NewReplacer("%", "%25", "\x1f", "%1F").Replace(s)
 }
 
 // digestHexLen maps a digest algorithm to its hex-encoded length. Only

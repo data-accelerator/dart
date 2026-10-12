@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -136,8 +137,8 @@ func TestStreamRelayChainThroughEngines(t *testing.T) {
 // caching. Relay responses carry no Content-Length, so a short clean chunked
 // EOF is indistinguishable from success at the transport; caching such a block
 // would poison the write-once cache permanently and propagate downstream. The
-// relayed bytes are still served on (the leaf's own geometry check protects
-// clients), but a wrongly-sized block must never enter the cache.
+// downstream response must be aborted and the wrongly-sized block must never
+// enter the cache.
 func TestStreamRelayRejectsWrongLengthBlock(t *testing.T) {
 	content := blob(16) // exactly one block
 	var originCnt int64
@@ -174,11 +175,11 @@ func TestStreamRelayRejectsWrongLengthBlock(t *testing.T) {
 	var buf bytes.Buffer
 	n, held, err := peer.NewClient().Stream(context.Background(), strings.TrimPrefix(srv.URL, "http://"),
 		peer.BlockRequest{Key: key, URL: origin.URL}, &buf)
-	if err != nil || !held {
-		t.Fatalf("Stream held=%v err=%v", held, err)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || !held {
+		t.Fatalf("Stream held=%v err=%v, want an aborted partial response", held, err)
 	}
 	if n != 8 {
-		t.Fatalf("downstream received %d bytes, want the 8 the broken parent sent (served on)", n)
+		t.Fatalf("downstream received %d bytes, want the 8 sent before abort", n)
 	}
 	if st.Has(key) {
 		t.Error("wrongly-sized relayed block was cached (issue #1)")

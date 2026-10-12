@@ -44,7 +44,7 @@ back to all-member routing for that lookup (the reader set is soft state).
 | Term | Meaning |
 |---|---|
 | `Engine` | Orchestrator: Size + Serve over cache/origin. |
-| object size | Learned once per object via a 1-byte probe, cached in-process. |
+| object size | Learned once per origin endpoint via a 1-byte probe, cached in-process. |
 | `Handler` | `http.Handler` translating HTTP Range ⇄ `Engine.Serve`. |
 
 ## 3. Public API
@@ -79,10 +79,18 @@ only when `Cluster`, `Peer`, and `SelfID` are all set.
 ### 3.2 `func (e *Engine) Size(ctx, url string) (int64, error)`
 
 Returns the object's total size, probing origin once (a `bytes=0-0` fetch) and
-caching the result by object identity (`chunk.ObjectID`). For immutable
-content-addressed objects the size is permanently valid. The probe also
-records whether the origin honored the Range: a `200` answer marks the object
-Range-unsupported (see §3.9).
+caching the result by endpoint identity (`fetch.OriginKey`), independently of
+the content digest. The same immutable digest can be served by two endpoints
+with different Range support or one with an unknown chunked total. Each is
+probed separately; refreshed signatures for the same endpoint reuse metadata.
+A `200` answer marks only that endpoint Range-unsupported (see §3.9).
+
+When the fetcher implements `fetch.Prober`, `Size` calls `Probe` so concurrent
+metadata flights also stay endpoint-scoped, even when block flights are keyed
+by digest. Custom fetchers without `Prober` receive `Fetch(ctx, url, 0, 0)` and
+must not coalesce these probes across endpoints. Blocks still use
+`chunk.ObjectID` and remain shared across origins. A metadata hit costs O(URL
+length) key derivation and a map lookup; a miss adds one ranged GET.
 
 A `206` that hides the total (`Content-Range: bytes 0-0/*`) is a **probe
 failure**, not a size: block geometry is impossible without the total, and
@@ -109,9 +117,16 @@ origin and the peer paths:
   bytes it forwards: relay responses carry no Content-Length (chunked), so a
   short clean EOF is indistinguishable from success at the transport — the
   relay compares the streamed length against the geometry before caching. A
-  mismatched block is still served on (the leaf's own check protects clients)
-  but never cached; when the object size cannot be resolved the relayed bytes
-  cannot be validated and are not cached either.
+  mismatched block fails the relay and is never cached. The peer server aborts
+  the committed response, so downstream observes truncation even with chunked
+  framing. The faulty parent is immediately quarantined through its circuit
+  breaker, so the next request skips it and falls back to origin. Validation
+  runs inside `Client.StreamValidated` before any success is recorded, under
+  the peer request's timeout context. Transport and validation results use
+  the same admission-generation permit, so a pre-quarantine completion cannot
+  clear a newer circuit or consume its half-open probe slot.
+  Cooldown/half-open recovery remains unchanged. When the object
+  size cannot be resolved, relayed bytes cannot be validated and are not cached.
 
 This is load-bearing because the block cache is **write-once per key**: a later
 correct fetch can never overwrite a bad block, only eviction would clear it. So
@@ -171,6 +186,16 @@ drops the Range header and pulls the whole object). `PeerSource` and
 relay) **before** cache lookup, relay selection, size probe, or origin I/O.
 Declined, not errored: the malformed index is the requester's fault, and a 500
 would charge this healthy relay on the requester's circuit breaker.
+
+**Origin/key consistency is checked at the same boundary.** When a request
+supplies `X-DART-Origin`, both sources recompute its expected chunk key from
+`(namespace, chunk.ObjectID(url), ChunkOfBlock(blockIndex))`. A different key
+is a requester addressing error and is declined before local cache lookup,
+parent selection or any origin probe. This prevents an honest parent serving
+a requested cached block from being blamed for a different URL's geometry.
+Requests without an Origin URL remain valid cache-only reads; a cold one
+cannot relay. Identity checking takes O(URL length) time and space, adds no
+network traffic, and preserves cut-through streaming.
 
 ### 3.6 `func (e *Engine) PeerStreamSource() peer.StreamSource`
 
@@ -275,9 +300,11 @@ func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r 
 An origin that ignores `Range` cannot be served through the block layer: every
 per-block fetch would pull the whole object, and a block so fetched could never
 be safely cached for a *different* range. When the `Size` probe (a `bytes=0-0`
-GET) is answered with `200` instead of `206`, the object is marked
+GET) is answered with `200` instead of `206`, that origin endpoint is marked
 Range-unsupported (process-local, never expires — a restart re-probes), and
-`Handler` then serves every request for it with `ServePassthrough`:
+`Handler` then serves requests for that endpoint with `ServePassthrough`.
+Another endpoint for the same digest can still use the cache and P2P:
+
 
 - the client's `Range` header is forwarded, and the origin's status, entity
   headers (`Content-Type`/`Content-Length`/`Content-Range`/`ETag`/
@@ -329,6 +356,11 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
    never turned into a whole-object origin GET (issue #52; the fetch-layer
    arithmetic guard is in docs/fetch.md §3.4).
 
+6. **No requester identity confusion on the relay path**: when an Origin URL
+   is supplied, its namespace/object/chunk key must match the requested key.
+   Inconsistent requests yield a clean decline, even if the local cache holds
+   that key; requester errors never trigger parent fetches or quarantine.
+
 ## 5. Concurrency & Call Permissions
 
 - `Engine` is safe for concurrent use: the size cache is mutex-guarded, the
@@ -346,7 +378,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **85.4%** of statements. Uncovered lines are mostly rare I/O
+- **Coverage**: **88.4%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -367,6 +399,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestServeAcrossBlocksAndChunks` | a range crossing block/chunk boundaries is assembled correctly |
 | `TestServeEndClampAndBadStart` | end clamped to size; start beyond size errors |
 | `TestSize` | object size probed correctly |
+| `TestSizeScopesRangeCapabilityToOrigin` | both probe orders and known/unknown totals stay origin-scoped; refreshed signatures reuse metadata and digest blocks remain shared |
+| `TestConcurrentSizeProbesDoNotShareCapabilities` | a blocked Range-blind endpoint does not delay or contaminate an independent endpoint probe |
 | `TestSizeHiddenTotalIsProbeFailure` | a 206 hiding the total fails loudly, caches nothing, and never fabricates a size |
 | `TestCacheHitAvoidsRefetch` | repeated identical serve makes zero origin requests |
 | `TestConcurrentServe` | overlapping concurrent reads correct and race-free |
@@ -391,7 +425,10 @@ go test ./internal/engine/ -cover -count=1
 | `TestPeerStreamSourceLocalHit` | locally-held block streamed from the store |
 | `TestPeerStreamSourceRootFetchesOrigin` | tree root satisfies a relay request from origin and caches it |
 | `TestStreamRelayChainThroughEngines` | 3-node fanout=1 chain over streaming peer servers: bytes intact, every node cached |
-| `TestStreamRelayRejectsWrongLengthBlock` | a short clean chunked relay stream is served on but never cached; a correct relay is cached |
+| `TestStreamRelayRejectsWrongLengthBlock` | a short clean parent stream makes the relay abort downstream and never cache; a correct relay is cached |
+| `TestRelayDeclinesInconsistentKeyURL` | buffered/streaming, warm/cold relays decline unrelated URLs, wrong chunk indices and namespaces without contacting origins/parents or tripping circuits; valid and cache-only reads still work |
+| `TestStreamRelayQuarantinesWrongLengthParent` | a clean but invalid parent response opens that parent's circuit; repeated requests fetch origin once and then use the correct cached block |
+| `TestStreamRelayPropagatesParentFailure` | an interrupted parent stream remains an unexpected EOF through a real intermediate engine; no partial block is cached |
 | `TestStreamRelayDoesNotCacheWhenSizeUnresolved` | relayed bytes are not cached when the object size cannot be resolved |
 | `TestClassOfMatchesPlacement` | owned iff in HRW top-`Replicas`, else borrowed; `Replicas=3` makes all members owners |
 | `TestClassOfSingleNodeIsOwned` | without P2P everything cached is owned |
@@ -452,7 +489,7 @@ go test ./internal/engine/ -cover -count=1
   fan-out and prefetch of subsequent blocks are future work.
 - **Streaming vs buffering**: blocks are fetched whole into memory (bounded by
   block size) then written; fine for cache hits/`sendfile` later.
-- **Size cache lifetime**: sizes are cached for process life with no TTL —
+- **Size cache lifetime**: endpoint probe results are cached for process life with no TTL —
   correct for immutable objects; mutable objects need the policy layer.
 - **Mid-stream errors**: once headers are sent, a block error can only truncate
   the body (client detects via Content-Length); prefetching the first block

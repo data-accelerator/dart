@@ -5,6 +5,33 @@ All notable changes to DART are documented here. This project follows
 HRW score formula, `ChunkKey`, and epoch framing) is called out explicitly in
 every release's upgrade notes.
 
+## [Unreleased]
+
+### Fixes
+
+- Preserve escaped origin paths in fallback cache identities; encoded slashes
+  and separators no longer conflate different immutable objects. Digest
+  recognition respects encoded path boundaries.
+- Scope size/Range metadata and probe singleflight to each origin endpoint,
+  while retaining digest-keyed block deduplication across origins.
+- Abort committed peer streams on source errors or known relay geometry
+  mismatches so a partial chunked response cannot look like a successful block.
+  Quarantine parents serving invalid block geometry so retries can use origin.
+  Record transport/validation outcomes with admission-generation permits so
+  older in-flight completions cannot undo quarantine or consume new probes.
+  Wait for all admitted half-open probes before recovering, preserving a
+  sibling protocol failure even when another probe succeeds first.
+  Decline inconsistent block key/Origin URL pairs before cache or upstream access
+  so malformed requester addressing cannot quarantine honest parents.
+
+### Upgrade notes
+
+Digest keys, ChunkKey, HRW and their golden vectors are unchanged. Fallback
+identities for affected non-digest paths now use the escaped path rather than
+the decoded path; upgrade all nodes together when serving such URLs. Cache
+stores restart cold. Each new endpoint now needs its own one-byte capability
+probe even when another endpoint has already populated the digest cache.
+
 ## [v0.2.0] — 2026-08-26
 
 The first release since v0.1.0: **30 merged fix PRs** (#23–#44, #47, #48,

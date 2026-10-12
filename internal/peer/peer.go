@@ -314,32 +314,29 @@ func (c *Client) http() *http.Client {
 }
 
 // allow consults the breaker before dialing addr.
-func (c *Client) allow(addr string) error {
-	if c.Breaker != nil && !c.Breaker.Allow(addr) {
-		return fmt.Errorf("peer %s: %w", addr, ErrCircuitOpen)
+func (c *Client) allow(addr string) (breakerPermit, error) {
+	if c.Breaker == nil {
+		return breakerPermit{}, nil
 	}
-	return nil
+	permit, allowed := c.Breaker.begin(addr, true)
+	if !allowed {
+		return breakerPermit{}, fmt.Errorf("peer %s: %w", addr, ErrCircuitOpen)
+	}
+	return permit, nil
 }
 
-// record reports the outcome of a request to the breaker.
-func (c *Client) record(addr string, o outcome) {
-	if c.Breaker == nil {
-		return
-	}
-	switch o {
-	case outcomeAnswered:
-		c.Breaker.RecordSuccess(addr)
-	case outcomeHardFail:
-		c.Breaker.RecordHardFailure(addr)
-	default:
-		c.Breaker.RecordFailure(addr)
+// record reports one request result against its admission generation.
+func (c *Client) record(addr string, permit breakerPermit, o outcome) {
+	if permit.breaker != nil {
+		permit.breaker.record(addr, o, &permit)
 	}
 }
 
 // Get fetches a block from the peer at addr (host:port) per req. held is false
 // if the peer returned 404 (cannot provide the block).
 func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data []byte, held bool, err error) {
-	if err := c.allow(addr); err != nil {
+	permit, err := c.allow(addr)
+	if err != nil {
 		return nil, false, err
 	}
 	caller := ctx // caller cancellation is not a peer failure (see below)
@@ -347,7 +344,7 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, blockURL(addr, req.Key), nil)
 	if err != nil {
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return nil, false, err
 	}
 	if req.URL != "" {
@@ -365,9 +362,9 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 		// peer failure; charge nothing. The peer did answer if it got that far,
 		// and recording answered also releases a half-open probe slot.
 		if caller.Err() != nil {
-			c.record(addr, outcomeAnswered)
+			c.record(addr, permit, outcomeAnswered)
 		} else {
-			c.record(addr, classify(err))
+			c.record(addr, permit, classify(err))
 		}
 		return nil, false, err
 	}
@@ -377,23 +374,23 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			if caller.Err() != nil {
-				c.record(addr, outcomeAnswered) // we aborted; the peer is fine
+				c.record(addr, permit, outcomeAnswered) // we aborted; the peer is fine
 			} else {
-				c.record(addr, outcomeSoftFail)
+				c.record(addr, permit, outcomeSoftFail)
 			}
 			return nil, false, fmt.Errorf("peer %s: read body: %w", addr, err)
 		}
-		c.record(addr, outcomeAnswered)
+		c.record(addr, permit, outcomeAnswered)
 		return body, true, nil
 	case http.StatusNotFound:
-		c.record(addr, outcomeAnswered) // answered; simply does not hold the block
+		c.record(addr, permit, outcomeAnswered) // answered; simply does not hold the block
 		return nil, false, nil
 	default:
 		if err := upstreamRefusal(addr, resp); err != nil {
-			c.record(addr, outcomeAnswered) // the peer is fine; our credential is not
+			c.record(addr, permit, outcomeAnswered) // the peer is fine; our credential is not
 			return nil, false, err
 		}
-		c.record(addr, outcomeSoftFail)
+		c.record(addr, permit, outcomeSoftFail)
 		return nil, false, fmt.Errorf("peer %s: unexpected status %s", addr, resp.Status)
 	}
 }
