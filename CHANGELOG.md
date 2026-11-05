@@ -7,6 +7,10 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+- Add `-cache-mode=memory|disk|hybrid` (#85, ADR-0007). Memory mode uses RAM-only
+  class budgets sized by `-cache-size` without files, directories or cache locks.
+  Hybrid remains the default; its `-mem-size=0` behavior remains compatible.
+
 - Replace cut-through relaying with validated whole-block peer responses, and add
   bounded ordered prefetch for blocks covering long client ranges (#83, ADR-0006).
   Default window: 2 blocks; node speculative budgets: 64 MiB and 16 loads/results.

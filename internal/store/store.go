@@ -1,7 +1,7 @@
 // Package store is DART's block cache: fixed-size blocks keyed by BlockKey,
-// backed by a preallocated slot arena for capacity beyond RAM.
+// backed by RAM slabs or preallocated disk arenas, with isolated class budgets.
 //
-// This first implementation is the disk tier: a single preallocated file split
+// The disk tier uses a single preallocated file split
 // into equal-size slots, with an in-memory index, an LRU eviction list, and a
 // free list. Because blocks are fixed-size and read-only, eviction is just
 // "free a slot" — O(1), zero fragmentation, no compaction.

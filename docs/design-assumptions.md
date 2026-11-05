@@ -50,6 +50,9 @@ contract.
 
 Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
 
+Cache backend (`memory`, `disk`, `hybrid`) and capacity are node-local choices
+(ADR-0007); they do not affect addressing or placement.
+
 All nodes run the same `BlockSize`, `ChunkSize`, namespace, fanout, and
 feature set. Rolling changes that mix geometries are allowed to happen, but
 byte-level guarantees across a mixed-geometry window are out of scope.

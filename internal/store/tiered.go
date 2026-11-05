@@ -64,13 +64,16 @@ type TieredStats struct {
 	// AdmitRejected counts Borrowed candidates refused by TinyLFU.
 	AdmitRejected uint64
 	// MemBlocks and MemSlots describe the in-memory hot set when the store is
-	// wrapped in a Hybrid; both are zero for a plain Tiered store.
+	// wrapped in a Hybrid. A memory-only Tiered reports both budgets combined;
+	// a disk-only Tiered reports zero.
 	MemBlocks int
 	MemSlots  int
 }
 
 // TieredOptions configures a Tiered store.
 type TieredOptions struct {
+	// Memory selects two RAM budgets without opening files. Path is unused.
+	Memory bool
 	// Path, SlotSize and Slots have the same meaning as store.Options; Slots is
 	// the total capacity, split between the two budgets.
 	Path     string
@@ -84,11 +87,19 @@ type TieredOptions struct {
 	OwnedFraction float64
 }
 
-// Tiered is a ClassStore backed by two independent DiskStores over separate
-// files, so neither budget can evict the other's blocks.
+// budgetStore keeps each backend's admission check atomic with its eviction.
+type budgetStore interface {
+	Store
+	Slots() int
+	putIfAdmitted(BlockKey, []byte, func(BlockKey) bool) (bool, error)
+}
+
+// Tiered is a ClassStore backed by independent owned and borrowed budgets,
+// either disk files or RAM stores. Neither can evict the other's blocks.
 type Tiered struct {
-	owned    *DiskStore
-	borrowed *DiskStore
+	owned    budgetStore
+	borrowed budgetStore
+	memory   bool
 
 	sk *sketch
 
@@ -102,7 +113,7 @@ var _ ClassStore = (*Tiered)(nil)
 var ErrBadTieredOptions = errors.New("store: SlotSize and Slots must be > 0 and Slots >= 2")
 
 // OpenTiered creates the two backing files (Path+".owned", Path+".borrowed")
-// and returns an empty Tiered store.
+// and returns an empty Tiered store. With Memory set, it opens only RAM stores.
 func OpenTiered(opt TieredOptions) (*Tiered, error) {
 	if opt.SlotSize <= 0 || opt.Slots < 2 {
 		return nil, ErrBadTieredOptions
@@ -128,16 +139,22 @@ func OpenTiered(opt TieredOptions) (*Tiered, error) {
 		}
 	}
 
-	o, err := Open(Options{Path: opt.Path + ".owned", SlotSize: opt.SlotSize, Slots: ownedSlots})
+	openBudget := func(suffix string, slots int) (budgetStore, error) {
+		if opt.Memory {
+			return OpenMem(MemOptions{SlotSize: opt.SlotSize, Slots: slots})
+		}
+		return Open(Options{Path: opt.Path + suffix, SlotSize: opt.SlotSize, Slots: slots})
+	}
+	o, err := openBudget(".owned", ownedSlots)
 	if err != nil {
 		return nil, fmt.Errorf("store: owned budget: %w", err)
 	}
-	b, err := Open(Options{Path: opt.Path + ".borrowed", SlotSize: opt.SlotSize, Slots: borrowedSlots})
+	b, err := openBudget(".borrowed", borrowedSlots)
 	if err != nil {
 		o.Close()
 		return nil, fmt.Errorf("store: borrowed budget: %w", err)
 	}
-	return &Tiered{owned: o, borrowed: b, sk: newSketch(borrowedSlots)}, nil
+	return &Tiered{owned: o, borrowed: b, memory: opt.Memory, sk: newSketch(borrowedSlots)}, nil
 }
 
 // keyHash derives the sketch hash for a block key.
@@ -255,13 +272,18 @@ func (t *Tiered) Stats() TieredStats {
 	t.mu.Lock()
 	rejected := t.rejected
 	t.mu.Unlock()
-	return TieredStats{
+	st := TieredStats{
 		OwnedBlocks:    t.owned.Len(),
 		OwnedSlots:     t.owned.Slots(),
 		BorrowedBlocks: t.borrowed.Len(),
 		BorrowedSlots:  t.borrowed.Slots(),
 		AdmitRejected:  rejected,
 	}
+	if t.memory {
+		st.MemBlocks = st.OwnedBlocks + st.BorrowedBlocks
+		st.MemSlots = st.OwnedSlots + st.BorrowedSlots
+	}
+	return st
 }
 
 // Close releases both budgets.

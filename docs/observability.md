@@ -27,6 +27,11 @@ The block latency histogram measures loads, not client-perceived Range latency.
 Warm peer requests count as cache hits. Shared origin wire accounting belongs to
 one successful consumer even if its original flight leader cancels.
 
+RAM-only Tiered stores report owned/borrowed occupancy and their summed
+`class="mem"` occupancy/capacity (ADR-0007). Those are overlapping views of the
+same blocks, not additional capacity. Hybrid `class="mem"` remains its front hot
+set; disk-only stores report zero memory slots. Admin counts unique cache blocks.
+
 ## 2. `internal/metrics` API
 
 ```go
