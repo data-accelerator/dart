@@ -44,6 +44,16 @@ suboptimal route — an extra hop, or a fetch from origin — never a wrong byte
 one property is what lets the whole system run without consensus, without a
 tracker, and without a leader.
 
+Run with RAM caching only (no disk cache or cache-directory lock):
+
+```bash
+dart -cache-mode=memory -cache-size=2GiB
+```
+
+`-cache-size` sets total owned/borrowed capacity in every mode. Default `hybrid`
+keeps its disk backend plus the `-mem-size` RAM hot set; `disk` explicitly disables
+that hot set. See [cache modes](docs/dart.md#cache-modes).
+
 ## How it works
 
 Three granularities, because one size cannot serve all three jobs:

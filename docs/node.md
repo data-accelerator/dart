@@ -89,6 +89,13 @@ only after a complete validated block is available. `-prefetch-window`,
 client and registry front-ends therefore share speculative admission. Request-owned
 workers join inside Serve before the handler admission gate is released (ADR-0006).
 
+Cache assembly selects `memory`, `disk` or default `hybrid` (ADR-0007).
+`cache-size` sizes each backend; only Hybrid consumes `mem-size`. Memory mode
+opens RAM Tiered stores directly and its closer owns no directory lock. Every
+mode uses the same handler/store safe-join contract from ADR-0003. Cache startup
+errors close any already acquired resources. The startup banner reports mode and
+capacity, with no unused cache-directory path in memory mode.
+
 ### 3.2 `DiscoveryScheme`
 
 ```go
@@ -135,7 +142,7 @@ The exact path the roster server is mounted on (no trailing slash, so a
   bare-list values resolve identically with zero registered schemes.
 - **No hidden global state**: no `init()` registration; two `Run` callers with
   different scheme sets do not interfere.
-- One `-cache-dir` still means one node (the store lock predates this package;
+- In disk/Hybrid mode one `-cache-dir` means one node (the store lock predates this package;
   see dart.md §5).
 - **The origin HTTP client is bounded**: the transport requires response headers
   within 30s (an origin that accepts and goes silent must fail, not hang), and
@@ -148,7 +155,8 @@ The exact path the roster server is mounted on (no trailing slash, so a
 
 ## 5. Concurrency & Call Permissions
 
-- `Run` is not reentrant per cache directory and is expected to be called once,
+- Disk/Hybrid instances cannot share a cache directory. Memory mode has no
+  cache-directory dependency. `Run` is expected to be called once,
   from `main`; it blocks until shutdown.
 - `DiscoveryScheme.New` is called at build time (single goroutine). A seeder's
   `Run` and `Seeds` are invoked concurrently once serving starts and must be
@@ -157,6 +165,10 @@ The exact path the roster server is mounted on (no trailing slash, so a
   them.
 
 ## 6. Stability Contract
+
+- ADR-0007 defines node-local backend selection and unchanged Hybrid defaults;
+  disk-directory ownership applies only to modes with disk resources.
+
 
 - The flag set, `-discover` value syntax and the fallback behavior are the
   command-line contract; changing them breaks deployments.
@@ -168,7 +180,7 @@ The exact path the roster server is mounted on (no trailing slash, so a
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **93.5%** of statements (the tests moved here with the code from
+- **Coverage**: **93.7%** of statements (the tests moved here with the code from
   `cmd/dart`; the uncovered remainder is the blocking serve loop and signal
   handling).
 - **Reproduce**:
@@ -207,6 +219,10 @@ the extraction:
 `TestNodePeerWaitsForCompleteBlock` exercises shipped node assembly against a
 partially sent then interrupted parent: no early response escapes, and origin
 fallback produces a complete Content-Length response.
+
+| `TestCacheModesAndRestart` | mode selection, file-backed compatibility, RAM occupancy and cold reopen |
+| `TestCacheModeValidationAndFlags` | mode/capacity/fraction errors, flags/defaults, legacy mem-size=0 and memory banner |
+| `TestMemoryOnlyNodeOriginAndPeer` | all nine root/leaf backend pairs, exact bytes, warm reuse, admin/metrics and unusable memory cache paths |
 
 ## 8. Limitations & TODO
 

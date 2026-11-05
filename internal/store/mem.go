@@ -100,20 +100,30 @@ func (m *MemStore) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
 // Put inserts or refreshes a block, evicting the least-recently-used block when
 // at capacity. Blocks are immutable, so an existing key only refreshes recency.
 func (m *MemStore) Put(k BlockKey, data []byte) error {
+	_, err := m.putIfAdmitted(k, data, nil)
+	return err
+}
+
+// Admission and LRU victim selection share the insertion lock, as on disk.
+func (m *MemStore) putIfAdmitted(k BlockKey, data []byte, admit func(BlockKey) bool) (bool, error) {
 	if len(data) == 0 {
-		return ErrEmptyBlock
+		return false, ErrEmptyBlock
 	}
 	if int64(len(data)) > m.slotSize {
-		return ErrBlockTooLarge
+		return false, ErrBlockTooLarge
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if e, ok := m.index[k]; ok {
 		m.lru.MoveToFront(e.elem)
-		return nil
+		return true, nil
 	}
 	if len(m.index) >= m.slots {
+		victim := m.lru.Back().Value.(*memEntry).key
+		if admit != nil && !admit(victim) {
+			return false, nil
+		}
 		m.evictLocked()
 	}
 	buf := m.pool.Get().(*[]byte)
@@ -122,7 +132,7 @@ func (m *MemStore) Put(k BlockKey, data []byte) error {
 	e.elem = m.lru.PushFront(e)
 	m.index[k] = e
 	m.n.Add(1)
-	return nil
+	return true, nil
 }
 
 // evictLocked drops the least-recently-used entry and returns its slab to the

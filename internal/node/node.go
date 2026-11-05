@@ -28,7 +28,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -42,7 +41,6 @@ import (
 	"github.com/data-accelerator/dart/internal/metrics"
 	"github.com/data-accelerator/dart/internal/peer"
 	"github.com/data-accelerator/dart/internal/registry"
-	"github.com/data-accelerator/dart/internal/store"
 	"github.com/data-accelerator/dart/internal/tracker"
 )
 
@@ -53,6 +51,7 @@ type config struct {
 	prefix           string
 	cacheDir         string
 	cacheSize        int64
+	cacheMode        string
 	chunkSize        int64
 	blockSize        int64
 	prefetchWindow   int
@@ -257,7 +256,7 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 		adminMode = cfg.adminAddr
 	}
 	fmt.Fprintf(out, "dart client=%s | mode: %s | p2p: %s | admin: %s | cache: %s (%d MiB)\n",
-		cfg.listen, mode, p2p, adminMode, cfg.cacheDir, cfg.cacheSize/chunk.MiB)
+		cfg.listen, mode, p2p, adminMode, cacheDescription(cfg), cfg.cacheSize/chunk.MiB)
 
 	// Resource-lifetime contract (issue #45): the store and cache-dir lock are
 	// closed on return ONLY when every admitted handler has exited. If the
@@ -302,7 +301,7 @@ func finishRun(n *node, out io.Writer, runErr error, abandoned int) error {
 		return runErr
 	}
 	fmt.Fprintf(out, "dart: %d handler(s) still running after forced shutdown; "+
-		"store and cache-dir lock deliberately left open (process exit reclaims them)\n", abandoned)
+		"cache resources deliberately left open (process exit reclaims them)\n", abandoned)
 	return runErr
 }
 
@@ -421,6 +420,7 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.StringVar(&cfg.listen, "listen", ":8080", "client listen address")
 	fs.StringVar(&cfg.origin, "origin", "", "fixed upstream origin URL; empty enables prefix passthrough")
 	fs.StringVar(&cfg.prefix, "prefix", "dart", "path prefix for passthrough mode")
+	fs.StringVar(&cfg.cacheMode, "cache-mode", "hybrid", "cache backend: memory, disk, or hybrid; cache-size controls backend capacity")
 	fs.StringVar(&cfg.cacheDir, "cache-dir", "./dart-cache", "directory for the block cache file")
 	// Sizes accept a unit suffix (8GiB, 512MiB) as well as a plain byte count.
 	sizeVar(fs, &cfg.cacheSize, "cache-size", 1*chunk.GiB, "block cache capacity, e.g. 8GiB")
@@ -516,7 +516,7 @@ type node struct {
 	client   http.Handler // client data plane (required)
 	peer     http.Handler // peer block server; nil when P2P is off
 	admin    http.Handler // metrics/admin; nil when -admin is empty
-	closer   io.Closer    // releases the store and the cache-dir lock
+	closer   io.Closer    // releases the store and any disk-cache directory lock
 	discover *cluster.DynamicProvider
 	seeder   cluster.Seeder // the seeder discover was built from; may run a watch
 }
@@ -540,46 +540,10 @@ func build(cfg config, out io.Writer) (*node, error) {
 	if err := cc.Validate(); err != nil {
 		return nil, err
 	}
-	if cfg.cacheSize < cfg.blockSize {
-		return nil, fmt.Errorf("cache-size %d must be >= block-size %d", cfg.cacheSize, cfg.blockSize)
-	}
-	if err := os.MkdirAll(cfg.cacheDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create cache dir: %w", err)
-	}
-	// Take the directory lock BEFORE opening any store: the arena open truncates,
-	// so a second instance must be refused here rather than after it has already
-	// wiped the running instance's cache.
-	lock, err := store.LockDir(cfg.cacheDir)
+	st, closer, err := openCache(cfg)
 	if err != nil {
 		return nil, err
 	}
-	disk, err := store.OpenTiered(store.TieredOptions{
-		Path:          filepath.Join(cfg.cacheDir, "blocks"),
-		SlotSize:      cfg.blockSize,
-		Slots:         int(cfg.cacheSize / cfg.blockSize),
-		OwnedFraction: cfg.ownedFraction,
-	})
-	if err != nil {
-		lock.Close()
-		return nil, err
-	}
-	// A hybrid store keeps a small hot set in RAM in front of the disk tiers;
-	// both are caches, so memory eviction only costs a disk read.
-	var st store.ClassStore = disk
-	if cfg.memSize >= cfg.blockSize {
-		mem, err := store.OpenMem(store.MemOptions{
-			SlotSize: cfg.blockSize,
-			Slots:    int(cfg.memSize / cfg.blockSize),
-		})
-		if err != nil {
-			disk.Close()
-			lock.Close()
-			return nil, err
-		}
-		st = store.NewHybrid(mem, disk)
-	}
-	// Release in reverse order: stores first, then the directory lock.
-	closer := closers{st, lock}
 
 	// Registry credentials, when configured, must cover the whole data path: the
 	// mirror's pass-through proxy AND the engine's blob fetches. The credential is

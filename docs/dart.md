@@ -32,8 +32,9 @@ dart [flags]
 | `-listen` | `:8080` | listen address |
 | `-origin` | `""` | fixed upstream origin URL; empty enables prefix passthrough |
 | `-prefix` | `dart` | path prefix for passthrough mode |
-| `-cache-dir` | `./dart-cache` | directory for the block cache file (`blocks.dat`) |
-| `-cache-size` | `1 GiB` | block cache capacity; accepts a unit suffix (see below) |
+| `-cache-mode` | `hybrid` | cache backend: `memory`, `disk`, or `hybrid` |
+| `-cache-dir` | `./dart-cache` | disk-cache directory; ignored in memory mode |
+| `-cache-size` | `1 GiB` | total backing cache capacity in every mode; split owned/borrowed; accepts a unit suffix |
 | `-chunk-size` | `256 MiB` | chunk size (placement/tree unit) |
 | `-block-size` | `4 MiB` | block size (transfer/cache unit) |
 | `-prefetch-window` | `2` | covering blocks in flight per client range, including demand; 1 disables, maximum 64 |
@@ -53,7 +54,7 @@ dart [flags]
 | `-tracker-tick` | `3s` | how often a tracker republishes a reader set |
 | `-replicas` | `1` | HRW candidates that authoritatively hold a chunk (the owned budget) |
 | `-owned-fraction` | `0.8` | share of the cache reserved for owned blocks (0<f<1); an explicitly-set out-of-range value fails startup |
-| `-mem-size` | `256 MiB` | in-memory hot-set size; below one block disables the memory tier |
+| `-mem-size` | `256 MiB` | Hybrid hot-set size; ignored in memory/disk modes; below one block disables the Hybrid front tier |
 
 | `-hedge` | `true` | hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99 |
 | `-hedge-ratio` | `0.05` | max share of peer fetches allowed to hedge |
@@ -70,6 +71,28 @@ values can sit beside container resource limits without a second convention: an 
 selects a power of two (`8GiB`, `512MiB`, also `Gi`/`Mi`) and its absence a power of
 ten (`8GB`, `500MB`). A trailing `B` is optional and matching is case-insensitive.
 `1GiB` and `1GB` are deliberately **not** the same number.
+
+### Cache modes
+
+`-cache-mode=hybrid` preserves the default: a disk Tiered backend sized by
+`-cache-size`, plus a RAM hot set sized by `-mem-size`. A hot set smaller than one
+block preserves the existing disk-only behavior. `-cache-mode=disk` explicitly
+selects the disk backend, ignoring `-mem-size`.
+
+`-cache-mode=memory -cache-size=2GiB` uses only RAM-backed owned/borrowed budgets.
+It never creates or opens a cache directory, arena or directory lock; `-cache-dir`
+and `-mem-size` are unused. The existing `-owned-fraction` split and borrowed
+TinyLFU admission remain, so single-node owned traffic can fill only its reserved
+share. Capacity rounds down to whole blocks and must contain at least two blocks
+(one per class); invalid modes, capacities and fractions fail clearly. RAM slabs
+are allocated lazily; cache capacity excludes metadata, returned copies and
+in-flight reads/prefetch, so it is not a process RSS limit. Restart starts cold.
+Backend choice is node-local and can mix within a uniform-geometry cluster
+(ADR-0007); paths, keys and placement are unchanged.
+
+```bash
+dart -cache-mode=memory -cache-size=2GiB -origin https://example.com/blob
+```
 
 ### Origin resolution modes
 
@@ -240,15 +263,11 @@ go test ./cmd/dart/ ./internal/node/ -race -count=1
   supplies per-host credentials for private upstreams, including the Distribution
   token exchange. Still future proxy-layer work: forward-proxy mode, TLS/MITM, and
   per-request (per-client) upstream credentials.
-- **Cold cache on restart**: the store does not persist across restarts and the
-  arena is rebuilt empty on start, so no stale bytes linger on disk (safe under
-  read-only semantics — the origin is the source of truth; see docs/store.md §8).
-  Disk use is bounded by `-cache-size`, not by uptime or restart count, and the
-  backing files are sparse (`ls -l` shows the reservation, `du` the actual use).
-  **Run one instance per `-cache-dir`**: a second one wipes the first's cache.
-  The cache is a RAM hot set (`-mem-size`) in front of disk, which is split into
-  owned/borrowed budgets (`-owned-fraction`) with TinyLFU admission on the
-  borrowed side, so peer churn cannot evict this node's authoritative shards.
+- **Cold cache on restart**: all backends start empty. Disk/Hybrid modes rebuild
+  sparse arenas under `-cache-dir`, bounded by `-cache-size`, and acquire the
+  directory lock before opening them: a second instance fails startup. Memory
+  mode uses no cache files/directory lock. All modes preserve isolated
+  owned/borrowed budgets and borrowed TinyLFU admission (ADR-0007).
 - **Observability**: `-admin` serves `/metrics` (Prometheus), `/healthz`, and
   `/admin/{stats,members,ring}`; see docs/observability.md. Bind it to a private
   interface (no auth).

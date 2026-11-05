@@ -1,7 +1,7 @@
 # `internal/store`
 
-DART's block cache: fixed-size blocks keyed by `BlockKey`, backed by a
-preallocated slot arena for capacity beyond RAM.
+DART's block cache: fixed-size blocks keyed by `BlockKey`, backed by
+RAM slabs or preallocated disk arenas.
 
 - Source: `internal/store/store.go`
 - Tests: `internal/store/store_test.go`
@@ -116,14 +116,23 @@ type ClassStore interface {
     PutClass(k BlockKey, data []byte, c Class) (admitted bool, err error)
     Stats() TieredStats
 }
-func OpenTiered(TieredOptions) (*Tiered, error) // {Path, SlotSize, Slots, OwnedFraction}
+func OpenTiered(TieredOptions) (*Tiered, error) // {Path, SlotSize, Slots, OwnedFraction, Memory}
 var ErrBadTieredOptions error  // SlotSize <= 0, Slots < 2, or OwnedFraction < 0 or >= 1 (0 = unset, defaults to 0.8)
 func (t *Tiered) Touch(k BlockKey) // record an access in the estimator without reading (used by Hybrid)
 ```
 
 `Slots >= 2` is required so both budgets get at least one slot.
 
-`Tiered` is two independent `DiskStore`s over separate files:
+`Tiered` uses two independent budgets. `TieredOptions.Memory=false` opens two
+`DiskStore` files. With `Memory=true`, it opens two `MemStore` instances and
+ignores `Path`, creating no files or locks. Both share the class split and
+TinyLFU policy (ADR-0007); RAM admission compares and evicts under the same
+backend lock. Memory capacity is allocated lazily in block slabs, with copied
+reads and immutable existing keys as in §3.5. Closing/reopening starts empty.
+`Slots >= 2` and the existing fraction validation apply to both backends.
+Memory-only `Stats().MemBlocks/MemSlots` sum both budgets; in a Hybrid those
+fields describe its front hot set. Capacity bounds slots, excluding metadata,
+caller copies and engine in-flight buffers.
 
 | Budget | Content | Default share | Admission |
 |---|---|---|---|
@@ -132,7 +141,7 @@ func (t *Tiered) Touch(k BlockKey) // record an access in the estimator without 
 
 **Why the split is the point:** without it a burst of hot borrowed copies would
 evict the owned shard set, destroying the cluster's balanced distributed cache —
-the aggregate capacity placement depends on. Physically separate files mean
+the aggregate capacity placement depends on. Independent backing stores mean
 borrowed churn can only ever consume its own share.
 
 **Admission:** once the borrowed budget is full, a candidate is stored only if
@@ -250,7 +259,7 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
 
 ## 5.1 Disk footprint and operational notes
 
-- **Deterministic paths**: `cmd/dart` opens `<cache-dir>/blocks.owned` and
+- **Deterministic disk paths**: disk and Hybrid modes open `<cache-dir>/blocks.owned` and
   `<cache-dir>/blocks.borrowed`. The same paths are reused on every start, so
   restarts do not accumulate files.
 - **Bounded by configuration, not by uptime**: `Open` sets the file to exactly
@@ -262,7 +271,7 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
 - **One process per cache directory.** Two instances sharing a `-cache-dir` would
   corrupt each other's slots in any case; with `O_TRUNC` the second one wipes the
   first's arena on startup. `store.LockDir` guards against this: `cmd/dart`
-  acquires an exclusive `flock(2)` on `<cache-dir>/.dart.lock` before opening any
+  acquires an exclusive `flock(2)` in disk/Hybrid mode on `<cache-dir>/.dart.lock` before opening any
   store, so a second instance on the same directory fails fast at startup rather
   than silently destroying the first's cache. The kernel releases the lock if the
   process dies, so a crash never leaves a stale lock behind.
@@ -278,7 +287,7 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.8%** of statements. The uncovered lines are the `ReadAt`/
+- **Coverage**: **95.1%** of statements. The uncovered lines are the `ReadAt`/
   `WriteAt` I/O-error branches in `Get`/`Put`, which require fault injection to
   hit and are left as defensive handling.
 - **Note**: tests use `t.TempDir()`, which honors `TMPDIR`; in the sandbox export
@@ -344,6 +353,10 @@ go test ./internal/store/ -cover -count=1
 | `TestPutClassFeedsEstimator` | insertion is an access: write-only patterns do not degenerate admission |
 | `TestBorrowedAdmissionSerializesWithEviction` | concurrent admit+evict never exceeds the budget (`-race`) |
 | `TestMemStoreLenCounterExact` | the O(1) `Len` counter is exact across Put/refresh/evict/Delete/Close (`BenchmarkMemStoreLen` pins O(1) at 10k slots) |
+
+| `TestMemoryTieredBudgetsAndAdmission` | RAM class isolation, TinyLFU rejection, promotion, immutable copies, occupancy and close |
+| `TestMemoryTieredValidationAndConcurrency` | invalid capacities/fractions and concurrent RAM class operations |
+| `TestMemAdmissionRejectKeepsVictim` | rejected RAM candidate leaves its victim intact; ordinary LRU insertion still evicts |
 
 ## 8. Limitations & TODO
 
