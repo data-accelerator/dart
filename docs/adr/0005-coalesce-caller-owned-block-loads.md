@@ -1,6 +1,6 @@
 # ADR-0005: Coalesce caller-owned buffered block loads through cache publication
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-05
 - Supersedes: none
 - Binds: docs/engine.md §3.3 / §5 / Stability Contract; docs/observability.md block-source and wire-byte accounting

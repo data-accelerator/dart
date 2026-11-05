@@ -128,4 +128,4 @@ acceptable in current law — it is a pointer, not a narrative.
 | [0002](./0002-visible-ascii-member-ids.md) | Visible-ASCII member IDs instead of an epoch reframe | accepted |
 | [0003](./0003-shutdown-safe-join-contract.md) | Shutdown safe-join: never close the store under a live handler | accepted |
 | [0004](./0004-preserve-escaped-origin-identities.md) | Preserve escaped origin identities independently of endpoint probes | accepted |
-| [0005](./0005-coalesce-caller-owned-block-loads.md) | Coalesce caller-owned buffered block loads through cache publication | proposed |
+| [0005](./0005-coalesce-caller-owned-block-loads.md) | Coalesce caller-owned buffered block loads through cache publication | accepted |
