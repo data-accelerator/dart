@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -436,6 +437,8 @@ func TestCoalescedPeerRefusalRetriesCallerCredential(t *testing.T) {
 	client := peer.NewClient()
 	client.Breaker = peer.NewBreaker(peer.BreakerOptions{FailureThreshold: 1})
 	e, _ := tailEngine(t, client, parent, origin.URL)
+	reg := metrics.NewRegistry()
+	e.mx = NewMetrics(reg)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := e.Size(ctx, origin.URL+"?sig=renewed"); err != nil {
@@ -454,6 +457,9 @@ func TestCoalescedPeerRefusalRetriesCallerCredential(t *testing.T) {
 		waiter <- err
 	}()
 	waitBlockEvent(t, ctx, joiner.joined)
+	waitStart := time.Now()
+	<-time.After(50 * time.Millisecond) // deliberate wait measured by the retry's histogram
+	waited := time.Since(waitStart).Seconds()
 	unblock()
 	var status *fetch.StatusError
 	if err := <-leader; !errors.As(err, &status) || status.Code != http.StatusForbidden {
@@ -464,6 +470,95 @@ func TestCoalescedPeerRefusalRetriesCallerCredential(t *testing.T) {
 	}
 	if client.Breaker.State(strings.TrimPrefix(parent.URL, "http://")) != peer.BreakerClosed {
 		t.Fatal("credential refusal quarantined the healthy parent")
+	}
+	var text bytes.Buffer
+	if err := reg.Render(&text); err != nil {
+		t.Fatal(err)
+	}
+	var observed float64
+	for _, line := range strings.Split(text.String(), "\n") {
+		if strings.HasPrefix(line, `dart_block_fetch_seconds_sum{source="peer"} `) {
+			observed, _ = strconv.ParseFloat(strings.Fields(line)[1], 64)
+		}
+	}
+	if observed < waited || e.mx.peerHits.Value() != 1 || e.mx.peerBytes.Value() != 16 {
+		t.Fatalf("retry wait=%fs observed=%fs reads=%d bytes=%d", waited, observed, e.mx.peerHits.Value(), e.mx.peerBytes.Value())
+	}
+}
+
+type blockFetchFunc func(context.Context, string, int64, int64) (fetch.Range, error)
+
+func (f blockFetchFunc) Fetch(ctx context.Context, url string, start, end int64) (fetch.Range, error) {
+	return f(ctx, url, start, end)
+}
+
+type witnessedOriginFlight struct {
+	inner   *fetch.Coalescing
+	waiting chan (<-chan struct{})
+}
+
+func (f *witnessedOriginFlight) Fetch(ctx context.Context, url string, start, end int64) (fetch.Range, error) {
+	j := &blockJoinContext{Context: ctx, joined: make(chan struct{})}
+	f.waiting <- j.joined
+	return f.inner.Fetch(j, url, start, end)
+}
+
+func TestMixedDepthOriginFlightsReturnOwnedBytes(t *testing.T) {
+	content := blob(16)
+	origin := countingOrigin(t, content, nil)
+	parent := httptest.NewServer(http.NotFoundHandler())
+	defer parent.Close()
+	e, _ := tailEngine(t, peer.NewClient(), parent, origin.URL)
+	e.mx = NewMetrics(metrics.NewRegistry())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := e.Size(ctx, origin.URL); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var calls atomic.Int64
+	f := &witnessedOriginFlight{waiting: make(chan (<-chan struct{}), 2), inner: &fetch.Coalescing{F: blockFetchFunc(
+		func(ctx context.Context, _ string, _, _ int64) (fetch.Range, error) {
+			calls.Add(1)
+			select {
+			case <-release:
+				return fetch.Range{Data: content, Total: 16}, nil
+			case <-ctx.Done():
+				return fetch.Range{}, ctx.Err()
+			}
+		})}}
+	e.fetcher = f
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 2)
+	oid, _ := chunk.ObjectID(origin.URL)
+	for _, hop := range []int{0, 1} {
+		go func(hop int) {
+			data, err := e.block(ctx, origin.URL, oid, 16, 0, hop)
+			done <- result{data, err}
+		}(hop)
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case waiting := <-f.waiting:
+			waitBlockEvent(t, ctx, waiting)
+		case <-ctx.Done():
+			t.Fatal("mixed-depth loads did not join the origin flight")
+		}
+	}
+	unblock()
+	a, b := <-done, <-done
+	if a.err != nil || b.err != nil || !bytes.Equal(a.data, content) || !bytes.Equal(b.data, content) {
+		t.Fatalf("origin results: %v, %v", a.err, b.err)
+	}
+	a.data[0] = 255
+	if b.data[0] != 0 || content[0] != 0 || calls.Load() != 1 || e.mx.originBytes.Value() != 16 || e.mx.originGet.Value() != 2 {
+		t.Fatalf("shared origin buffer escaped: other=%d origin=%d calls=%d reads=%d wire=%d", b.data[0], content[0], calls.Load(), e.mx.originGet.Value(), e.mx.originBytes.Value())
 	}
 }
 

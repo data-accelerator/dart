@@ -79,6 +79,10 @@ its `peer` or `origin` block-source counter and observes its own wait latency,
 while `dart_bytes_total` counts only the executing load's transfer. Block counts
 therefore cannot be multiplied by block size to infer wire traffic. A read
 satisfied by the leader's cache recheck is attributed to `cache` instead.
+Buffered miss latency spans the caller's initial admission, waits, retries and
+cache publication. A waiter that becomes a leader still records its earlier
+wait in its single final source observation; speculative peer latency estimation
+continues to use the actual network attempt separately.
 
 For the cache, `dart_store_blocks / dart_store_slots` per class shows how full
 each budget is; a rising `dart_store_admit_rejected_total` against a full borrowed

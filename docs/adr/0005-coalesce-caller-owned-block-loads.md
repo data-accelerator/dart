@@ -29,6 +29,10 @@ cache hits. Store access remains inside an active serving caller. A shared
 flight takes one immutable snapshot before returning the leader's owned bytes;
 joined readers copy from that snapshot. Different relay depths remain separate
 so forwarding can advance to its hop bound rather than forming a wait cycle.
+Origin results are detached before publication because the origin singleflight
+can share its backing array across these separate engine flights. Each caller's
+single final latency observation includes earlier waits and retries, independently
+of which caller executes the successful transfer.
 Cut-through relay bodies retain their existing streaming behavior.
 
 ## Alternatives considered

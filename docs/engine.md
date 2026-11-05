@@ -122,9 +122,13 @@ including when cache admission declines them. Each buffered caller receives
 owned bytes; a joined load adds O(block size) copying per caller, plus one
 snapshot per shared flight. Coordination holds a mutex only for map access,
 not store or network I/O. Metadata probes remain endpoint-scoped independently.
+Origin results are detached from the origin singleflight's read-only buffer
+before cache publication or return, including across separate relay depths.
 
-Only the executing load records wire bytes; joined reads record their actual
-wait latency and the same block source without adding another transfer. This
+Only the executing load records wire bytes. Each successful buffered miss
+records one latency from its first admission attempt through waiting, retries
+and publication, even if a waiter takes over as leader. Joined reads use the
+same block source without adding another transfer. This
 coalescing covers buffered `Serve`/`PeerSource` block loads and their origin
 fallback, not the cut-through relay body in `PeerStreamSource`. The lifecycle
 and ownership decision is recorded in
@@ -410,7 +414,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **89.7%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **90.1%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -436,6 +440,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestBlockLoadRechecksCacheAfterAdmission` | a caller with an older miss sees another load's publication before doing new I/O |
 | `TestBlockLoadPanicReleasesAdmission` | an unwinding source cannot pin the flight entry |
 | `TestCoalescedPeerRefusalRetriesCallerCredential` | a renewed credential survives an expired leader's peer/origin refusal without quarantining the parent |
+| `TestMixedDepthOriginFlightsReturnOwnedBytes` | separate relay-depth flights can share origin I/O but never share caller-owned backing arrays; wire bytes still count once |
 | `TestBlockLoadAlreadyCanceled` | an already-canceled caller creates no new flight |
 | `TestCoalescedBlockValidatesBeforeSharingOriginFallback` | short peer data is rejected; waiters share only the validated origin fallback and wire bytes count once |
 | `TestServeAcrossBlocksAndChunks` | a range crossing block/chunk boundaries is assembled correctly |

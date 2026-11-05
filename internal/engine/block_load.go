@@ -17,8 +17,9 @@ const (
 )
 
 type blockRead struct {
-	data   []byte
-	source blockSource
+	data      []byte
+	source    blockSource
+	wireBytes int // zero when an underlying origin flight supplied shared bytes
 }
 
 // Relay depth must stay in the flight identity: joining a shallower request
