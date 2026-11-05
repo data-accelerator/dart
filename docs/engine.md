@@ -21,7 +21,7 @@ order.
 Peer pulls are wired in (optional): when a `Cluster`, `Peer` client, and
 `SelfID` are all configured, a cache miss is routed to this node's **parent in
 the preorder distribution tree** (branching factor `Fanout`); the parent
-**relays** (fetching from its own parent/origin as needed, via `PeerStreamSource`),
+**relays** (fetching from its own parent/origin as needed, via `PeerSource`),
 so it usually holds the block. The tree root (owner) fetches origin. This offloads
 the owner under a thundering herd.
 
@@ -67,6 +67,10 @@ type Options struct {
     Hedge      bool           // hedge a slow peer fetch (default off)
     HedgeRatio float64        // max share of fetches allowed to hedge (default 0.05)
 
+    PrefetchWindow int   // default 4, 1 disables; allowed 1..64 (zero = default)
+    PrefetchBytes  int64 // default 64 MiB reserved speculative payload
+    PrefetchLoads  int   // default 16 outstanding speculative loads/results
+
     // Active-reader-set tree (optional):
     TrackerClient   *tracker.Client   // reach remote trackers
     TrackerRegistry *tracker.Registry // this node's local tracker
@@ -74,7 +78,8 @@ type Options struct {
 ```
 
 `New` validates the chunk config and required fields. Peer pulls are enabled
-only when `Cluster`, `Peer`, and `SelfID` are all set.
+only when `Cluster`, `Peer`, and `SelfID` are all set. Negative prefetch limits
+or a window above 64 are rejected; zero selects each default.
 
 ### 3.2 `func (e *Engine) Size(ctx, url string) (int64, error)`
 
@@ -129,10 +134,9 @@ Only the executing load records wire bytes. Each successful buffered miss
 records one latency from its first admission attempt through waiting, retries
 and publication, even if a waiter takes over as leader. Joined reads use the
 same block source without adding another transfer. This
-coalescing covers buffered `Serve`/`PeerSource` block loads and their origin
-fallback, not the cut-through relay body in `PeerStreamSource`. The lifecycle
-and ownership decision is recorded in
-[ADR-0005](./adr/0005-coalesce-caller-owned-block-loads.md).
+coalescing covers `Serve`/`PeerSource` block loads and their origin fallback.
+The lifecycle and whole-block pipeline contract is recorded in
+[ADR-0006](./adr/0006-pipeline-whole-block-transfers.md).
 
 **Block-length validation.** A block's byte length is fixed by the object
 geometry (a full `BlockSize`, or a shorter final block). Before a fetched block
@@ -142,20 +146,11 @@ origin and the peer paths:
 - an origin block of the wrong length fails the read (it is never cached);
 - a peer that returns a wrongly-sized block is not trusted — the read falls
   through to origin, which is authoritative;
-- the cut-through relay (`relayFromParent`) applies the same check to the
-  bytes it forwards: relay responses carry no Content-Length (chunked), so a
-  short clean EOF is indistinguishable from success at the transport — the
-  relay compares the streamed length against the geometry before caching. A
-  mismatched block fails the relay and is never cached. The peer server aborts
-  the committed response, so downstream observes truncation even with chunked
-  framing. The faulty parent is immediately quarantined through its circuit
-  breaker, so the next request skips it and falls back to origin. Validation
-  runs inside `Client.StreamValidated` before any success is recorded, under
-  the peer request's timeout context. Transport and validation results use
-  the same admission-generation permit, so a pre-quarantine completion cannot
-  clear a newer circuit or consume its half-open probe slot.
-  Cooldown/half-open recovery remains unchanged. When the object
-  size cannot be resolved, relayed bytes cannot be validated and are not cached.
+- peer candidates are checked by `Client.GetValidated` before recording success.
+  A wrong length immediately quarantines that parent under the request's captured
+  breaker generation. No peer bytes are published downstream until the complete
+  block has been obtained and validated; failure may try a backup or origin.
+  An unresolved object size fails before fetching/forwarding the block.
 
 This is load-bearing because the block cache is **write-once per key**: a later
 correct fetch can never overwrite a bad block, only eviction would clear it. So
@@ -210,38 +205,45 @@ int64 arithmetic. An index above `chunk.Config.MaxBlockIndex()` — above
 `MaxInt64`, or large enough that `index*BlockSize` would overflow int64 — can
 never come from a legitimate same-config peer, and computing with it would wrap
 (wrapped-to-0 start silently serves block 0's bytes; a wrapped-negative start
-drops the Range header and pulls the whole object). `PeerSource` and
-`PeerStreamSource` decline such requests (`held=false`, recorded as a refused
+drops the Range header and pulls the whole object). `PeerSource` declines such requests (`held=false`, recorded as a refused
 relay) **before** cache lookup, relay selection, size probe, or origin I/O.
 Declined, not errored: the malformed index is the requester's fault, and a 500
 would charge this healthy relay on the requester's circuit breaker.
 
 **Origin/key consistency is checked at the same boundary.** When a request
-supplies `X-DART-Origin`, both sources recompute its expected chunk key from
+supplies `X-DART-Origin`, the source recomputes its expected chunk key from
 `(namespace, chunk.ObjectID(url), ChunkOfBlock(blockIndex))`. A different key
 is a requester addressing error and is declined before local cache lookup,
 parent selection or any origin probe. This prevents an honest parent serving
 a requested cached block from being blamed for a different URL's geometry.
 Requests without an Origin URL remain valid cache-only reads; a cold one
 cannot relay. Identity checking takes O(URL length) time and space, adds no
-network traffic, and preserves cut-through streaming.
+network traffic.
 
-### 3.6 `func (e *Engine) PeerStreamSource() peer.StreamSource`
+### 3.6 Bounded ordered Range prefetch
 
-The **cut-through** counterpart of `PeerSource`, for a `peer.StreamServer`:
+`Serve` schedules only blocks covering the clamped request, nearest first, and
+writes requested subranges strictly in order. `PrefetchWindow` counts the current
+block and queued/in-flight later blocks. Window 1 serializes loads. Peer block
+handlers fetch exactly one requested block and never expand a prefetch window.
 
-- a locally-held block is copied out under the store lock (`Get`) and streamed,
-  so a concurrent eviction cannot tear it mid-write;
-- a missing block is relayed from this node's tree parent, copying bytes to the
-  requester **as they arrive** while tee-ing them into the local cache;
-- the tree root (no parent) fetches from origin, caches, then streams.
+The engine's `PrefetchBytes` and `PrefetchLoads` admission is non-blocking.
+Reservations cover each speculative block's expected payload through consumption,
+including completed results held behind a slow client. On exhaustion, a foreground
+block still loads without a reservation; demand is never queued behind budget
+admission. These limits bound speculative payload/results, not total process RSS:
+foreground reads, caches, transport buffers and temporary validation/singleflight
+copies have separate memory costs. A block larger than the byte budget is read on
+demand. Existing cache hits and same-block flights are reused, and fetched blocks
+are validated and published best-effort before use even if admission declines.
 
-The malformed-index decline of §3.5 applies identically here: nothing is
-streamed, the sizer is not called, and no origin request is made.
-
-This is what `cmd/dart` mounts, so a multi-hop chain pipelines: the tail node
-starts receiving after roughly one block-transfer time instead of
-depth x block-transfer time.
+Each Serve owns its workers: cancellation, an earlier block failure or a write
+failure cancels and joins all workers before returning. A later failed block is
+reported only when reached, after valid earlier blocks have been written. Already
+published valid cache entries remain. Reserving results under backpressure costs
+O(window) metadata and at most the admitted speculative payload; range length does
+not allocate a segment/result per block. Extra bandwidth from hedging remains
+subject to its independent rate limit.
 
 ### 3.7 Cache classification (owned / borrowed)
 
@@ -352,7 +354,7 @@ Another endpoint for the same digest can still use the cache and P2P:
 stream it fails cleanly instead of falling back to per-block pulls. On the
 peer plane, a relay that has marked an object Range-unsupported **declines**
 relay requests for it (`held=false`) on both relay sources
-(`PeerStreamSource` and `PeerSource`), so the requester uses its own
+(`PeerSource`), so the requester uses its own
 passthrough path rather than this node pulling the whole object per block on
 its behalf. Defense in depth: `block()` never caches bytes sliced from a
 Range-ignored whole-object response even when the marker is absent.
@@ -397,24 +399,31 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
   block/depth through cache publication. The `Coalescing` fetcher independently
   deduplicates origin ranges. Verified with `-race` under overlapping `Serve`.
 - Shared buffered loads keep store access in the leader caller's lifetime;
-  they start no background store-writing task. Returned block buffers are
+  Serve-owned prefetch workers are canceled and joined before Serve returns.
+  Returned block buffers are
   caller-owned, including coalesced callers. Waiters do not keep a goroutine
-  after returning on cancellation (ADR-0003 and ADR-0005).
+  after returning on cancellation (ADR-0003 and ADR-0006).
 - `Handler` is safe for concurrent use if `Resolve`/`E` are not mutated after
   construction.
 
 ## 6. Determinism / Stability Contract
 
+- ADR-0006 specifies complete validated blocks before peer success responses and
+  bounded in-range prefetch. The removed streaming internal APIs are not retained.
+  GET paths, keys, hop headers, credentials and HTTP/1.1 interoperability remain
+  unchanged; cold multi-hop first-block latency includes full transfer per hop.
+
+
 - The block key uses `chunk.ChunkKey` (part of the wire protocol via placement),
   but nothing else here is on the wire. HTTP Range/Content-Range is the external
   client contract.
 - Buffered coalescing preserves geometry, key construction and the wire
-  protocol; caller ownership and cancellation follow §3.3 and ADR-0005.
+  protocol; caller ownership and cancellation follow §3.3 and ADR-0006.
 
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **90.1%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.2%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -469,14 +478,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestPeerSourceRelayFetchOnBehalf` | relay Source fetches-on-behalf and serves a block it did not hold |
 | **`TestRelayHopBoundary`** | **both peer-facing sources: hop == maxHop-1 still relays; hop == maxHop declines without touching the origin** |
 | `TestTreeMultiHopRelay` | 3-node fanout=1 chain: a tail request populates every node via the relay chain |
-| `TestPeerStreamSourceLocalHit` | locally-held block streamed from the store |
-| `TestPeerStreamSourceRootFetchesOrigin` | tree root satisfies a relay request from origin and caches it |
-| `TestStreamRelayChainThroughEngines` | 3-node fanout=1 chain over streaming peer servers: bytes intact, every node cached |
-| `TestStreamRelayRejectsWrongLengthBlock` | a short clean parent stream makes the relay abort downstream and never cache; a correct relay is cached |
+| `TestWholeBlockRelayChainThroughEngines` | 3-node fanout=1 chain over complete-block peer servers: bytes intact, every node cached |
 | `TestRelayDeclinesInconsistentKeyURL` | buffered/streaming, warm/cold relays decline unrelated URLs, wrong chunk indices and namespaces without contacting origins/parents or tripping circuits; valid and cache-only reads still work |
-| `TestStreamRelayQuarantinesWrongLengthParent` | a clean but invalid parent response opens that parent's circuit; repeated requests fetch origin once and then use the correct cached block |
-| `TestStreamRelayPropagatesParentFailure` | an interrupted parent stream remains an unexpected EOF through a real intermediate engine; no partial block is cached |
-| `TestStreamRelayDoesNotCacheWhenSizeUnresolved` | relayed bytes are not cached when the object size cannot be resolved |
 | `TestClassOfMatchesPlacement` | owned iff in HRW top-`Replicas`, else borrowed; `Replicas=3` makes all members owners |
 | `TestClassOfSingleNodeIsOwned` | without P2P everything cached is owned |
 | `TestServeUsesOwnedBudget` | single-node serve fills the owned budget only |
@@ -492,7 +495,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestHedgeWinMetricsRequireFiredHedge` | no hedge fired → no hedge-win counters (the backup_won/fired comparison stays meaningful) |
 | `TestMissesDoNotFeedLatencyEstimator` | fast 404 misses never arm the hedge delay |
 | `TestReaderSetCacheFollowsGrantedLease` | the reader-set cache renews at half the granted lease, never lapsing mid-read |
-| `TestStreamRelayParentErrorFallsBackToOrigin` | an open-circuit/errored parent is skipped to origin, not propagated as a 500 |
+| `TestRelayParentErrorFallsBackToOrigin` | an open-circuit/errored parent is skipped to origin, not propagated as a 500 |
 | `TestEmptyObjectGetServes200` | empty object: 200 empty on both paths; a Range request stays 416 |
 | `TestParseRangeSuffixEmptyObject` | a suffix range on an empty object is unsatisfiable (no inverted `[0,-1]` interval); non-empty suffix behavior unchanged |
 | `TestEmptyObjectSuffixRangeServes416` | `bytes=-n` on an empty object → 416 + `Content-Range: bytes */0` for GET and HEAD, never a 206 with `bytes 0--1/0` |
@@ -512,28 +515,31 @@ go test ./internal/engine/ -cover -count=1
 | `TestPassthroughUnavailableWithoutOpener` | a non-streaming fetcher fails the passthrough cleanly with 502 |
 | `TestRelayDeclinesRangeBlindOrigin` | a relay declines (held=false) a block of a Range-unsupported object |
 | **`TestPeerSourceRejectsMalformedBlockIndex`** | **wire indices above `MaxBlockIndex` (2^63, 2^64-1, first window-overflowing index) are declined before cache lookup/size probe/origin I/O; nothing cached; legitimate control still relays (issue #52)** |
-| **`TestPeerStreamSourceRejectsMalformedBlockIndex`** | **same decline on the cut-through path: nothing streamed, sizer not called, zero origin requests; legitimate control still streams** |
+
+| `TestRangePrefetchOrderedAndBounded` | out-of-order loads produce ordered exact subranges; covering blocks cache, nothing beyond the request loads |
+| `TestRangePrefetchBackpressureAndDemandProgress` | queued results retain global byte/load reservations while an unrelated demand progresses |
+| `TestRangePrefetchHonorsGlobalLimits` | independent byte/load exhaustion and oversized blocks preserve demand and release all reservations |
+| `TestRangePrefetchFailureIsObservedInOrder` | an ahead failure preserves the valid preceding bytes and never caches failed data |
+| `TestRangePrefetchCancelAndJoin` | cancellation/write failure cannot return before all workers exit |
+| `TestRangePrefetchDisabledAndShortWrite` | window 1 fetches serially and short downstream writes are errors |
+| `TestRangePrefetchSharesDemandFlight` | an in-flight prefetched block and concurrent demand share one peer transfer |
+| `TestPrefetchOptions` | invalid limit values are rejected |
+| `TestWholeBlockRelayCommitsOnlyAfterValidation` | real partial parent responses commit no downstream byte before complete validation; short/failed parents fall back cleanly |
+| `TestWholeBlockRelayReportsCleanFailure` | an unrecoverable source failure yields a clean 500 without partial block/cache publication |
 
 ## 8. Limitations & TODO
 
 - **P2P tree wired**: a miss routes to the parent in the preorder tree; relay
   nodes fetch-on-behalf and cache, offloading the owner; the root fetches origin.
-  Loop-bounded by `X-DART-Hop`. **Cut-through relay is implemented**
-  (`PeerStreamSource` + `peer.StreamServer`), so hops pipeline rather than
-  store-and-forward. The **active-reader-set tree** is implemented too: with a
-  tracker configured the tree spans only the nodes reading the object (see
-  docs/tracker.md), falling back to all Ready members otherwise. **Hedging,
-  per-request timeouts, and per-peer circuit breaking** bound tail latency and
-  isolate sick peers (§3.8). Still missing: `splice`-level zero copy and full
-  epoch-skew convergence.
-- **Hedging covers `Get`, not `Stream`**: the cut-through relay path
-  (`relayFromParent`) is bounded by `peer.Client.Timeout` but does not yet race a
-  duplicate, because a hedged stream would need the two bodies reconciled.
+  Loop-bounded by `X-DART-Hop`. Nodes obtain and validate whole blocks before
+  relaying. Long client ranges overlap different blocks using bounded prefetch.
+  The active-reader-set tree spans readers when configured, otherwise Ready
+  members. Still missing: slot-based zero copy and full epoch-skew convergence.
 - **Range-unsupported origins are proxied, not cached** (§3.9): nothing about
   them is learned beyond the mark itself (no TTL, no re-probe until restart),
   and their traffic bypasses the P2P tree entirely.
-- **Readahead**: `Serve` fetches covering blocks sequentially; parallel
-  fan-out and prefetch of subsequent blocks are future work.
+- **Readahead scope**: prefetch covers only the current request. Adaptive windows,
+  cross-request fairness and reading beyond the requested range are not provided.
 - **Streaming vs buffering**: blocks are fetched whole into memory (bounded by
   block size) then written; fine for cache hits/`sendfile` later.
 - **Size cache lifetime**: endpoint probe results are cached for process life with no TTL —

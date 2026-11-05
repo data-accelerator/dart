@@ -26,7 +26,7 @@ internal/cluster/    membership, lifecycle state, weight, epoch, discovery
 internal/chunk/      object/chunk/block addressing, keying, range decomposition
 internal/store/      block cache: disk arena, owned/borrowed budgets, mem tier
 internal/fetch/      origin HTTP range fetch + singleflight coalescing
-internal/engine/     read-through orchestration, relay, cut-through, hedging
+internal/engine/     read-through orchestration, whole-block relay, bounded prefetch, hedging
 internal/peer/       node-to-node block transport + circuit breaking
 internal/tracker/    per-file active reader set the tree is built over
 internal/registry/   Registry v2 pull-through mirror + token auth

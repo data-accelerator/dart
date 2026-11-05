@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -39,7 +38,7 @@ func TestRelayUpstreamRefusalDoesNotBlamePeer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New relay: %v", err)
 	}
-	relaySrv := httptest.NewServer(&peer.StreamServer{NodeID: "R", Src: relayEngine.PeerStreamSource()})
+	relaySrv := httptest.NewServer(&peer.Server{NodeID: "R", Src: relayEngine.PeerSource()})
 	defer relaySrv.Close()
 	relayAddr := strings.TrimPrefix(relaySrv.URL, "http://")
 
@@ -53,8 +52,7 @@ func TestRelayUpstreamRefusalDoesNotBlamePeer(t *testing.T) {
 	req := peer.BlockRequest{Key: key, URL: origin.URL + "/blob?Signature=expired", Hop: 1}
 
 	for i := 0; i < 5; i++ {
-		var buf bytes.Buffer
-		_, held, err := c.Stream(context.Background(), relayAddr, req, &buf)
+		_, held, err := c.Get(context.Background(), relayAddr, req)
 		if held {
 			t.Fatalf("attempt %d: relay claimed to hold the block", i)
 		}
@@ -92,8 +90,7 @@ func TestRelayGenuineFailureStillBlamesPeer(t *testing.T) {
 
 	req := peer.BlockRequest{Key: store.BlockKey{Chunk: 1, Block: 0}}
 	for i := 0; i < 3; i++ {
-		var buf bytes.Buffer
-		_, _, _ = c.Stream(context.Background(), addr, req, &buf)
+		_, _, _ = c.Get(context.Background(), addr, req)
 	}
 	if got := brk.State(addr); got != peer.BreakerOpen {
 		t.Errorf("circuit = %v after 3 genuine 500s, want open", got)
@@ -117,7 +114,7 @@ func TestRelayRefusalPropagatesStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	srv := httptest.NewServer(&peer.StreamServer{NodeID: "R", Src: e.PeerStreamSource()})
+	srv := httptest.NewServer(&peer.Server{NodeID: "R", Src: e.PeerSource()})
 	defer srv.Close()
 
 	oid, _ := chunk.ObjectID(origin.URL + "/b")

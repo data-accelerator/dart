@@ -15,7 +15,7 @@ import (
 )
 
 func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
-	for _, mode := range []string{"stream", "get", "roster"} {
+	for _, mode := range []string{"get", "validated", "roster"} {
 		for _, afterCooldown := range []bool{false, true} {
 			name := mode + "/open"
 			if afterCooldown {
@@ -59,12 +59,12 @@ func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
 					req := BlockRequest{Key: store.BlockKey{Block: 1}}
 					var err error
 					switch mode {
-					case "get":
-						_, _, err = client.Get(ctx, addr, req)
+					case "validated":
+						_, _, err = client.GetValidated(ctx, addr, req, nil)
 					case "roster":
 						_, _, err = client.FetchRoster(ctx, addr, "", "")
 					default:
-						_, _, err = client.Stream(ctx, addr, req, io.Discard)
+						_, _, err = client.Get(ctx, addr, req)
 					}
 					oldDone <- err
 				}()
@@ -78,16 +78,16 @@ func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
 				}
 				wait(oldStarted)
 				invalid := errors.New("wrong geometry")
-				_, _, err := client.StreamValidated(ctx, addr, BlockRequest{}, io.Discard, func(context.Context, int64) error { return invalid })
+				_, _, err := client.GetValidated(ctx, addr, BlockRequest{}, func(context.Context, int64) error { return invalid })
 				if !errors.Is(err, invalid) || client.Breaker.State(addr) != BreakerOpen {
-					t.Fatalf("invalid stream = %v, state=%v; want a quarantine", err, client.Breaker.State(addr))
+					t.Fatalf("invalid block = %v, state=%v; want a quarantine", err, client.Breaker.State(addr))
 				}
 				wantState := BreakerOpen
 				probeDone := make(chan error, 1)
 				if afterCooldown {
 					clk.advance(2 * time.Minute)
 					go func() {
-						_, _, err := client.Stream(ctx, addr, BlockRequest{Key: store.BlockKey{Block: 2}}, io.Discard)
+						_, _, err := client.Get(ctx, addr, BlockRequest{Key: store.BlockKey{Block: 2}})
 						probeDone <- err
 					}()
 					wait(probeStarted)
@@ -102,7 +102,7 @@ func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
 				if got := client.Breaker.State(addr); got != wantState {
 					t.Fatalf("late %s success changed circuit to %v, want %v", mode, got, wantState)
 				}
-				_, _, err = client.Stream(ctx, addr, BlockRequest{Key: store.BlockKey{Block: 3}}, io.Discard)
+				_, _, err = client.Get(ctx, addr, BlockRequest{Key: store.BlockKey{Block: 3}})
 				if !errors.Is(err, ErrCircuitOpen) {
 					t.Fatalf("late completion freed the open/half-open gate: %v", err)
 				}
@@ -151,7 +151,7 @@ func TestClientLateFailureCannotUndoRecovery(t *testing.T) {
 	}
 	client.Breaker.RecordHardFailure(addr)
 	clk.advance(2 * time.Minute)
-	if _, _, err := client.Stream(ctx, addr, BlockRequest{}, io.Discard); err != nil {
+	if _, _, err := client.Get(ctx, addr, BlockRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if client.Breaker.State(addr) != BreakerClosed {
@@ -166,7 +166,7 @@ func TestClientLateFailureCannotUndoRecovery(t *testing.T) {
 	}
 }
 
-func TestStreamValidatedUsesRequestContext(t *testing.T) {
+func TestGetValidatedUsesRequestContext(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "abc")
 	}))
@@ -174,7 +174,7 @@ func TestStreamValidatedUsesRequestContext(t *testing.T) {
 	client := NewClient()
 	client.Timeout = time.Minute
 	called := false
-	n, held, err := client.StreamValidated(context.Background(), strings.TrimPrefix(srv.URL, "http://"), BlockRequest{}, io.Discard,
+	data, held, err := client.GetValidated(context.Background(), strings.TrimPrefix(srv.URL, "http://"), BlockRequest{},
 		func(ctx context.Context, n int64) error {
 			called = true
 			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > client.Timeout {
@@ -185,7 +185,7 @@ func TestStreamValidatedUsesRequestContext(t *testing.T) {
 			}
 			return nil
 		})
-	if err != nil || !held || n != 3 || !called {
-		t.Fatalf("validated stream = %d, %v, %v, called=%v", n, held, err, called)
+	if err != nil || !held || len(data) != 3 || !called {
+		t.Fatalf("validated block = %d, %v, %v, called=%v", len(data), held, err, called)
 	}
 }

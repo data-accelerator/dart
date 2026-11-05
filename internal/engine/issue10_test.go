@@ -159,7 +159,7 @@ func TestMissesDoNotFeedLatencyEstimator(t *testing.T) {
 
 	req := peer.BlockRequest{Key: blockKeyFor("http://x/y"), URL: "http://x/y", Hop: 1}
 	for i := 0; i < 16; i++ {
-		if _, held := e.fetchHedged(context.Background(), addr, "", req); held {
+		if _, held := e.fetchHedged(context.Background(), addr, "", req, 16); held {
 			t.Fatal("empty peer held the block?")
 		}
 	}
@@ -213,43 +213,20 @@ func TestReaderSetCacheFollowsGrantedLease(t *testing.T) {
 	t.Fatalf("node dropped from the reader set while still reading (readers=%v)", readers)
 }
 
-// TestStreamRelayParentErrorFallsBackToOrigin pins E7: with the parent's
-// circuit open, the streaming relay used to propagate a 500 ("circuit open")
-// with zero origin contact, while the buffered Get path routed around it. The
-// relay must skip an unhealthy parent and serve from origin.
-func TestStreamRelayParentErrorFallsBackToOrigin(t *testing.T) {
+// TestRelayParentErrorFallsBackToOrigin routes around an open parent circuit.
+func TestRelayParentErrorFallsBackToOrigin(t *testing.T) {
 	content := blob(32)
 	var originCnt int64
 	origin := countingOrigin(t, content, &originCnt)
-
-	psrv := httptest.NewServer(&peer.StreamServer{NodeID: "P", Src: func(_ context.Context, _ peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
-		sizer(16)
-		n, _ := w.Write(content[:16])
-		return int64(n), true, nil
-	}})
-	defer psrv.Close()
-	parentAddr := strings.TrimPrefix(psrv.URL, "http://")
-
+	parent := httptest.NewServer(&peer.Server{Src: func(context.Context, peer.BlockRequest) ([]byte, bool, error) { return content[:16], true, nil }})
+	defer parent.Close()
 	cli := peer.NewClient()
 	cli.Breaker = peer.NewBreaker(peer.BreakerOptions{})
-	for i := 0; i < 5; i++ { // DefaultFailureThreshold
-		cli.Breaker.RecordHardFailure(parentAddr)
-	}
-
-	e, _ := tailEngine(t, cli, psrv, origin.URL)
-	key := blockKeyFor(origin.URL)
-
-	var w bytes.Buffer
-	n, held, err := e.PeerStreamSource()(context.Background(),
-		peer.BlockRequest{Key: key, URL: origin.URL, Hop: 1}, &w, func(int64) {})
-	if err != nil || !held {
-		t.Fatalf("relay with an open-circuit parent: n=%d held=%v err=%v, want origin fallback", n, held, err)
-	}
-	if atomic.LoadInt64(&originCnt) == 0 {
-		t.Fatal("origin was never contacted; the open circuit must be skipped, not propagated")
-	}
-	if !bytes.Equal(w.Bytes(), content[:16]) {
-		t.Fatalf("served %d wrong bytes", w.Len())
+	cli.Breaker.RecordHardFailure(strings.TrimPrefix(parent.URL, "http://"))
+	e, _ := tailEngine(t, cli, parent, origin.URL)
+	data, held, err := e.PeerSource()(context.Background(), peer.BlockRequest{Key: blockKeyFor(origin.URL), URL: origin.URL, Hop: 1})
+	if err != nil || !held || !bytes.Equal(data, content[:16]) || atomic.LoadInt64(&originCnt) == 0 {
+		t.Fatalf("fallback = %x %v %v; origin calls %d", data, held, err, originCnt)
 	}
 }
 

@@ -71,6 +71,20 @@ type BlockRequest struct {
 // node cannot provide it; err is for unexpected failures only.
 type Source func(ctx context.Context, req BlockRequest) ([]byte, bool, error)
 
+// UpstreamRefusedError reports an origin credential refusal without blaming the relay.
+type UpstreamRefusedError interface {
+	error
+	UpstreamStatus() int
+}
+
+func upstreamStatusOf(err error) int {
+	var refusal UpstreamRefusedError
+	if errors.As(err, &refusal) {
+		return refusal.UpstreamStatus()
+	}
+	return 0
+}
+
 // StoreSource adapts a store.Store into a transport-only Source (it serves only
 // locally-held blocks and ignores the relay URL).
 func StoreSource(s store.Store) Source {
@@ -335,6 +349,13 @@ func (c *Client) record(addr string, permit breakerPermit, o outcome) {
 // Get fetches a block from the peer at addr (host:port) per req. held is false
 // if the peer returned 404 (cannot provide the block).
 func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data []byte, held bool, err error) {
+	return c.GetValidated(ctx, addr, req, nil)
+}
+
+// GetValidated obtains a complete block and validates its length before recording
+// peer success. A validation error opens the current-generation circuit and
+// returns no bytes. The callback runs inline with the bounded request context.
+func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
 	permit, err := c.allow(addr)
 	if err != nil {
 		return nil, false, err
@@ -379,6 +400,12 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 				c.record(addr, permit, outcomeSoftFail)
 			}
 			return nil, false, fmt.Errorf("peer %s: read body: %w", addr, err)
+		}
+		if validate != nil {
+			if err := validate(ctx, int64(len(body))); err != nil {
+				c.record(addr, permit, outcomeHardFail)
+				return nil, false, fmt.Errorf("peer %s: invalid block: %w", addr, err)
+			}
 		}
 		c.record(addr, permit, outcomeAnswered)
 		return body, true, nil

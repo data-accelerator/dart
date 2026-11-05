@@ -86,10 +86,10 @@ func TestConcurrentSubBlockPeerMissesSharePublication(t *testing.T) {
 				t.Fatal(err)
 			}
 			var peerCalls atomic.Int64
-			source := peer.StoreStreamSource(root)
-			parent := httptest.NewServer(&peer.StreamServer{Src: func(ctx context.Context, req peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+			source := peer.StoreSource(root)
+			parent := httptest.NewServer(&peer.Server{Src: func(ctx context.Context, req peer.BlockRequest) ([]byte, bool, error) {
 				peerCalls.Add(1)
-				return source(ctx, req, w, sizer)
+				return source(ctx, req)
 			}})
 			defer parent.Close()
 			ranked := hashring.Rank(key.Chunk, []hashring.Node{{ID: "A", Weight: 1}, {ID: "B", Weight: 1}})
@@ -355,11 +355,9 @@ func TestBlockLoadRechecksCacheAfterAdmission(t *testing.T) {
 	content := blob(16)
 	origin := countingOrigin(t, content, nil)
 	var calls atomic.Int64
-	parent := httptest.NewServer(&peer.StreamServer{Src: func(_ context.Context, _ peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+	parent := httptest.NewServer(&peer.Server{Src: func(_ context.Context, _ peer.BlockRequest) ([]byte, bool, error) {
 		calls.Add(1)
-		sizer(int64(len(content)))
-		n, err := w.Write(content)
-		return int64(n), true, err
+		return append([]byte(nil), content...), true, nil
 	}})
 	defer parent.Close()
 	e, _ := tailEngine(t, peer.NewClient(), parent, origin.URL)
@@ -417,20 +415,18 @@ func TestCoalescedPeerRefusalRetriesCallerCredential(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	var parentCalls atomic.Int64
-	parent := httptest.NewServer(&peer.StreamServer{Src: func(ctx context.Context, req peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
+	parent := httptest.NewServer(&peer.Server{Src: func(ctx context.Context, req peer.BlockRequest) ([]byte, bool, error) {
 		parentCalls.Add(1)
 		if strings.Contains(req.URL, "sig=expired") {
 			close(started)
 			select {
 			case <-release:
 			case <-ctx.Done():
-				return 0, false, ctx.Err()
+				return nil, false, ctx.Err()
 			}
-			return 0, false, asRelayError(&fetch.StatusError{Code: http.StatusForbidden})
+			return nil, false, asRelayError(&fetch.StatusError{Code: http.StatusForbidden})
 		}
-		sizer(int64(len(content)))
-		n, err := w.Write(content)
-		return int64(n), true, err
+		return append([]byte(nil), content...), true, nil
 	}})
 	defer parent.Close()
 	defer unblock()
@@ -578,10 +574,8 @@ func TestBlockLoadAlreadyCanceled(t *testing.T) {
 func TestCoalescedBlockValidatesBeforeSharingOriginFallback(t *testing.T) {
 	content := blob(16)
 	origin := countingOrigin(t, content, nil)
-	parent := httptest.NewServer(&peer.StreamServer{Src: func(_ context.Context, _ peer.BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
-		sizer(8)
-		n, err := w.Write(content[:8])
-		return int64(n), true, err
+	parent := httptest.NewServer(&peer.Server{Src: func(_ context.Context, _ peer.BlockRequest) ([]byte, bool, error) {
+		return content[:8], true, nil
 	}})
 	defer parent.Close()
 	e, _ := tailEngine(t, peer.NewClient(), parent, origin.URL)

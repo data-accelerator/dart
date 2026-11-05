@@ -365,7 +365,7 @@ go test ./internal/fetch/ -cover -count=1
 
 ## 8. Limitations & TODO
 
-- **Readahead**: prefetching subsequent blocks belongs to the serve/engine layer
+- **Readahead**: bounded prefetch of covering blocks belongs to the serve/engine layer
   (it knows the access pattern); not implemented here.
 - **miss → fetch → store wiring**: the orchestration that combines
   `chunk`+`hashring`+`store`+peer+this package is a future `engine`/serve layer.

@@ -10,9 +10,9 @@
 // With Cluster, Peer and SelfID configured, a miss is routed to this node's
 // parent in the preorder distribution tree rather than straight to origin; the
 // parent relays (fetching from its own parent or origin as needed), so only the
-// tree root touches origin. Relays stream cut-through, so a multi-hop chain
-// pipelines instead of storing-and-forwarding at every hop. Leaving those
-// options unset gives single-node behavior, where every miss goes to origin.
+// tree root touches origin. Relays validate whole blocks before sending; bounded
+// client-range prefetch pipelines different blocks. Leaving those options unset
+// gives single-node behavior, where every miss goes to origin.
 //
 // A block is validated against the object geometry before it is cached: the
 // block cache is write-once per key, so admitting wrongly-sized bytes would be a
@@ -79,6 +79,17 @@ type Options struct {
 	// uniformly slow cluster from doubling its own load.
 	HedgeRatio float64
 
+	// PrefetchWindow bounds covering blocks in flight per Serve, including demand.
+	// Zero selects 4; 1 disables prefetch. Values above 64 are rejected.
+	PrefetchWindow int
+	// PrefetchBytes bounds node-wide reserved speculative payload bytes,
+	// including completed results awaiting consumption. Zero selects 64 MiB.
+	// Demand loads, transient load copies and store memory are separate.
+	PrefetchBytes int64
+	// PrefetchLoads bounds outstanding speculative loads/results node-wide.
+	// Zero selects 16. Exhaustion falls back to demand without waiting for a slot.
+	PrefetchLoads int
+
 	// Metrics, if non-nil, instruments block sources, bytes, and latencies.
 	// Build it with NewMetrics(registry); nil disables instrumentation.
 	Metrics *Metrics
@@ -120,9 +131,11 @@ type Engine struct {
 	rsMu          sync.Mutex
 	rs            map[string]*readerSet
 
-	mu    sync.Mutex
-	sizes map[string]sizeMeta // origin endpoint -> probe result
-	loads blockLoads
+	mu             sync.Mutex
+	sizes          map[string]sizeMeta // origin endpoint -> probe result
+	loads          blockLoads
+	prefetchWindow int
+	prefetch       prefetchBudget
 
 	// opener streams verbatim origin responses for the passthrough fallback
 	// (Range-ignoring origins); nil when the fetcher cannot stream.
@@ -145,6 +158,18 @@ func New(opt Options) (*Engine, error) {
 	if opt.Store == nil || opt.Fetcher == nil {
 		return nil, errors.New("engine: Store and Fetcher are required")
 	}
+	if opt.PrefetchWindow < 0 || opt.PrefetchWindow > 64 || opt.PrefetchBytes < 0 || opt.PrefetchLoads < 0 {
+		return nil, errors.New("engine: invalid prefetch limits")
+	}
+	if opt.PrefetchWindow == 0 {
+		opt.PrefetchWindow = 4
+	}
+	if opt.PrefetchBytes == 0 {
+		opt.PrefetchBytes = 64 * chunk.MiB
+	}
+	if opt.PrefetchLoads == 0 {
+		opt.PrefetchLoads = 16
+	}
 	ns := opt.Namespace
 	if ns == "" {
 		ns = "dart"
@@ -155,16 +180,18 @@ func New(opt Options) (*Engine, error) {
 		return nil, errors.New("engine: Namespace must not contain the chunk-key separator (0x1F)")
 	}
 	e := &Engine{
-		cfg:     opt.Chunk,
-		store:   opt.Store,
-		fetcher: opt.Fetcher,
-		ns:      ns,
-		cluster: opt.Cluster,
-		peer:    opt.Peer,
-		selfID:  opt.SelfID,
-		fanout:  opt.Fanout,
-		mx:      opt.Metrics,
-		sizes:   make(map[string]sizeMeta),
+		cfg:            opt.Chunk,
+		store:          opt.Store,
+		fetcher:        opt.Fetcher,
+		ns:             ns,
+		cluster:        opt.Cluster,
+		peer:           opt.Peer,
+		selfID:         opt.SelfID,
+		fanout:         opt.Fanout,
+		mx:             opt.Metrics,
+		sizes:          make(map[string]sizeMeta),
+		prefetchWindow: opt.PrefetchWindow,
+		prefetch:       prefetchBudget{maxBytes: opt.PrefetchBytes, maxLoads: opt.PrefetchLoads},
 
 		replicas:      opt.Replicas,
 		hedgeEnabled:  opt.Hedge,
@@ -273,23 +300,10 @@ func (e *Engine) Serve(ctx context.Context, w io.Writer, url string, start, end 
 	if end >= size {
 		end = size - 1
 	}
-	oid, _ := chunk.ObjectID(url)
-	for _, seg := range e.cfg.Segments(start, end) {
-		data, err := e.block(ctx, url, oid, size, seg.BlockIndex, 0)
-		if err != nil {
-			return err
-		}
-		lo := seg.From - e.cfg.BlockStart(seg.BlockIndex)
-		hi := seg.To - e.cfg.BlockStart(seg.BlockIndex) + 1
-		if hi > int64(len(data)) {
-			return fmt.Errorf("engine: short block %d: have %d bytes, need %d", seg.BlockIndex, len(data), hi)
-		}
-		if _, err := w.Write(data[lo:hi]); err != nil {
-			return err
-		}
-		e.mx.recordClientBytes(int(hi - lo))
+	if end < start {
+		return nil
 	}
-	return nil
+	return e.serveBlocks(ctx, w, url, size, start, end)
 }
 
 // maxHop bounds relay recursion depth (loop safety under membership skew).
@@ -384,7 +398,7 @@ func (e *Engine) loadBlock(ctx context.Context, url, objectID string, size, bloc
 	// mismatch is refused rather than stored. See docs/engine.md.
 	want := e.blockLen(size, blockIndex)
 	if e.p2p {
-		if data, ok := e.fromPeer(ctx, url, objectID, ck, key, hop); ok {
+		if data, ok := e.fromPeer(ctx, url, objectID, ck, key, hop, want); ok {
 			if int64(len(data)) == want {
 				e.putBlock(key, data, ck)
 				return blockRead{data: data, source: blockFromPeer, wireBytes: len(data)}, nil
@@ -440,7 +454,7 @@ func (e *Engine) blockLen(size, blockIndex int64) int64 {
 // relays (fetching from its own parent/origin as needed), so it usually holds
 // the block. If this node is the tree root it returns ok=false and the caller
 // fetches origin. hop guards against loops under membership skew.
-func (e *Engine) fromPeer(ctx context.Context, url, objectID string, chunkKey uint64, key store.BlockKey, hop int) ([]byte, bool) {
+func (e *Engine) fromPeer(ctx context.Context, url, objectID string, chunkKey uint64, key store.BlockKey, hop int, want int64) ([]byte, bool) {
 	if hop >= maxHop {
 		return nil, false
 	}
@@ -456,7 +470,7 @@ func (e *Engine) fromPeer(ctx context.Context, url, objectID string, chunkKey ui
 	if primary == "" {
 		return nil, false // we are the tree root: fetch origin
 	}
-	return e.fetchHedged(ctx, primary, backup, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1})
+	return e.fetchHedged(ctx, primary, backup, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1}, want)
 }
 
 // putBlock stores a block, classifying it as owned or borrowed so the two
@@ -531,8 +545,8 @@ func (e *Engine) PeerSource() peer.Source {
 			return nil, false, asRelayError(err)
 		}
 		if e.RangeUnsupported(req.URL) {
-			// Same decline as the streaming source: blocks cannot be fetched
-			// piecemeal from this origin, so decline rather than pulling the
+			// Blocks cannot be fetched piecemeal from this origin, so decline
+			// rather than pulling the
 			// whole object per block (and caching fragments of it).
 			e.mx.recordRelay(false)
 			return nil, false, nil

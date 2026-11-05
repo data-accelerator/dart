@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -170,7 +171,7 @@ type peerResult struct {
 //
 // The first answer with held=true wins and the loser is cancelled. If neither
 // contender can serve the block, ok is false and the caller falls back to origin.
-func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req peer.BlockRequest) ([]byte, bool) {
+func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req peer.BlockRequest, want int64) ([]byte, bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel() // cancels the loser (and any straggler) on return
 
@@ -178,7 +179,12 @@ func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req pe
 	launch := func(addr string) {
 		go func() {
 			start := time.Now()
-			data, held, err := e.peer.Get(ctx, addr, req)
+			data, held, err := e.peer.GetValidated(ctx, addr, req, func(_ context.Context, n int64) error {
+				if n != want {
+					return fmt.Errorf("engine: peer block %d has %d bytes, want %d", req.Key.Block, n, want)
+				}
+				return nil
+			})
 			if err == nil && held {
 				// Only a real fetch informs the latency estimate: a fast 404
 				// miss would otherwise collapse the p99 to the floor and arm

@@ -13,8 +13,8 @@ data: container image layers, model weights, datasets, package archives.
                             │  one fetch, not one per node
                      ┌──────┴──────┐
                      │   node A    │        each node caches what it pulls and
-                     └──┬───────┬──┘        relays to its children while still
-                        │       │           receiving (cut-through)
+                     └──┬───────┬──┘        relays validated whole blocks;
+                        │       │           long reads prefetch bounded windows
                  ┌──────▼──┐ ┌──▼──────┐
                  │ node B  │ │ node C  │
                  └──┬───┬──┘ └─────────┘
@@ -60,9 +60,10 @@ Three granularities, because one size cannot serve all three jobs:
 - **The distribution tree** is that same HRW ranking read as a pre-order traversal
   of a k-ary tree. Parent and child are computed arithmetically from the ranking —
   no tree is built or agreed upon, and every node derives the same one.
-- **Cut-through relay**: an intermediate node forwards bytes downstream while it is
-  still receiving them, and caches them on the way past, so a deep chain pipelines
-  instead of storing-and-forwarding at each hop.
+- **Whole-block relay and bounded prefetch**: each node validates a complete block
+  before sending it. Long client ranges pipeline up to four covering blocks,
+  delivering them in order. Node-wide speculative byte/load budgets bound queued
+  results; `-prefetch-window=1` disables prefetch. See [ADR-0006](docs/adr/0006-pipeline-whole-block-transfers.md).
 - **Two cache budgets, physically separated**: blocks this node *owns* (its share of
   the keyspace) cannot be evicted by blocks it merely *borrowed* while relaying.
   Admission to the borrowed budget goes through a TinyLFU filter so a one-shot read
@@ -260,7 +261,7 @@ Worth reading if you plan to touch the internals:
 
 Implemented: block cache (disk arena, in-memory hot set, hybrid), owned/borrowed
 budgets with TinyLFU admission, weighted HRW placement, pre-order distribution tree
-with multi-hop relay, cut-through streaming, active-reader-set tree, fetch
+with multi-hop whole-block relay, bounded prefetch, active-reader-set tree, fetch
 coalescing, hedging, per-peer circuit breaking, Prometheus metrics and an admin
 plane, registry mirror with private-registry authentication, presigned
 object-storage upstreams.

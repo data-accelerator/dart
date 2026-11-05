@@ -48,7 +48,7 @@ func TestHalfOpenProbesWaitForSiblingOutcome(t *testing.T) {
 			invalid := errors.New("wrong geometry")
 			done := make(chan error, 1)
 			go func() {
-				_, _, err := client.StreamValidated(ctx, addr, BlockRequest{Key: store.BlockKey{Block: 1}}, io.Discard,
+				_, _, err := client.GetValidated(ctx, addr, BlockRequest{Key: store.BlockKey{Block: 1}},
 					func(_ context.Context, n int64) error {
 						if n != 3 {
 							return invalid
@@ -118,7 +118,7 @@ func TestHalfOpenRosterSuccessCannotConsumeDataProbe(t *testing.T) {
 	invalid := errors.New("wrong geometry")
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := client.StreamValidated(ctx, addr, BlockRequest{}, io.Discard, func(context.Context, int64) error { return invalid })
+		_, _, err := client.GetValidated(ctx, addr, BlockRequest{}, func(context.Context, int64) error { return invalid })
 		done <- err
 	}()
 	select {

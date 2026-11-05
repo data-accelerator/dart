@@ -7,6 +7,12 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+- Replace cut-through relaying with validated whole-block peer responses, and add
+  bounded ordered prefetch for blocks covering long client ranges (#83, ADR-0006).
+  Default window: 4 blocks; node speculative budgets: 64 MiB and 16 loads/results.
+  Use `-prefetch-window=1` for serial reads. Cold multi-hop startup now waits for
+  whole-block transfers; paths, addressing and placement remain unchanged.
+
 ### Fixes
 
 - Coalesce buffered P2P block misses through validation and cache publication,
