@@ -80,7 +80,7 @@ type Options struct {
 	HedgeRatio float64
 
 	// PrefetchWindow bounds covering blocks in flight per Serve, including demand.
-	// Zero selects 4; 1 disables prefetch. Values above 64 are rejected.
+	// Zero selects 2; 1 disables prefetch. Values above 64 are rejected.
 	PrefetchWindow int
 	// PrefetchBytes bounds node-wide reserved speculative payload bytes,
 	// including completed results awaiting consumption. Zero selects 64 MiB.
@@ -162,7 +162,7 @@ func New(opt Options) (*Engine, error) {
 		return nil, errors.New("engine: invalid prefetch limits")
 	}
 	if opt.PrefetchWindow == 0 {
-		opt.PrefetchWindow = 4
+		opt.PrefetchWindow = 2
 	}
 	if opt.PrefetchBytes == 0 {
 		opt.PrefetchBytes = 64 * chunk.MiB

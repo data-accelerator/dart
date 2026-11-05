@@ -141,7 +141,7 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if cfg.listen != ":8080" || cfg.prefix != "dart" || cfg.blockSize == 0 {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
-	if cfg.prefetchWindow != 4 || cfg.prefetchBytes != 64<<20 || cfg.prefetchLoads != 16 {
+	if cfg.prefetchWindow != 2 || cfg.prefetchBytes != 64<<20 || cfg.prefetchLoads != 16 {
 		t.Fatalf("wrong prefetch defaults: %+v", cfg)
 	}
 	custom, err := parseFlags([]string{"-prefetch-window", "2", "-prefetch-bytes", "8MiB", "-prefetch-loads", "3"}, io.Discard, nil)

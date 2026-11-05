@@ -417,3 +417,57 @@ func TestRangePrefetchSharesDemandFlight(t *testing.T) {
 		t.Fatalf("flight duplicated: calls %d", calls.Load())
 	}
 }
+
+type notifyingPrefetchStore struct {
+	store.Store
+	published chan store.BlockKey
+}
+
+func (s *notifyingPrefetchStore) Put(key store.BlockKey, b []byte) error {
+	err := s.Store.Put(key, b)
+	if err == nil {
+		s.published <- key
+	}
+	return err
+}
+
+func TestRangePrefetchKeepsPublishedCacheOnCancel(t *testing.T) {
+	content := blob(48)
+	ctx, cancel := prefetchContext(t)
+	defer cancel()
+	e := prefetchEngine(t, content, 3, blockFetchFunc(func(ctx context.Context, _ string, start, end int64) (fetch.Range, error) {
+		if start == 32 {
+			<-ctx.Done()
+			return fetch.Range{}, ctx.Err()
+		}
+		return prefetchResult(content, start, end), nil
+	}))
+	published := make(chan store.BlockKey, 3)
+	e.store = &notifyingPrefetchStore{Store: e.store, published: published}
+	err := e.Serve(ctx, rangeWriteFunc(func(b []byte) (int, error) {
+		for {
+			select {
+			case key := <-published:
+				if key.Block == 1 {
+					cancel()
+					return 0, ctx.Err()
+				}
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}
+	}), prefetchURL, 0, 47)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	data, ok, err := e.store.Get(prefetchKey(prefetchURL, 1))
+	if err != nil || !ok || !bytes.Equal(data, content[16:32]) {
+		t.Fatalf("successful prefetch lost on cancel: %x %v %v", data, ok, err)
+	}
+	if e.store.Has(prefetchKey(prefetchURL, 2)) {
+		t.Fatal("canceled incomplete block cached")
+	}
+	if n, b := budgetUsage(e); n != 0 || b != 0 {
+		t.Fatalf("leaked budget %d/%d", n, b)
+	}
+}

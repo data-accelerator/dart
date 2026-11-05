@@ -67,7 +67,7 @@ type Options struct {
     Hedge      bool           // hedge a slow peer fetch (default off)
     HedgeRatio float64        // max share of fetches allowed to hedge (default 0.05)
 
-    PrefetchWindow int   // default 4, 1 disables; allowed 1..64 (zero = default)
+    PrefetchWindow int   // default 2, 1 disables; allowed 1..64 (zero = default)
     PrefetchBytes  int64 // default 64 MiB reserved speculative payload
     PrefetchLoads  int   // default 16 outstanding speculative loads/results
 
@@ -423,7 +423,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.2%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.0%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -523,6 +523,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestRangePrefetchCancelAndJoin` | cancellation/write failure cannot return before all workers exit |
 | `TestRangePrefetchDisabledAndShortWrite` | window 1 fetches serially and short downstream writes are errors |
 | `TestRangePrefetchSharesDemandFlight` | an in-flight prefetched block and concurrent demand share one peer transfer |
+| `TestRangePrefetchKeepsPublishedCacheOnCancel` | completed valid prefetched blocks survive client cancellation; incomplete blocks do not enter cache |
 | `TestPrefetchOptions` | invalid limit values are rejected |
 | `TestWholeBlockRelayCommitsOnlyAfterValidation` | real partial parent responses commit no downstream byte before complete validation; short/failed parents fall back cleanly |
 | `TestWholeBlockRelayReportsCleanFailure` | an unrecoverable source failure yields a clean 500 without partial block/cache publication |

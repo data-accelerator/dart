@@ -1,6 +1,6 @@
 # ADR-0006: Pipeline whole-block transfers with bounded Range prefetch
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-05
 - Supersedes: ADR-0005
 - Binds: docs/engine.md §3.3 / §3.6 / §5 / Stability Contract; docs/peer.md §3.4 / Stability Contract; docs/node.md handler lifetime; docs/dart.md prefetch flags; docs/observability.md block-source and wire-byte accounting
@@ -36,7 +36,7 @@ Source/latency observations include the caller's wait/retry; wire bytes count on
 Prefetch workers belong to their Serve call and cancel/join before its exit,
 preserving ADR-0003. Successful earlier cache publications survive cancellation.
 
-The default request window is four blocks, including demand. Speculative payloads
+The default request window is two blocks, including demand. Speculative payloads
 reserve node capacity through consumption/discard, including completed results;
 default limits are 64 MiB and sixteen outstanding loads/results. Foreground reads
 bypass speculative admission so an exhausted budget cannot stall demand. These

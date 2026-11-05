@@ -61,7 +61,7 @@ Three granularities, because one size cannot serve all three jobs:
   of a k-ary tree. Parent and child are computed arithmetically from the ranking —
   no tree is built or agreed upon, and every node derives the same one.
 - **Whole-block relay and bounded prefetch**: each node validates a complete block
-  before sending it. Long client ranges pipeline up to four covering blocks,
+  before sending it. Long client ranges pipeline up to two covering blocks,
   delivering them in order. Node-wide speculative byte/load budgets bound queued
   results; `-prefetch-window=1` disables prefetch. See [ADR-0006](docs/adr/0006-pipeline-whole-block-transfers.md).
 - **Two cache budgets, physically separated**: blocks this node *owns* (its share of

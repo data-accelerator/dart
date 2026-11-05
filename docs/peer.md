@@ -347,6 +347,10 @@ data-probe failure.
 - The wire path (`/peer/v1/block/<hex>/<dec>`) is part of the peer protocol.
   Changing it is a peer-protocol version bump.
 - Peer-plane traffic is plaintext by design; encryption is a CNI concern.
+- ADR-0006 requires full validated engine blocks before peer success is committed.
+  Server responses use Content-Length; clients also accept older chunked peers.
+  Whole-block forwarding preserves paths, keys and epoch framing. The removed
+  streaming APIs are internal and have no compatibility shim.
 
 ## 7. Testing
 

@@ -451,7 +451,7 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "share of the cache reserved for owned blocks (0<f<1)")
 	sizeVar(fs, &cfg.memSize, "mem-size", 256*chunk.MiB, "in-memory hot-set size; below one block disables the memory tier")
 	fs.BoolVar(&cfg.hedge, "hedge", true, "hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99")
-	fs.IntVar(&cfg.prefetchWindow, "prefetch-window", 4, "covering blocks in flight per client Range; 1 disables prefetch (max 64)")
+	fs.IntVar(&cfg.prefetchWindow, "prefetch-window", 2, "covering blocks in flight per client Range; 1 disables prefetch (max 64)")
 	sizeVar(fs, &cfg.prefetchBytes, "prefetch-bytes", 64*chunk.MiB, "node-wide speculative payload budget, including queued results")
 	fs.IntVar(&cfg.prefetchLoads, "prefetch-loads", 16, "node-wide outstanding speculative loads/results")
 	fs.Float64Var(&cfg.hedgeRatio, "hedge-ratio", 0.05, "max share of peer fetches allowed to hedge")

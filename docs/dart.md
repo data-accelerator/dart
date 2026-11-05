@@ -36,7 +36,7 @@ dart [flags]
 | `-cache-size` | `1 GiB` | block cache capacity; accepts a unit suffix (see below) |
 | `-chunk-size` | `256 MiB` | chunk size (placement/tree unit) |
 | `-block-size` | `4 MiB` | block size (transfer/cache unit) |
-| `-prefetch-window` | `4` | covering blocks in flight per client range, including demand; 1 disables, maximum 64 |
+| `-prefetch-window` | `2` | covering blocks in flight per client range, including demand; 1 disables, maximum 64 |
 | `-prefetch-bytes` | `64 MiB` | node-wide reserved speculative payload, including completed queued results |
 | `-prefetch-loads` | `16` | node-wide outstanding speculative loads/results; exhaustion preserves demand progress |
 | `-namespace` | `dart` | chunk-key namespace |
