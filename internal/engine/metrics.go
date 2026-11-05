@@ -99,6 +99,24 @@ func (m *Metrics) recordCacheHit() {
 	m.cacheHits.Inc()
 }
 
+// Record one completed buffered read, independently of which caller executed
+// the load. The caller's duration includes waiting, retries and publication;
+// actual wire bytes belong only to the executing load, not its joined readers.
+func (m *Metrics) recordBlockRead(r blockRead, shared bool, d time.Duration) {
+	n := r.wireBytes
+	if shared {
+		n = 0
+	}
+	switch r.source {
+	case blockFromPeer:
+		m.recordPeerHit(n, d)
+	case blockFromOrigin:
+		m.recordOrigin(n, d, shared)
+	default:
+		m.recordCacheHit()
+	}
+}
+
 func (m *Metrics) recordPeerHit(n int, d time.Duration) {
 	if m == nil {
 		return

@@ -105,6 +105,35 @@ byte; `start` beyond the object returns `ErrRangeNotSatisfiable`. Each covering
 block is served from cache or fetched+stored; only the requested sub-bytes of
 each block are written, in order.
 
+**Buffered miss coalescing (P2P enabled).** Concurrent misses for the same
+block and relay depth share one load through geometry validation and cache
+publication. Disjoint subranges do not launch independent peer downloads of
+that block. A new leader rechecks cache after admission, closing the window
+between an earlier miss and another load's completed insertion. Different
+blocks and relay depths remain independent; depth is retained so membership
+skew cannot turn a forwarding loop into a wait cycle before the hop bound.
+
+The leader runs synchronously in its serving caller, retaining the existing
+peer/origin timeouts. A waiter can cancel independently. If the leader is
+canceled, a live waiter may take over with its own context; a failed URL or
+credential is not reused against a different caller's URL. Completed failures
+are not retained. Successful immutable bytes can be shared across URL aliases,
+including when cache admission declines them. Each buffered caller receives
+owned bytes; a joined load adds O(block size) copying per caller, plus one
+snapshot per shared flight. Coordination holds a mutex only for map access,
+not store or network I/O. Metadata probes remain endpoint-scoped independently.
+Origin results are detached from the origin singleflight's read-only buffer
+before cache publication or return, including across separate relay depths.
+
+Only the executing load records wire bytes. Each successful buffered miss
+records one latency from its first admission attempt through waiting, retries
+and publication, even if a waiter takes over as leader. Joined reads use the
+same block source without adding another transfer. This
+coalescing covers buffered `Serve`/`PeerSource` block loads and their origin
+fallback, not the cut-through relay body in `PeerStreamSource`. The lifecycle
+and ownership decision is recorded in
+[ADR-0005](./adr/0005-coalesce-caller-owned-block-loads.md).
+
 **Block-length validation.** A block's byte length is fixed by the object
 geometry (a full `BlockSize`, or a shorter final block). Before a fetched block
 is cached, its length is compared against that expectation, on **both** the
@@ -364,8 +393,13 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 5. Concurrency & Call Permissions
 
 - `Engine` is safe for concurrent use: the size cache is mutex-guarded, the
-  store is concurrency-safe, and the `Coalescing` fetcher dedups concurrent
-  block misses. Verified with `-race` under overlapping concurrent `Serve`.
+  store is concurrency-safe, and buffered P2P misses are coordinated by
+  block/depth through cache publication. The `Coalescing` fetcher independently
+  deduplicates origin ranges. Verified with `-race` under overlapping `Serve`.
+- Shared buffered loads keep store access in the leader caller's lifetime;
+  they start no background store-writing task. Returned block buffers are
+  caller-owned, including coalesced callers. Waiters do not keep a goroutine
+  after returning on cancellation (ADR-0003 and ADR-0005).
 - `Handler` is safe for concurrent use if `Resolve`/`E` are not mutated after
   construction.
 
@@ -374,11 +408,13 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 - The block key uses `chunk.ChunkKey` (part of the wire protocol via placement),
   but nothing else here is on the wire. HTTP Range/Content-Range is the external
   client contract.
+- Buffered coalescing preserves geometry, key construction and the wire
+  protocol; caller ownership and cancellation follow §3.3 and ADR-0005.
 
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **88.4%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **90.1%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -396,6 +432,17 @@ go test ./internal/engine/ -cover -count=1
 | Test | Property guarded |
 |---|---|
 | `TestServeFullAndRange` | full and sub-range serve return exact bytes |
+| `TestConcurrentSubBlockPeerMissesSharePublication` | four 1 MiB subranges share one 4 MiB peer transfer through blocked cache publication, including declined admission; bytes and per-read/wire metrics remain correct |
+| `TestBlockLoadsCancellation` | a waiter cancels independently and a live waiter takes over after leader cancellation |
+| `TestBlockLoadsRetryFailuresWithOwnURL` | failures do not poison different credentials/endpoints and completed failures are not retained |
+| `TestBlockLoadsSeparateKeysAndRelayDepth` | distinct blocks remain independent and a higher-hop request cannot join a shallower flight |
+| `TestBlockLoadsDetachLeaderBytes` | caller-owned leader bytes do not alias the waiters' immutable snapshot |
+| `TestBlockLoadRechecksCacheAfterAdmission` | a caller with an older miss sees another load's publication before doing new I/O |
+| `TestBlockLoadPanicReleasesAdmission` | an unwinding source cannot pin the flight entry |
+| `TestCoalescedPeerRefusalRetriesCallerCredential` | a renewed credential survives an expired leader's peer/origin refusal without quarantining the parent |
+| `TestMixedDepthOriginFlightsReturnOwnedBytes` | separate relay-depth flights can share origin I/O but never share caller-owned backing arrays; wire bytes still count once |
+| `TestBlockLoadAlreadyCanceled` | an already-canceled caller creates no new flight |
+| `TestCoalescedBlockValidatesBeforeSharingOriginFallback` | short peer data is rejected; waiters share only the validated origin fallback and wire bytes count once |
 | `TestServeAcrossBlocksAndChunks` | a range crossing block/chunk boundaries is assembled correctly |
 | `TestServeEndClampAndBadStart` | end clamped to size; start beyond size errors |
 | `TestSize` | object size probed correctly |
