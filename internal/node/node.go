@@ -55,6 +55,9 @@ type config struct {
 	cacheSize        int64
 	chunkSize        int64
 	blockSize        int64
+	prefetchWindow   int
+	prefetchBytes    int64
+	prefetchLoads    int
 	namespace        string
 	selfID           string
 	peerListen       string
@@ -448,6 +451,9 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "share of the cache reserved for owned blocks (0<f<1)")
 	sizeVar(fs, &cfg.memSize, "mem-size", 256*chunk.MiB, "in-memory hot-set size; below one block disables the memory tier")
 	fs.BoolVar(&cfg.hedge, "hedge", true, "hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99")
+	fs.IntVar(&cfg.prefetchWindow, "prefetch-window", 2, "covering blocks in flight per client Range; 1 disables prefetch (max 64)")
+	sizeVar(fs, &cfg.prefetchBytes, "prefetch-bytes", 64*chunk.MiB, "node-wide speculative payload budget, including queued results")
+	fs.IntVar(&cfg.prefetchLoads, "prefetch-loads", 16, "node-wide outstanding speculative loads/results")
 	fs.Float64Var(&cfg.hedgeRatio, "hedge-ratio", 0.05, "max share of peer fetches allowed to hedge")
 	fs.DurationVar(&cfg.peerTimeout, "peer-timeout", peer.DefaultRequestTimeout, "per-request timeout for peer block fetches")
 	fs.IntVar(&cfg.breakerFails, "breaker-failures", peer.DefaultFailureThreshold, "consecutive peer failures that open its circuit; 0 disables breaking")
@@ -621,6 +627,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 		},
 		Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
 		Hedge: cfg.hedge, HedgeRatio: cfg.hedgeRatio,
+		PrefetchWindow: cfg.prefetchWindow, PrefetchBytes: cfg.prefetchBytes, PrefetchLoads: cfg.prefetchLoads,
 		Metrics: engine.NewMetrics(reg),
 	}
 	// P2P is enabled by either a static peer list or a discovery spec.
@@ -725,10 +732,10 @@ func build(cfg config, out io.Writer) (*node, error) {
 		closer: closer,
 	}
 	if p2p {
-		// Cut-through relay: a peer streams a block while receiving it, so a
-		// multi-hop chain pipelines instead of storing-and-forwarding per hop.
+		// Serve only fully obtained, validated blocks. Client-range prefetch
+		// pipelines separate blocks without exposing partial upstream responses.
 		// The tracker (if enabled) shares the peer listener so readers can JOIN.
-		blocks := &peer.StreamServer{NodeID: cfg.selfID, Src: e.PeerStreamSource()}
+		blocks := &peer.Server{NodeID: cfg.selfID, Src: e.PeerSource()}
 		var mux *http.ServeMux
 		if trackerReg != nil {
 			mux = (&tracker.Server{R: trackerReg}).Handler()

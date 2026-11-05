@@ -36,6 +36,9 @@ dart [flags]
 | `-cache-size` | `1 GiB` | block cache capacity; accepts a unit suffix (see below) |
 | `-chunk-size` | `256 MiB` | chunk size (placement/tree unit) |
 | `-block-size` | `4 MiB` | block size (transfer/cache unit) |
+| `-prefetch-window` | `2` | covering blocks in flight per client range, including demand; 1 disables, maximum 64 |
+| `-prefetch-bytes` | `64 MiB` | node-wide reserved speculative payload, including completed queued results |
+| `-prefetch-loads` | `16` | node-wide outstanding speculative loads/results; exhaustion preserves demand progress |
 | `-namespace` | `dart` | chunk-key namespace |
 | `-self-id` | `""` | this node's cluster ID (required with `-peers`) |
 | `-peer-listen` | `:9000` | peer block-server listen address (P2P mode) |
@@ -52,12 +55,6 @@ dart [flags]
 | `-owned-fraction` | `0.8` | share of the cache reserved for owned blocks (0<f<1); an explicitly-set out-of-range value fails startup |
 | `-mem-size` | `256 MiB` | in-memory hot-set size; below one block disables the memory tier |
 
-**Size units.** `-cache-size`, `-chunk-size`, `-block-size` and `-mem-size` accept
-either a plain byte count or a suffix, following the Kubernetes convention so these
-values can sit beside container resource limits without a second convention: an `i`
-selects a power of two (`8GiB`, `512MiB`, also `Gi`/`Mi`) and its absence a power of
-ten (`8GB`, `500MB`). A trailing `B` is optional and matching is case-insensitive.
-`1GiB` and `1GB` are deliberately **not** the same number.
 | `-hedge` | `true` | hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99 |
 | `-hedge-ratio` | `0.05` | max share of peer fetches allowed to hedge |
 | `-peer-timeout` | `30s` | per-request timeout for peer block fetches |
@@ -66,6 +63,13 @@ ten (`8GB`, `500MB`). A trailing `B` is optional and matching is case-insensitiv
 | `-registry` | `""` | also serve a Registry v2 pull-through mirror for this registry on `/v2/` |
 | `-registry-auth` | `""` | JSON file mapping registry host to `{username,password}` for private upstreams |
 | `-oci-digest-only` | `false` | only treat `<algo>:<hex>` paths as content-addressed (disables the Distribution object-store layout) |
+
+**Size units.** `-cache-size`, `-chunk-size`, `-block-size`, `-prefetch-bytes` and `-mem-size` accept
+either a plain byte count or a suffix, following the Kubernetes convention so these
+values can sit beside container resource limits without a second convention: an `i`
+selects a power of two (`8GiB`, `512MiB`, also `Gi`/`Mi`) and its absence a power of
+ten (`8GB`, `500MB`). A trailing `B` is optional and matching is case-insensitive.
+`1GiB` and `1GB` are deliberately **not** the same number.
 
 ### Origin resolution modes
 
@@ -109,6 +113,12 @@ dart -listen :8080 -peer-listen :9000 -self-id B \
 ```
 
 ## 3. Behavior & guarantees
+
+Long ranges use bounded ordered in-range prefetch (ADR-0006). The byte/load
+limits cover speculative payload/results, not cache memory, foreground reads or
+transient copies. Prefetch workers are canceled and joined before handler exit.
+`-prefetch-window=1` selects serial block reads; no peer handler expands its range.
+
 
 - Serves `GET`/`HEAD`; other methods → `405`.
 - `Resolve` failure → `400`; origin/size probe failure → `502`.
@@ -210,7 +220,7 @@ go test ./cmd/dart/ ./internal/node/ -race -count=1
 ## 5. Limitations & TODO
 
 - **P2P tree**: a miss routes to the parent in the preorder tree; relay nodes
-  stream cut-through (forward while receiving) and cache. With `-reader-tree`
+  receive and validate whole blocks before forwarding, and cache best-effort. With `-reader-tree`
   (default) the tree spans only the nodes reading the object, via a per-file
   tracker served on the peer listener (see docs/tracker.md). `-hedge` bounds tail
   latency by racing a slow parent against its grandparent, and `-peer-timeout`

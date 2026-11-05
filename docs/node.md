@@ -83,6 +83,12 @@ handler that ignores cancellation past 10s drain + force-close + 2s grace.
 flag parsing, validation, store/engine construction and `ListenAndServe` are
 returned, not logged-and-continued.
 
+Node assembly mounts `peer.Server` with `Engine.PeerSource`: peer success begins
+only after a complete validated block is available. `-prefetch-window`,
+`-prefetch-bytes` and `-prefetch-loads` configure the shared engine budgets;
+client and registry front-ends therefore share speculative admission. Request-owned
+workers join inside Serve before the handler admission gate is released (ADR-0006).
+
 ### 3.2 `DiscoveryScheme`
 
 ```go
@@ -162,7 +168,7 @@ The exact path the roster server is mounted on (no trailing slash, so a
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **77.0%** of statements (the tests moved here with the code from
+- **Coverage**: **93.5%** of statements (the tests moved here with the code from
   `cmd/dart`; the uncovered remainder is the blocking serve loop and signal
   handling).
 - **Reproduce**:
@@ -197,6 +203,10 @@ the extraction:
 | `TestRedactURLUserinfo` | the startup banner strips URL userinfo (no credentials in logs) |
 | `TestBuildKeepsSeederForLifecycle` | the built node retains its seeder and its optional `Run(ctx)` stays assertable |
 | `TestSchemes` (in `cmd/dart` and `providers/k8s/cmd/dart-k8s`) | each binary wires exactly its intended scheme set |
+
+`TestNodePeerWaitsForCompleteBlock` exercises shipped node assembly against a
+partially sent then interrupted parent: no early response escapes, and origin
+fallback produces a complete Content-Length response.
 
 ## 8. Limitations & TODO
 

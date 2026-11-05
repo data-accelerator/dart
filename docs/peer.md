@@ -50,9 +50,7 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   effectively forever. The bound itself (`maxHop`) is enforced by the engine,
   not here, so any non-negative value — including one at or past the bound —
   is a valid wire value at this layer.
-- Responses: `200` + block bytes (with `X-DART-Node`; `Content-Length` when
-  the source knows the size up front, chunked otherwise — e.g. on the
-  cut-through relay path), `404` if the peer cannot provide the block, `400`
+- Responses: `200` + complete block bytes (`X-DART-Node`, explicit `Content-Length`), `404` if the peer cannot provide the block, `400`
   for a malformed path or an invalid `X-DART-Hop`, `405` for non-GET, `500`
   on a source error, and `502` +
   `X-DART-Upstream-Status: <origin code>` when a relay's origin fetch was
@@ -131,55 +129,36 @@ c := peer.NewClient()
 data, held, err := c.Get(ctx, ownerAddr, peer.BlockRequest{Key: store.BlockKey{Chunk: ck, Block: bi}})
 ```
 
-### 3.4 Streaming (cut-through): `StreamSource`, `StreamServer`, `Client.Stream`
+### 3.4 Validated whole-block reads: `Client.GetValidated`
 
 ```go
-type StreamSource func(ctx context.Context, req BlockRequest, w io.Writer, sizer func(int64)) (n int64, held bool, err error)
-func StoreStreamSource(s store.Store) StreamSource
-type StreamServer struct { NodeID string; Src StreamSource }
-func (c *Client) Stream(ctx, addr string, req BlockRequest, w io.Writer) (n int64, held bool, err error)
-func (c *Client) StreamValidated(ctx context.Context, addr string, req BlockRequest, w io.Writer, validate func(context.Context, int64) error) (n int64, held bool, err error)
+func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, expected int64,
+    validate func(context.Context, int64) error) (data []byte, held bool, err error)
 ```
 
-These are the **cut-through** counterparts: a relay copies bytes from its
-upstream straight to the downstream socket *while receiving*, so a multi-hop
-chain pipelines instead of storing-and-forwarding at each hop (the tail sees
-bytes after ~one block-transfer time rather than depth x block-transfer time).
+Reject negative expected lengths. A Content-Length above `expected` is rejected
+without reading the body; otherwise read at most `expected+1` bytes (without
+integer overflow). A short or oversized complete body returns `ErrBlockLength`,
+no data and `held=false`, opening the current-generation circuit. Transport body
+errors retain their transport classification. After exact length validation,
+invoke the optional validator with the length and timeout-bounded request context.
+`Get` uses the same transport with no expected-length bound; engine ingestion
+always uses bounded `GetValidated`. Misses, HTTP errors and interrupted bodies do
+not invoke validation.
+Validation failure returns no data and `held=false`, wraps the error and opens
+the current-generation circuit before another request can record success. The
+validator runs inline and must respect its context. Time and caller-owned memory
+are O(expected block length), plus validator work. The engine supplies expected
+geometry.
 
-- `sizer(n)` reports a known body length so the server can set `Content-Length`
-  (the common case: a locally-held block). Without it the response is chunked —
-  acceptable on the **peer plane** (the client plane is always Content-Length
-  framed).
-- The server defers the response header until the first byte is written, so a
-  source that declines (`held=false`) or fails early still yields a clean
-  `404`/`500` rather than a truncated `200`.
-- A clean decline (`held=false`, `err=nil`) MUST NOT write anything. A failure
-  after partial writes returns an error; the server aborts the committed
-  response using `http.ErrAbortHandler`, which net/http handles without logging
-  a panic stack. Returning normally would emit a valid chunked terminator and
-  hide the failure. The same abort applies to incomplete Content-Length
-  responses. Once all advertised bytes have been flushed, a later source error
-  cannot be signaled through truncation; sources needing an end-of-stream failure
-  signal must omit the sizer and use chunked framing. Early failures still
-  produce the normal error status. Callers invoking `ServeHTTP`
-  directly must account for this sentinel panic (the normal HTTP server does).
-- Each write is flushed, pushing bytes downstream promptly.
-- `StreamValidated` calls the validator once on a clean `200` body, before
-  recording success. Nil validation is equivalent to `Stream`; misses and
-  body/transport errors do not call it. A validator error means a definitive
-  block protocol violation: the circuit opens and the method returns the byte
-  count, `held=true`, and a wrapped error. Return nil when validation is
-  unavailable. The callback runs inline with a timeout-bounded request context,
-  must honor that context for I/O, and must not retain/mutate caller-owned
-  stream state concurrently. Time is O(body length) plus validation work;
-  auxiliary memory is the same bounded copy buffer as `Stream`, plus the
-  validator's own allocations. The engine validates geometry this way before
-  admitting relayed bytes to its write-once cache.
+`Server` obtains its `Source` result before sending a success header or any block
+byte. Failed loads produce a clean `500`, credential refusals a `502` with
+`HeaderUpstreamStatus`, and declines a `404`. A failure writing an already valid
+block still truncates its Content-Length response. See
+[ADR-0006](./adr/0006-pipeline-whole-block-transfers.md) for the cross-package rule.
 
-```go
-srv := &peer.StreamServer{NodeID: myID, Src: engine.PeerStreamSource()}
-n, held, err := c.Stream(ctx, parentAddr, req, w) // w is the downstream writer
-```
+`UpstreamRefusedError` is the source error interface with `UpstreamStatus() int`;
+`Server` uses it to preserve the origin refusal code without blaming the relay.
 
 ### 3.5 Per-peer circuit breaking: `Breaker`
 
@@ -211,7 +190,7 @@ block") and blocks legitimately 404 all the time in a distributed cache — coun
 them would trip the breaker on perfectly healthy peers.
 
 **Caller cancellation is not a failure either.** When the caller's own context
-is aborted (a hedging loser, a client disconnect mid-body), `Get`/`Stream`
+is aborted (a hedging loser, a client disconnect mid-body), `Get`/`GetValidated`
 record *answered*, not a failure: the peer demonstrably responded, and charging
 it would open circuits on healthy peers. (The half-open probe slot must also be
 released, which recording answered does.) Our own per-request timeout firing
@@ -252,9 +231,8 @@ made a departed node slow to route around. Opening on one observation stays safe
 because opening is cheap and **reversible**: the cooldown plus the half-open probe
 restores a recovered peer with no operator action.
 
-`StreamValidated` records a validated protocol violation as a hard failure,
-without first recording transport success. Every `Client` request (Get, Stream,
-StreamValidated and FetchRoster) binds its result to the breaker entry and
+`GetValidated` records a validated protocol violation as a hard failure,
+without first recording transport success. Every `Client` request (Get, GetValidated and FetchRoster) binds its result to the breaker entry and
 generation captured when it starts. Opening a circuit or recovering from
 half-open invalidates older results. Checking the permit and recording the
 outcome occur under the same mutex: an old success cannot clear quarantine or
@@ -376,11 +354,15 @@ data-probe failure.
 - The wire path (`/peer/v1/block/<hex>/<dec>`) is part of the peer protocol.
   Changing it is a peer-protocol version bump.
 - Peer-plane traffic is plaintext by design; encryption is a CNI concern.
+- ADR-0006 requires full validated engine blocks before peer success is committed.
+  Server responses use Content-Length; clients also accept older chunked peers.
+  Whole-block forwarding preserves paths, keys and epoch framing. The removed
+  streaming APIs are internal and have no compatibility shim.
 
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **90.5%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
+- **Coverage**: **92.0%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -406,17 +388,10 @@ go test ./internal/peer/ -race -count=1
 | `TestClientConnError` | a closed peer port surfaces a transport error |
 | `TestParseBlockPath` | path parsing incl. max uint64 and rejects |
 | `TestConcurrent` | pooled client + server under concurrent load (`-race`) |
-| `TestStoreStreamSourceRoundtrip` | streaming server/client returns exact block bytes |
-| `TestStreamServerSetsContentLength` | known-size block is Content-Length framed, not chunked |
-| `TestStreamServerMissAndErrors` | miss → 404 with nothing written; bad path → 400; non-GET → 405 |
 | `TestClientLateFailureCannotUndoRecovery` | an old failed request cannot reopen a circuit recovered by a current half-open probe |
-| `TestStreamValidatedUsesRequestContext` | validation receives the bounded peer request context and the streamed byte count |
-| `TestClientLateSuccessCannotClearProtocolQuarantine` | deterministic barriers cover stale Get/Stream/roster success during open and half-open states; only a current probe can recover the circuit |
-| `TestStreamServerAbortsCommittedErrors` | real HTTP clients detect unexpected EOF after partial source errors with either chunked or Content-Length framing |
-| `TestStreamServerEarlyErrorGives500` | source failing before any write → clean 500 |
-| `TestCutThroughPipelines` | **the first half reaches the client while the source still holds the second** (genuinely pipelined, not buffered) |
-| `TestStreamRelayChain` | two chained stream servers relay bytes intact |
-| **`TestClientRequestTimeout`** | **a stalled peer cannot hold `Get`/`Stream` open** |
+| `TestGetValidatedUsesRequestContext` | validation receives the bounded peer request context and the complete body length |
+| `TestClientLateSuccessCannotClearProtocolQuarantine` | deterministic barriers cover stale Get/GetValidated/roster success during open and half-open states; only a current probe can recover the circuit |
+| **`TestClientRequestTimeout`** | **a stalled peer cannot hold `Get`/`GetValidated` open** |
 | `TestClientTimeoutDisabled` | a negative `Timeout` defers to the caller's context |
 | `TestBreakerOpensAfterThreshold` | opens only at the consecutive-failure threshold |
 | `TestBreakerSuccessResetsFailures` | intermittent failures never accumulate into an open circuit |
@@ -452,16 +427,17 @@ go test ./internal/peer/ -race -count=1
 | `TestRosterServerRejectsWrites` / `TestRosterServerNoSource` / `TestRosterFetchBadBody` | method, misconfiguration and malformed-body handling |
 | `TestDeadPeerRoutedAroundQuickly` | 200 further attempts at a dead peer cost negligible time |
 
+| `TestGetValidatedBoundsPeerBody` | advertised and unknown-length excess bodies are rejected before exceeding expected+1 bytes, without invoking later validation |
+
 ## 8. Limitations & TODO
 
 - **Routing lives in the engine**: this package is the transport; the engine
   decides who to ask (parent in the preorder tree over `cluster.Ready()`) and
   provides the relay `Source` (`engine.PeerSource`). Membership skew is bounded
   by `X-DART-Hop`; full epoch convergence is future work.
-- **Whole-block only**: a block is transferred as one body. Cut-through relay is
-  implemented (`StreamServer`/`Client.Stream`), but framing is plain HTTP body
-  bytes rather than the design's explicit DART frame header, and forwarding goes
-  through user space (`io.Copy`) rather than `splice`.
+- **Whole-block only**: a complete validated block is transferred as one
+  Content-Length body. Cold multi-hop startup waits for each whole-block load;
+  concurrent covering-block requests supply steady-state pipelining (ADR-0006).
 - **Epoch convergence**: `X-DART-Epoch` is defined but not yet exchanged/acted
   on; membership-skew convergence is a later addition.
 - **Zero-copy**: the server currently `Write`s a buffer; serving via

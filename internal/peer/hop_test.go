@@ -2,14 +2,12 @@ package peer
 
 import (
 	"context"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
 
-// TestServerHopValidation pins the X-DART-Hop domain on both peer server
-// implementations (buffered Server and cut-through StreamServer): the header is
+// TestServerHopValidation pins the X-DART-Hop domain on the peer server: the header is
 // optional (absent = depth 0) and any non-negative decimal is accepted — the
 // relay-depth bound itself is enforced by the engine, not the transport — but a
 // malformed, negative, or out-of-range value is rejected with 400 before the
@@ -25,14 +23,6 @@ func TestServerHopValidation(t *testing.T) {
 			return &Server{NodeID: "n", Src: func(_ context.Context, req BlockRequest) ([]byte, bool, error) {
 				record(req.Hop)
 				return []byte("data"), true, nil
-			}}
-		},
-		"stream": func(record func(hop int)) http.Handler {
-			return &StreamServer{NodeID: "n", Src: func(_ context.Context, req BlockRequest, w io.Writer, sizer func(int64)) (int64, bool, error) {
-				record(req.Hop)
-				sizer(4)
-				n, err := w.Write([]byte("data"))
-				return int64(n), true, err
 			}}
 		},
 	}

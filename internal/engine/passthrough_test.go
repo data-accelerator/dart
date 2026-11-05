@@ -226,15 +226,14 @@ func TestRelayDeclinesRangeBlindOrigin(t *testing.T) {
 	if _, err := e.Size(context.Background(), origin.URL); err != nil {
 		t.Fatalf("Size: %v", err)
 	}
-	src := e.PeerStreamSource()
-	var buf strings.Builder
-	n, held, err := src(context.Background(), peer.BlockRequest{
+	src := e.PeerSource()
+	data, held, err := src(context.Background(), peer.BlockRequest{
 		Key: blockKeyFor(origin.URL), URL: origin.URL, Hop: 1,
-	}, &buf, func(int64) {})
+	})
 	if err != nil {
 		t.Fatalf("source: %v", err)
 	}
-	if held || n != 0 || buf.Len() != 0 {
-		t.Errorf("relay served a Range-unsupported object: held=%v n=%d", held, n)
+	if held || len(data) != 0 {
+		t.Errorf("relay served a Range-unsupported object: held=%v n=%d", held, len(data))
 	}
 }

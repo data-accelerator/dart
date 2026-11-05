@@ -37,15 +37,9 @@ type Range struct {
 	// Callers that fetch per-block should treat this as a signal to stop: every
 	// further block request to this origin would pull the whole object again.
 	RangeIgnored bool
-	// Coalesced reports that these bytes came from a fetch another caller had
-	// already started, so nothing crossed the network on this caller's behalf.
-	//
-	// It exists so byte accounting can stay honest. Without it, N callers that
-	// coalesce onto one fetch each see a full Range and would each add its length to
-	// a "bytes transferred" counter, reporting N times the traffic that actually
-	// occurred — which is precisely backwards, since coalescing is what *avoided* the
-	// traffic. Hit-ratio counters should still count every read; only wire-byte
-	// counters need to skip a coalesced one.
+	// Coalesced reports that another successful consumer accounts the shared
+	// transfer. Exactly one consumer leaves it false, even if the original
+	// flight leader canceled before receiving its result. Shared Data is read-only.
 	Coalesced bool
 }
 
@@ -426,16 +420,11 @@ func redactTransportErr(err error) error {
 // Coalescing wraps a Fetcher so that concurrent fetches for the same
 // (url, start, end) share a single origin request (singleflight).
 //
-// The shared origin request runs on a background context, so one caller's
-// cancellation does not abort it — the block still completes for the other
-// waiters (desirable for a cache). Each caller's own ctx only bounds how long
-// that caller waits.
-//
-// A flight keeps exactly one worker goroutine — started by whoever leads it —
-// regardless of how many callers join or abandon it: joiners wait inline on
-// the flight's done channel, so a caller that stops waiting retains no
-// goroutine of its own (issue #53). A cancellation storm on one stalled key
-// therefore costs one worker, not one goroutine per abandoned caller.
+// Shared origin work has a flight deadline and reference-counted callers. One
+// caller can leave without canceling live peers. The last departing caller
+// cancels and joins the backend before returning, so no abandoned transfer
+// outlives its owner. Backends must honor context cancellation for prompt exit.
+// Waiters run inline; there is exactly one backend worker per flight.
 type Coalescing struct {
 	F Fetcher
 	// Key maps an origin URL to the identity used for deduplication. Nil uses the
@@ -487,10 +476,9 @@ func (c *Coalescing) maxFlight() time.Duration {
 	return DefaultMaxFlight
 }
 
-// Fetch coalesces duplicate concurrent fetches. It returns ctx.Err() if the
-// caller's context is cancelled before the shared fetch completes — and, once
-// it has returned, retains no goroutine: only the flight's single worker
-// outlives its callers.
+// Fetch coalesces duplicate concurrent fetches. Cancellation returns ctx.Err();
+// the last interested caller first cancels and joins the flight's backend.
+// Other live callers keep their shared request running independently.
 //
 // If the shared fetch was refused on authorization grounds (401/403) and this
 // caller merely joined it, the caller retries alone with its *own* URL. That
@@ -524,50 +512,50 @@ func (c *Coalescing) Probe(ctx context.Context, url string) (Range, error) {
 
 func (c *Coalescing) fetch(ctx context.Context, key string, g *group, doFetch func(context.Context) (Range, error)) (Range, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return Range{}, err
+		}
 		flight, lead := g.acquire(key, c.maxFlight())
 		if lead {
-			// Exactly one worker goroutine per flight, started by its leader.
-			// It deliberately outlives the leading caller: caller cancellation
-			// must not abort a flight its peers may still be waiting on, so
-			// the worker runs on a background context — bounded by the
-			// flight's own deadline, so a stalled origin (accepted, then
-			// silent) cannot pin it forever.
 			go func() {
-				flightCtx, cancel := context.WithDeadline(context.Background(), flight.end)
-				defer cancel()
-				r, err := doFetch(flightCtx)
+				r, err := doFetch(flight.ctx)
+				flight.cancel()
 				g.finish(key, flight, r, err)
 			}()
 		}
-		// Wait inline rather than on a per-caller goroutine: a caller that
-		// stops waiting — cancelled, or still waiting when the flight goes
-		// stale — leaves nothing behind. The wait runs to flight.stale, a
-		// grace margin past the flight's own deadline, so a ctx-respecting
-		// worker's deadline delivery always wins over eviction; the stale
-		// path exists only for a worker that ignores its context.
 		remaining := time.Until(flight.stale)
 		if remaining <= 0 {
-			continue // the flight went stale between acquire and the wait
+			g.release(key, flight)
+			continue
 		}
 		timer := time.NewTimer(remaining)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			g.release(key, flight)
 			return Range{}, ctx.Err()
 		case <-timer.C:
-			continue // deadline passed: evict the stale flight or join its replacement
+			g.release(key, flight)
+			continue
 		case <-flight.done:
 			timer.Stop()
 		}
 		r, err := flight.val, flight.err
-		r.Coalesced = !lead
-		// Only a joiner retries: if we led the flight, the credential that was
-		// refused was our own and asking again would change nothing. The retry
-		// serves this caller alone, so it uses the caller's context and is
-		// skipped entirely when that caller is already gone.
+		if ctx.Err() != nil {
+			g.release(key, flight)
+			return Range{}, ctx.Err()
+		}
+		// Transfer accounting belongs to one successful consumer, including when
+		// the original leader canceled while another caller remained interested.
+		if err == nil {
+			r.Coalesced = !g.claim(flight)
+		} else {
+			r.Coalesced = !lead
+		}
+		g.release(key, flight)
 		if !lead && refused(err) && ctx.Err() == nil {
 			r, err = doFetch(ctx)
-			r.Coalesced = false // these bytes did cross the network for us
+			r.Coalesced = false
 		}
 		return r, err
 	}
@@ -600,11 +588,15 @@ type group struct {
 }
 
 type call struct {
-	done  chan struct{} // closed when the flight completes
-	val   Range
-	err   error
-	end   time.Time // the flight context's deadline
-	stale time.Time // after this, a caller evicts the flight and leads a replacement
+	ctx     context.Context
+	cancel  context.CancelFunc
+	refs    int           // protected by group.mu
+	claimed bool          // one result consumer accounts the transfer; protected by group.mu
+	done    chan struct{} // closed when the flight completes
+	val     Range
+	err     error
+	end     time.Time // the flight context's deadline
+	stale   time.Time // after this, a caller evicts the flight and leads a replacement
 }
 
 // evictGrace is the margin between a flight's own deadline and the moment it
@@ -636,19 +628,22 @@ func (g *group) acquire(key string, maxFlight time.Duration) (c *call, lead bool
 	}
 	if c, ok := g.m[key]; ok {
 		if time.Now().Before(c.stale) {
+			c.refs++
 			return c, false
 		}
-		delete(g.m, key) // stale flight: abandon it and lead a replacement
+		delete(g.m, key) // old callers retain ownership until its worker exits
+		c.cancel()
 	}
 	end := time.Now().Add(maxFlight)
-	c = &call{done: make(chan struct{}), end: end, stale: end.Add(evictGrace(maxFlight))}
+	flightCtx, cancel := context.WithDeadline(context.Background(), end)
+	c = &call{done: make(chan struct{}), end: end, stale: end.Add(evictGrace(maxFlight)), ctx: flightCtx, cancel: cancel, refs: 1}
 	g.m[key] = c
 	return c, true
 }
 
 // finish publishes a led flight's result and wakes its waiters. The entry is
 // deleted BEFORE done is closed: the map holds only uncompleted flights, so
-// once a call has returned, its flight is unreachable and a strictly
+// once a completed result returns, its flight is unreachable and a strictly
 // sequential caller for the same key always leads a fresh fetch — an error
 // result can never be served twice (issue #69; the engine's size probe pins
 // "failures are not cached" on this). Publishing first would open a window
@@ -667,4 +662,30 @@ func (g *group) finish(key string, c *call, v Range, err error) {
 	g.mu.Unlock()
 	c.val, c.err = v, err
 	close(c.done)
+}
+
+// release detaches one caller. A surviving waiter owns the work; the final
+// caller cancels and joins before releasing its external resource reservation.
+func (g *group) release(key string, c *call) {
+	g.mu.Lock()
+	c.refs--
+	last := c.refs == 0
+	if last && g.m[key] == c {
+		delete(g.m, key)
+	}
+	g.mu.Unlock()
+	if last {
+		c.cancel()
+		<-c.done
+	}
+}
+
+func (g *group) claim(c *call) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c.claimed {
+		return false
+	}
+	c.claimed = true
+	return true
 }

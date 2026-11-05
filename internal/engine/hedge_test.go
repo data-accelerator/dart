@@ -231,7 +231,7 @@ func TestHedgeBeatsSlowPrimary(t *testing.T) {
 
 	key := store.BlockKey{Chunk: chunkKey, Block: 0}
 	start := time.Now()
-	got, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0)
+	got, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0, 16)
 	elapsed := time.Since(start)
 
 	if !ok || !bytes.Equal(got, data) {
@@ -275,7 +275,7 @@ func TestHedgeDisabledWaitsForPrimary(t *testing.T) {
 	}
 
 	key := store.BlockKey{Chunk: chunkKey, Block: 0}
-	got, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0)
+	got, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0, 16)
 	if !ok || !bytes.Equal(got, data) {
 		t.Fatalf("fromPeer ok=%v, want the block from the (slow) parent", ok)
 	}
@@ -305,7 +305,7 @@ func TestHedgeFallsBackWhenBothMiss(t *testing.T) {
 	e := newHedgeEngine(t, prov, ranked[2].ID)
 
 	key := store.BlockKey{Chunk: chunkKey, Block: 0}
-	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0); ok {
+	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0, 16); ok {
 		t.Error("both peers missed, so fromPeer must report false")
 	}
 }
@@ -403,7 +403,7 @@ func TestFromPeerFallsBackWhenCircuitOpen(t *testing.T) {
 	brk.RecordFailure(addr) // the only ancestor is now open
 
 	key := store.BlockKey{Chunk: chunkKey, Block: 0}
-	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0); ok {
+	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0, 16); ok {
 		t.Error("fromPeer should report false when no ancestor is usable")
 	}
 	if n := atomic.LoadInt64(&hits); n != 0 {
@@ -456,7 +456,7 @@ func TestFailoverNotRateLimited(t *testing.T) {
 	}
 
 	key := store.BlockKey{Chunk: chunkKey, Block: 0}
-	got, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0)
+	got, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0, 16)
 	if !ok {
 		t.Fatal("fromPeer returned false: the read fell through to origin instead of failing over")
 	}
@@ -493,7 +493,7 @@ func TestFailoverDoesNotDoubleLaunch(t *testing.T) {
 	e := newHedgeEngine(t, prov, ranked[2].ID)
 
 	key := store.BlockKey{Chunk: chunkKey, Block: 0}
-	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0); !ok {
+	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", "obj", chunkKey, key, 0, 16); !ok {
 		t.Fatal("expected the backup to serve the block")
 	}
 	if n := atomic.LoadInt64(&backupHits); n != 1 {
@@ -514,7 +514,7 @@ func TestHedgeSameAddressNotRaced(t *testing.T) {
 	oid, _ := chunk.ObjectID("http://origin.invalid/x")
 	ck := chunk.ChunkKey("dart", oid, 0)
 	key := store.BlockKey{Chunk: ck, Block: 0}
-	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", oid, ck, key, 0); !ok {
+	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", oid, ck, key, 0, 16); !ok {
 		t.Fatal("expected the owner to serve the block")
 	}
 	if n := atomic.LoadInt64(&hits); n != 1 {

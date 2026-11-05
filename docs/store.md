@@ -58,10 +58,12 @@ type Store interface {
 
 `Get` returns a **copy** of the block bytes; the caller owns it and may modify
 it freely. `GetReader` returns an `io.SectionReader` over the block's slot plus
-its length, so a block can be **streamed out without a copy** (used by the
-cut-through peer path); it refreshes LRU recency like `Get`, and is valid only
-until the slot is reused by eviction, so consume it promptly. Implementations are
-safe for concurrent use.
+its length, so a block can be **streamed out without a copy**. It refreshes LRU
+recency like `Get`; a slot-backed reader requires its caller to prevent slot
+reuse throughout consumption (§5). The shipped peer block path uses `Get` and
+its independent copy so concurrent eviction or deletion cannot tear a response.
+Store methods are safe for concurrent use; a returned slot-backed reader has
+this additional lifetime precondition.
 
 ### 3.3 `type DiskStore` and `func Open(Options) (*DiskStore, error)`
 

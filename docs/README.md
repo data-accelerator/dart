@@ -13,7 +13,7 @@ This directory holds DART's **official documentation** (tracked in git). It targ
 | [chunk.md](./chunk.md) | `internal/chunk` — object/chunk/block addressing, keying, range decomposition | Implemented, tests passing |
 | [store.md](./store.md) | `internal/store` — block cache: mem hot set, hybrid, owned/borrowed budgets, TinyLFU | Implemented, tests passing |
 | [fetch.md](./fetch.md) | `internal/fetch` — origin HTTP range fetch + singleflight coalescing | Implemented, tests passing |
-| [engine.md](./engine.md) | `internal/engine` — read-through orchestration (cache/peer/origin), relay, cut-through, hedging | Implemented, tests passing |
+| [engine.md](./engine.md) | `internal/engine` — read-through orchestration (cache/peer/origin), whole-block relay, bounded prefetch, hedging | Implemented, tests passing |
 | [peer.md](./peer.md) | `internal/peer` — node-to-node block transport (server + pooled client) | Implemented, tests passing |
 | [tracker.md](./tracker.md) | `internal/tracker` — per-file active reader set (leases, tick freeze) | Implemented, tests passing |
 | [registry.md](./registry.md) | `internal/registry` — container registry pull-through mirror (OverlayBD/containerd path) | Implemented, tests passing |

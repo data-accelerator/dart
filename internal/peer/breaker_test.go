@@ -233,10 +233,6 @@ func TestClientBreakerShortCircuits(t *testing.T) {
 		t.Errorf("server saw %d requests; the open circuit still dialed", got)
 	}
 
-	// Stream is gated by the same breaker.
-	if _, _, err := c.Stream(ctx, addr, BlockRequest{Key: key}, nil); !errors.Is(err, ErrCircuitOpen) {
-		t.Errorf("Stream error = %v, want ErrCircuitOpen", err)
-	}
 }
 
 // TestClientBreakerIgnores404 is the important distinction: a 404 is a valid

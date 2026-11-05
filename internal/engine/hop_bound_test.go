@@ -13,8 +13,7 @@ import (
 	"github.com/data-accelerator/dart/internal/store"
 )
 
-// TestRelayHopBoundary pins the maxHop gate on both peer-facing sources
-// (PeerSource and PeerStreamSource): at hop == maxHop-1 a miss still relays
+// TestRelayHopBoundary pins the maxHop gate on PeerSource: at hop == maxHop-1 a miss still relays
 // (falls through to origin here, this node being a lone root), while at
 // hop == maxHop the request is declined without the origin being touched at
 // all. Together with the peer transport rejecting negative/malformed hops
@@ -39,10 +38,6 @@ func TestRelayHopBoundary(t *testing.T) {
 			if held {
 				buf.Write(data)
 			}
-			return held, err
-		},
-		"stream": func(e *Engine, req peer.BlockRequest, buf *bytes.Buffer) (bool, error) {
-			_, held, err := e.PeerStreamSource()(context.Background(), req, buf, func(int64) {})
 			return held, err
 		},
 	}

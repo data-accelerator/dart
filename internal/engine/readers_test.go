@@ -166,7 +166,7 @@ func TestReaderSetTreeEndToEnd(t *testing.T) {
 	// trackerAddr() can resolve it; A/B/C carry their peer addresses.
 	members := []cluster.Member{{ID: "T", Addr: trackerAddr, Weight: 1, State: cluster.Ready}}
 	for _, id := range ids {
-		srv := httptest.NewServer(&peer.StreamServer{NodeID: id, Src: engines[id].PeerStreamSource()})
+		srv := httptest.NewServer(&peer.Server{NodeID: id, Src: engines[id].PeerSource()})
 		t.Cleanup(srv.Close)
 		members = append(members, cluster.Member{
 			ID: id, Addr: strings.TrimPrefix(srv.URL, "http://"), Weight: 1, State: cluster.Ready,
