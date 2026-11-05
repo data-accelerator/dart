@@ -41,8 +41,8 @@ ownership. This also applies through nested probe/fetch wrappers. A backend must
 cooperate with cancellation for prompt exit; an uncooperative one retains its
 owner and resources. One successful consumer accounts a shared origin transfer
 even if its original leader canceled. Successful cache publications survive
-cancellation. Expected peer lengths bound body reads before allocation grows
-beyond the block, and warm peer reads count as cache hits.
+cancellation. Expected peer lengths bound response reads to the block plus one byte before
+validation, and warm peer reads count as cache hits.
 
 The default request window is two blocks, including demand. Speculative payloads
 reserve node capacity through consumption/discard, including completed results;
