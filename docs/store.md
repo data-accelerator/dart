@@ -1,6 +1,6 @@
 # `internal/store`
 
-DART's block cache: fixed-size blocks keyed by `BlockKey`, backed by a
+DART's block cache: fixed-size blocks keyed by `BlockKey`, backed by
 RAM slabs or preallocated disk arenas.
 
 - Source: `internal/store/store.go`
