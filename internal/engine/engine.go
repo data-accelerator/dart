@@ -122,6 +122,7 @@ type Engine struct {
 
 	mu    sync.Mutex
 	sizes map[string]sizeMeta // origin endpoint -> probe result
+	loads blockLoads
 
 	// opener streams verbatim origin responses for the passthrough fallback
 	// (Range-ignoring origins); nil when the fetcher cannot stream.
@@ -341,6 +342,45 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		e.mx.recordCacheHit()
 		return data, nil
 	}
+	if !e.p2p {
+		r, err := e.loadBlock(ctx, url, objectID, size, blockIndex, hop, key)
+		return r.data, err
+	}
+	start := time.Now()
+	r, shared, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
+		// A previous leader can publish between our first miss and flight
+		// admission. Recheck after becoming leader, without holding the map lock.
+		if data, ok, err := e.store.Get(key); err != nil {
+			return blockRead{}, err
+		} else if ok {
+			e.mx.recordCacheHit()
+			return blockRead{data: data, source: blockFromCache}, nil
+		}
+		return e.loadBlock(ctx, url, objectID, size, blockIndex, hop, key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	if shared {
+		// Buffered sources return caller-owned bytes. A waiter must not be
+		// able to mutate the leader's result or another waiter's response.
+		r.data = append([]byte(nil), r.data...)
+		switch r.source {
+		case blockFromPeer:
+			e.mx.recordPeerHit(0, time.Since(start)) // no second wire transfer
+		case blockFromOrigin:
+			e.mx.recordOrigin(0, time.Since(start), true)
+		default:
+			e.mx.recordCacheHit()
+		}
+	}
+	return r.data, nil
+}
+
+// loadBlock performs one miss. Its caller owns the flight through validation
+// and cache publication; no background worker can outlive a serving handler.
+func (e *Engine) loadBlock(ctx context.Context, url, objectID string, size, blockIndex int64, hop int, key store.BlockKey) (blockRead, error) {
+	ck := key.Chunk
 	// The block's byte length is fixed by the object geometry: a full BlockSize,
 	// or a shorter final block. Any source that returns a different length has
 	// handed us corrupt data, and caching it would be a permanent, self-
@@ -354,19 +394,22 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 			if int64(len(data)) == want {
 				e.mx.recordPeerHit(len(data), time.Since(start))
 				e.putBlock(key, data, ck)
-				return data, nil
+				return blockRead{data: data, source: blockFromPeer}, nil
 			}
 			// A peer served a wrongly-sized block: do not trust or cache it; fall
 			// through to origin, which is authoritative.
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return blockRead{}, err
+	}
 	originStart := time.Now()
 	r, err := fetch.FetchBlock(ctx, e.fetcher, url, e.cfg.BlockSize, blockIndex, size)
 	if err != nil {
-		return nil, err
+		return blockRead{}, err
 	}
 	if int64(len(r.Data)) != want {
-		return nil, fmt.Errorf("engine: origin returned %d bytes for block %d, want %d", len(r.Data), blockIndex, want)
+		return blockRead{}, fmt.Errorf("engine: origin returned %d bytes for block %d, want %d", len(r.Data), blockIndex, want)
 	}
 	e.mx.recordOrigin(len(r.Data), time.Since(originStart), r.Coalesced)
 	if r.RangeIgnored {
@@ -375,10 +418,10 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		// them is not: a Range-blind origin pays a full object per block, and
 		// such objects are meant for the passthrough path (§3.9). This is
 		// defense in depth — callers already decline via RangeUnsupported.
-		return r.Data, nil
+		return blockRead{data: r.Data, source: blockFromOrigin}, nil
 	}
 	e.putBlock(key, r.Data, ck)
-	return r.Data, nil
+	return blockRead{data: r.Data, source: blockFromOrigin}, nil
 }
 
 // blockLen is the exact byte length of block blockIndex given the object size:

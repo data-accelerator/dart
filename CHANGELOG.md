@@ -9,6 +9,10 @@ every release's upgrade notes.
 
 ### Fixes
 
+- Coalesce buffered P2P block misses through validation and cache publication,
+  avoiding repeated full-block transfers for concurrent sub-block ranges (#81).
+  Preserve independent waiter cancellation, caller-owned buffers, per-URL
+  failure retries, relay hop progression and actual wire-byte accounting.
 - Preserve escaped origin paths in fallback cache identities; encoded slashes
   and separators no longer conflate different immutable objects. Digest
   recognition respects encoded path boundaries.
