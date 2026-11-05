@@ -580,33 +580,37 @@ func TestCoalescingDistinctKeys(t *testing.T) {
 	}
 }
 
-// TestCoalescingCallerCancel: a caller that cancels gets ctx.Err() without
-// waiting for the (background) shared fetch, which still completes for others.
+// A canceled leader leaves promptly while a live waiter owns the shared work.
 func TestCoalescingCallerCancel(t *testing.T) {
 	gf := &gateFetcher{gate: make(chan struct{}), result: blob(16)}
+	var once sync.Once
+	release := func() { once.Do(func() { close(gf.gate) }) }
+	defer release()
 	c := &Coalescing{F: gf}
-
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	lead := &waitContext{Context: ctx, waited: make(chan struct{})}
 	done := make(chan error, 1)
-	go func() {
-		_, err := c.Fetch(ctx, "u", 0, 15)
-		done <- err
-	}()
-	time.Sleep(20 * time.Millisecond)
+	go func() { _, err := c.Fetch(lead, "u", 0, 15); done <- err }()
+	<-lead.waited
+	join := &waitContext{Context: context.Background(), waited: make(chan struct{})}
+	survivor := make(chan Range, 1)
+	fail := make(chan error, 1)
+	go func() { r, err := c.Fetch(join, "u", 0, 15); survivor <- r; fail <- err }()
+	<-join.waited
 	cancel()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Errorf("cancelled caller err = %v, want context.Canceled", err)
+			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("cancelled caller did not return")
+		t.Fatal("canceled caller held a live peer")
 	}
-	// Release the shared fetch and confirm a fresh caller still gets the result.
-	close(gf.gate)
-	r, err := c.Fetch(context.Background(), "u", 0, 15)
-	if err != nil || len(r.Data) != 16 {
-		t.Errorf("post-cancel fetch: err=%v len=%d", err, len(r.Data))
+	release()
+	r := <-survivor
+	if err := <-fail; err != nil || len(r.Data) != 16 || r.Coalesced {
+		t.Fatalf("survivor owns transfer accounting: %+v %v", r, err)
 	}
 }
 
@@ -676,7 +680,9 @@ func TestUncontendedFetchNotMarkedCoalesced(t *testing.T) {
 func TestStaleFlightEvictedAfterMaxFlight(t *testing.T) {
 	var calls int64
 	stall := make(chan struct{})
-	t.Cleanup(func() { close(stall) }) // release the stalled leader at test end
+	var once sync.Once
+	release := func() { once.Do(func() { close(stall) }) }
+	defer release()
 	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
 		if atomic.AddInt64(&calls, 1) == 1 {
 			<-stall // stalled leader: returns only when the test ends, ignores ctx
@@ -687,9 +693,9 @@ func TestStaleFlightEvictedAfterMaxFlight(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	if _, err := c.Fetch(ctx, "u", 0, 7); err == nil {
-		t.Fatal("first caller: want its own ctx deadline, got nil")
-	}
+	first := make(chan error, 1)
+	go func() { _, err := c.Fetch(ctx, "u", 0, 7); first <- err }()
+	<-ctx.Done()
 	time.Sleep(100 * time.Millisecond) // push the flight past its deadline
 
 	r, err := c.Fetch(context.Background(), "u", 0, 7)
@@ -698,6 +704,10 @@ func TestStaleFlightEvictedAfterMaxFlight(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&calls); got != 2 {
 		t.Fatalf("underlying calls = %d, want 2 (stale flight evicted and replaced)", got)
+	}
+	release()
+	if err := <-first; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
 	}
 }
 
@@ -813,7 +823,9 @@ func TestJoinerRetrySkippedWhenCallerGone(t *testing.T) {
 // callers come and go.
 func TestCancelledWaitersRetainNoGoroutines(t *testing.T) {
 	stall := make(chan struct{})
-	t.Cleanup(func() { close(stall) }) // release the flight worker at test end
+	var once sync.Once
+	release := func() { once.Do(func() { close(stall) }) }
+	defer release()
 	var calls int64
 	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
 		atomic.AddInt64(&calls, 1)
@@ -821,6 +833,10 @@ func TestCancelledWaitersRetainNoGoroutines(t *testing.T) {
 		return Range{Data: blob(8), Total: 8}, nil
 	})
 	c := &Coalescing{F: f, MaxFlight: time.Minute}
+	owner := &waitContext{Context: context.Background(), waited: make(chan struct{})}
+	ownerDone := make(chan error, 1)
+	go func() { _, err := c.Fetch(owner, "u", 0, 7); ownerDone <- err }()
+	<-owner.waited
 
 	time.Sleep(50 * time.Millisecond) // let the runtime settle
 	base := runtime.NumGoroutine()
@@ -851,6 +867,10 @@ func TestCancelledWaitersRetainNoGoroutines(t *testing.T) {
 	if got := atomic.LoadInt64(&calls); got != 1 {
 		t.Errorf("underlying calls = %d, want 1 (all callers shared one flight)", got)
 	}
+	release()
+	if err := <-ownerDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestStaleFlightReplacedOnlyByALiveCaller pins the lifecycle contract that
@@ -864,7 +884,8 @@ func TestStaleFlightReplacedOnlyByALiveCaller(t *testing.T) {
 	t.Cleanup(func() { close(stall) }) // release any stuck fn call at test end
 	f := fetcherFunc(func(ctx context.Context, url string, start, end int64) (Range, error) {
 		if atomic.AddInt64(&calls, 1) == 1 {
-			<-stall // stuck leader: ignores ctx
+			<-ctx.Done()
+			return Range{}, ctx.Err()
 		}
 		return Range{Data: blob(8), Total: 8}, nil
 	})

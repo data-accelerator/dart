@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/data-accelerator/dart/internal/fetch"
+	"github.com/data-accelerator/dart/internal/metrics"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -138,5 +139,23 @@ func TestWholeBlockRelayReportsCleanFailure(t *testing.T) {
 	}
 	if e.store.Has(blockKeyFor(origin.URL)) {
 		t.Fatal("failed block cached")
+	}
+}
+
+func TestWarmPeerReadRecordsCacheHit(t *testing.T) {
+	content := blob(16)
+	var originCalls int64
+	origin := countingOrigin(t, content, &originCalls)
+	e := prefetchEngine(t, content, 2, newFetcher())
+	e.mx = NewMetrics(metrics.NewRegistry())
+	key := blockKeyFor(origin.URL)
+	if err := e.store.Put(key, content); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(&peer.Server{Src: e.PeerSource()})
+	defer srv.Close()
+	data, held, err := peer.NewClient().Get(context.Background(), strings.TrimPrefix(srv.URL, "http://"), peer.BlockRequest{Key: key, URL: origin.URL})
+	if err != nil || !held || !bytes.Equal(data, content) || e.mx.cacheHits.Value() != 1 || e.mx.peerHits.Value() != 0 || e.mx.originGet.Value() != 0 || atomic.LoadInt64(&originCalls) != 0 {
+		t.Fatalf("warm read %v %v; hits=%d", held, err, e.mx.cacheHits.Value())
 	}
 }

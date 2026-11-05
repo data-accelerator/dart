@@ -60,7 +60,7 @@ func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
 					var err error
 					switch mode {
 					case "validated":
-						_, _, err = client.GetValidated(ctx, addr, req, nil)
+						_, _, err = client.GetValidated(ctx, addr, req, 3, nil)
 					case "roster":
 						_, _, err = client.FetchRoster(ctx, addr, "", "")
 					default:
@@ -77,8 +77,8 @@ func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
 					}
 				}
 				wait(oldStarted)
-				invalid := errors.New("wrong geometry")
-				_, _, err := client.GetValidated(ctx, addr, BlockRequest{}, func(context.Context, int64) error { return invalid })
+				invalid := ErrBlockLength
+				_, _, err := client.GetValidated(ctx, addr, BlockRequest{}, 3, func(context.Context, int64) error { return invalid })
 				if !errors.Is(err, invalid) || client.Breaker.State(addr) != BreakerOpen {
 					t.Fatalf("invalid block = %v, state=%v; want a quarantine", err, client.Breaker.State(addr))
 				}
@@ -174,7 +174,7 @@ func TestGetValidatedUsesRequestContext(t *testing.T) {
 	client := NewClient()
 	client.Timeout = time.Minute
 	called := false
-	data, held, err := client.GetValidated(context.Background(), strings.TrimPrefix(srv.URL, "http://"), BlockRequest{},
+	data, held, err := client.GetValidated(context.Background(), strings.TrimPrefix(srv.URL, "http://"), BlockRequest{}, 3,
 		func(ctx context.Context, n int64) error {
 			called = true
 			if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > client.Timeout {

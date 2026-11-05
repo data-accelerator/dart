@@ -24,6 +24,8 @@ Bounded Range prefetch (ADR-0006) uses the same block-source and wire accounting
 as demand. Completed prefetched loads count even if the client later stops before
 consuming them; client bytes count only writes actually accepted by its writer.
 The block latency histogram measures loads, not client-perceived Range latency.
+Warm peer requests count as cache hits. Shared origin wire accounting belongs to
+one successful consumer even if its original flight leader cancels.
 
 ## 2. `internal/metrics` API
 

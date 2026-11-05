@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -349,13 +350,23 @@ func (c *Client) record(addr string, permit breakerPermit, o outcome) {
 // Get fetches a block from the peer at addr (host:port) per req. held is false
 // if the peer returned 404 (cannot provide the block).
 func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data []byte, held bool, err error) {
-	return c.GetValidated(ctx, addr, req, nil)
+	return c.get(ctx, addr, req, -1, nil)
 }
 
-// GetValidated obtains a complete block and validates its length before recording
-// peer success. A validation error opens the current-generation circuit and
+// GetValidated rejects negative expected lengths and reads at most expected+1
+// bytes before validating a complete block and recording peer success. A validation error opens the current-generation circuit and
 // returns no bytes. The callback runs inline with the bounded request context.
-func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
+func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
+	if expected < 0 {
+		return nil, false, errors.New("peer: negative expected block length")
+	}
+	return c.get(ctx, addr, req, expected, validate)
+}
+
+// ErrBlockLength reports a peer body that does not match the expected geometry.
+var ErrBlockLength = errors.New("peer: invalid block length")
+
+func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
 	permit, err := c.allow(addr)
 	if err != nil {
 		return nil, false, err
@@ -392,7 +403,15 @@ func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusOK:
-		body, err := io.ReadAll(resp.Body)
+		if expected >= 0 && resp.ContentLength > expected {
+			c.record(addr, permit, outcomeHardFail)
+			return nil, false, fmt.Errorf("peer %s: advertised %d bytes, want %d: %w", addr, resp.ContentLength, expected, ErrBlockLength)
+		}
+		var reader io.Reader = resp.Body
+		if expected >= 0 && expected < math.MaxInt64 {
+			reader = io.LimitReader(resp.Body, expected+1)
+		}
+		body, err := io.ReadAll(reader)
 		if err != nil {
 			if caller.Err() != nil {
 				c.record(addr, permit, outcomeAnswered) // we aborted; the peer is fine
@@ -400,6 +419,10 @@ func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest
 				c.record(addr, permit, outcomeSoftFail)
 			}
 			return nil, false, fmt.Errorf("peer %s: read body: %w", addr, err)
+		}
+		if expected >= 0 && int64(len(body)) != expected {
+			c.record(addr, permit, outcomeHardFail)
+			return nil, false, fmt.Errorf("peer %s: received %d bytes, want %d: %w", addr, len(body), expected, ErrBlockLength)
 		}
 		if validate != nil {
 			if err := validate(ctx, int64(len(body))); err != nil {

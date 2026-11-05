@@ -132,17 +132,24 @@ data, held, err := c.Get(ctx, ownerAddr, peer.BlockRequest{Key: store.BlockKey{C
 ### 3.4 Validated whole-block reads: `Client.GetValidated`
 
 ```go
-func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest,
+func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, expected int64,
     validate func(context.Context, int64) error) (data []byte, held bool, err error)
 ```
 
-Read the entire successful response body before invoking the validator with its
-length and the timeout-bounded request context. Nil validation is equivalent to
-`Get`. Misses, HTTP errors and interrupted bodies do not invoke validation.
+Reject negative expected lengths. A Content-Length above `expected` is rejected
+without reading the body; otherwise read at most `expected+1` bytes (without
+integer overflow). A short or oversized complete body returns `ErrBlockLength`,
+no data and `held=false`, opening the current-generation circuit. Transport body
+errors retain their transport classification. After exact length validation,
+invoke the optional validator with the length and timeout-bounded request context.
+`Get` uses the same transport with no expected-length bound; engine ingestion
+always uses bounded `GetValidated`. Misses, HTTP errors and interrupted bodies do
+not invoke validation.
 Validation failure returns no data and `held=false`, wraps the error and opens
 the current-generation circuit before another request can record success. The
 validator runs inline and must respect its context. Time and caller-owned memory
-are O(block length), plus validator work. The engine supplies expected geometry.
+are O(expected block length), plus validator work. The engine supplies expected
+geometry.
 
 `Server` obtains its `Source` result before sending a success header or any block
 byte. Failed loads produce a clean `500`, credential refusals a `502` with
@@ -355,7 +362,7 @@ data-probe failure.
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **92.3%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
+- **Coverage**: **92.0%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -419,6 +426,8 @@ go test ./internal/peer/ -race -count=1
 | `TestRosterFetchRecordsFailure` | a failed roster dial still opens the circuit for the data path |
 | `TestRosterServerRejectsWrites` / `TestRosterServerNoSource` / `TestRosterFetchBadBody` | method, misconfiguration and malformed-body handling |
 | `TestDeadPeerRoutedAroundQuickly` | 200 further attempts at a dead peer cost negligible time |
+
+| `TestGetValidatedBoundsPeerBody` | advertised and unknown-length excess bodies are rejected before exceeding expected+1 bytes, without invoking later validation |
 
 ## 8. Limitations & TODO
 

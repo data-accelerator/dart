@@ -534,6 +534,7 @@ func (e *Engine) PeerSource() peer.Source {
 		if data, ok, err := e.store.Get(req.Key); err != nil {
 			return nil, false, err
 		} else if ok {
+			e.mx.recordCacheHit()
 			return data, true, nil
 		}
 		if req.URL == "" || req.Hop >= maxHop {

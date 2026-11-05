@@ -157,30 +157,27 @@ authorization-refusal retry delegate to its `Probe`, preserving endpoint
 isolation through nested coalescing wrappers. Otherwise the inner fetcher
 receives `Fetch(ctx, url, 0, 0)` and must keep capability metadata endpoint-scoped.
 
-Wraps a `Fetcher` with singleflight keyed by `(url, start, end)`: concurrent
-identical fetches share one call to `F`. The **shared origin request runs on a
-bounded background context** (`MaxFlight`, default 10m): one caller's
-cancellation does not abort it — the block still completes for the other
-waiters (desirable for a cache) — but a stalled origin cannot pin it forever
-either. The flight's own context expires at `MaxFlight`; a short grace later
-(`evictGrace`, so a ctx-respecting worker's deadline delivery always lands
-first) the flight becomes **stale**: a caller still waiting re-checks, evicts
-the stale entry, and leads a replacement; a late-finishing stale leader never
-deletes the replacement's entry. Without the bound, one half-dead origin
-connection would poison the cache key for the process lifetime.
+Wraps a `Fetcher` with singleflight keyed by `(url, start, end)`. The shared
+request has a deadline (`MaxFlight`, default 10m) and reference-counted callers.
+A caller can leave independently while another live caller owns the work. When
+the last caller leaves, it removes the flight, cancels the backend and **joins
+its completion before returning**. This applies to Fetch and Probe, including
+nested coalescers (ADR-0006). No abandoned worker can outlive all its callers.
+Backends must honor cancellation for prompt cleanup; an ignoring backend keeps
+its final departing caller waiting rather than silently releasing its resources.
+
+A deadline expires the backend context; a grace margin (`evictGrace`) allows a
+live caller to replace an unresponsive stale flight. The old callers retain
+ownership until cleanup, and a late old completion cannot delete its replacement.
 Anchor: `internal/fetch/fetch.go::acquire`.
 
-A flight keeps **exactly one worker goroutine** — started by whoever leads it —
-no matter how many callers join or abandon it: joiners wait inline on the
-flight's done channel, so a caller that stops waiting retains no goroutine of
-its own. A cancellation storm on one stalled key therefore costs one worker,
-not one goroutine per abandoned caller (the issue #53 gap: waiter goroutines
-used to be retained until the flight bound). A corollary of inline waiting: a
-flight everyone abandoned is *not* replaced at its deadline — nobody is left
-wanting the bytes — the stale entry is evicted lazily by the next real caller.
+There is one backend worker per flight. Waiters run inline, and canceled waiters
+with a surviving owner retain no goroutine. The final caller joins that worker.
+Absent a new live caller, an abandoned flight is never restarted automatically.
+Anchor: `internal/fetch/fetch.go::release`.
 
 Sharing stops at completion: the worker removes the flight from the group
-**before** publishing its result, so once any call has returned, its flight is
+**before** publishing its result, so once a completed result returns, its flight is
 unreachable and a later — even immediately sequential — call for the same key
 leads a fresh fetch. An error is therefore never replayed to a caller that was
 not still waiting for it (the engine's size probe relies on this: a failed
@@ -189,8 +186,10 @@ cost: a caller arriving in the window between removal and publication leads a
 duplicate fetch instead of sharing the just-finished result — bounded extra
 traffic, by design. Anchor: `internal/fetch/fetch.go::finish`.
 
-Each caller's own `ctx` only bounds how long that caller waits (a cancelled
-caller returns `ctx.Err()`).
+A canceled caller returns `ctx.Err()` after any cleanup it owns. Exactly one
+successful result consumer accounts the wire bytes, even if the original leader
+cancels while a surviving waiter completes; other consumers set `Range.Coalesced`.
+Anchor: `internal/fetch/fetch.go::claim`.
 
 A joiner whose flight was refused (401/403) retries once with its own
 credential — but only if the joiner itself is still alive: the retry serves
@@ -267,10 +266,9 @@ bucket), and that changes three things:
    later caller (issue #69, §3.5). The one exception is an authorization
    refusal (401/403), where each joiner re-fetches once with its own
    credential (§3.6).
-3. **Cancellation isolation**: a caller cancelling its `ctx` neither aborts the
-   shared fetch nor affects other callers. The shared flight is itself bounded
-   by `MaxFlight` (§3.5), so a stalled origin fails all waiters within the
-   bound instead of pinning the key.
+3. **Cancellation isolation and ownership**: leaving does not abort another live
+   caller's fetch. The last caller cancels and joins the backend. MaxFlight bounds
+   its context; prompt return also requires a cancellation-cooperative backend.
 4. **Total discovery**: `Total` reflects the object size whenever the origin
    provides it (Content-Range, or Content-Length on a 200).
 5. **A credential authorizes a fetch, not a cache hit.** This package is only
@@ -292,13 +290,18 @@ bucket), and that changes three things:
 
 ## 6. Determinism / Stability Contract
 
+- ADR-0006 requires last-caller cancellation/join for shared flights. Custom
+  Fetcher backends must finish after context cancellation for prompt shutdown;
+  an uncooperative backend retains its owner and resources until it returns.
+
+
 - Nothing here is on the DART wire protocol; HTTP semantics (Range/Content-Range)
   are the external contract with origins. No cross-node format to keep stable.
 
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **92.4%** of statements (Go 1.27.0). The remaining uncovered lines are rare
+- **Coverage**: **91.0%** of statements (Go 1.27.0). The remaining uncovered lines are rare
   I/O-error branches (e.g. a mid-body read error) that need fault injection.
 - **Reproduce**:
 
@@ -345,12 +348,12 @@ go test ./internal/fetch/ -cover -count=1
 | `TestTransportErrorRedactsCredentials` | `client.Do` failures (`Fetch` and `Open`) carry neither the query nor userinfo |
 | `TestRedactStripsUserinfo` | `Redact` drops userinfo as well as the query |
 | `TestStatusErrorRefusedClassification` | 401/403 are refusals; 404/500/502 are not |
-| `TestCoalescingCallerCancel` | caller cancel returns ctx.Err(); shared fetch still completes |
-| `TestStaleFlightEvictedAfterMaxFlight` | a never-returning leader is evicted after `MaxFlight`; a later call leads a replacement |
+| `TestCoalescingCallerCancel` | canceled leader leaves a live waiter running; the survivor accounts wire bytes once |
+| `TestStaleFlightEvictedAfterMaxFlight` | an abandoned delayed-cleanup leader retains its caller; a live request can lead a replacement |
 | `TestLateStaleLeaderKeepsReplacement` | a late-finishing stale leader never deletes the replacement flight's entry |
 | `TestFlightContextBoundsStalledOrigin` | a ctx-respecting but stalled flight fails all waiters within `MaxFlight` |
 | `TestJoinerRetrySkippedWhenCallerGone` | a cancelled joiner does not fire a refusal retry |
-| **`TestCancelledWaitersRetainNoGoroutines`** | **64 cancelled waiters on a stalled flight retain no goroutines — one worker per flight, released promptly (issue #53)** |
+| **`TestCancelledWaitersRetainNoGoroutines`** | **64 canceled waiters retain no goroutines while a live owner keeps the shared worker** |
 | **`TestStaleFlightReplacedOnlyByALiveCaller`** | **an abandoned flight is not respawned at its deadline; the next real caller evicts and replaces it** |
 | `TestHTTPFetcher206ShortBody` | a 206 shorter than the window is an error (no silent cache poisoning) |
 | `TestHTTPFetcher206WrongOffset` | a 206 at the wrong offset is an error |
@@ -362,6 +365,9 @@ go test ./internal/fetch/ -cover -count=1
 | `TestFetchBlockUnknownSizeTailBlock` | an RFC-clamped 206 on the tail block is accepted and reveals Total |
 | **`TestFetchBlockRejectsOverflowGeometry`** | **negative / int64-overflowing block indices (and non-positive block size) error before the fetcher is invoked, size known or unknown (issue #52)** |
 | **`TestFetchBlockMaxInt64Window`** | **the largest representable index reaches the fetcher with the exact golden window `[9223372036854771712, MaxInt64]`; ordinary tail clamping unaffected** |
+
+| `TestCoalescingLastCallerCancelsAndJoins` | the last Fetch/nested Probe caller waits for canceled backend cleanup |
+| `TestCoalescingAlreadyCanceledStartsNoFlight` | an already canceled caller starts no backend or map entry |
 
 ## 8. Limitations & TODO
 

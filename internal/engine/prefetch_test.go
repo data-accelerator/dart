@@ -471,3 +471,52 @@ func TestRangePrefetchKeepsPublishedCacheOnCancel(t *testing.T) {
 		t.Fatalf("leaked budget %d/%d", n, b)
 	}
 }
+
+func TestRangePrefetchReservesUntilOriginFlightExits(t *testing.T) {
+	content := blob(32)
+	ctx, cancel := prefetchContext(t)
+	defer cancel()
+	started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	f := &fetch.Coalescing{F: blockFetchFunc(func(ctx context.Context, _ string, start, end int64) (fetch.Range, error) {
+		if start == 0 {
+			return prefetchResult(content, start, end), nil
+		}
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return fetch.Range{}, ctx.Err()
+	})}
+	e := prefetchEngine(t, content, 2, f)
+	sentinel := errors.New("writer failed")
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Serve(ctx, rangeWriteFunc(func([]byte) (int, error) {
+			select {
+			case <-started:
+				return 0, sentinel
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			}
+		}), prefetchURL, 0, 31)
+	}()
+	waitBlockEvent(t, ctx, canceled)
+	if n, b := budgetUsage(e); n != 1 || b != 16 {
+		t.Fatalf("origin cleanup lost reservation: %d/%d", n, b)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Serve returned before origin exited: %v", err)
+	default:
+	}
+	unblock()
+	if err := <-done; !errors.Is(err, sentinel) {
+		t.Fatal(err)
+	}
+	if n, b := budgetUsage(e); n != 0 || b != 0 {
+		t.Fatalf("leaked budget %d/%d", n, b)
+	}
+}

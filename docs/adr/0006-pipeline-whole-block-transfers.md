@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-11-05
 - Supersedes: ADR-0005
-- Binds: docs/engine.md §3.3 / §3.6 / §5 / Stability Contract; docs/peer.md §3.4 / Stability Contract; docs/node.md handler lifetime; docs/dart.md prefetch flags; docs/observability.md block-source and wire-byte accounting
+- Binds: docs/engine.md §3.3 / §3.6 / §5 / Stability Contract; docs/peer.md §3.4 / Stability Contract; docs/fetch.md shared-flight lifecycle / Stability Contract; docs/node.md handler lifetime; docs/dart.md prefetch flags; docs/observability.md block-source and wire-byte accounting
 
 ## Context
 
@@ -34,7 +34,15 @@ through best-effort publication, returned bytes are owned, failures are not reta
 or imposed across different URLs, and canceled leaders permit live waiter retry.
 Source/latency observations include the caller's wait/retry; wire bytes count once.
 Prefetch workers belong to their Serve call and cancel/join before its exit,
-preserving ADR-0003. Successful earlier cache publications survive cancellation.
+preserving ADR-0003. Hedge contenders are joined before their load returns.
+Shared origin flights count interested callers; the last departure cancels and
+joins the backend before releasing its reservation, while live peers retain
+ownership. This also applies through nested probe/fetch wrappers. A backend must
+cooperate with cancellation for prompt exit; an uncooperative one retains its
+owner and resources. One successful consumer accounts a shared origin transfer
+even if its original leader canceled. Successful cache publications survive
+cancellation. Expected peer lengths bound body reads before allocation grows
+beyond the block, and warm peer reads count as cache hits.
 
 The default request window is two blocks, including demand. Speculative payloads
 reserve node capacity through consumption/discard, including completed results;

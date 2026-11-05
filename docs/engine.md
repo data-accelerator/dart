@@ -242,8 +242,10 @@ failure cancels and joins all workers before returning. A later failed block is
 reported only when reached, after valid earlier blocks have been written. Already
 published valid cache entries remain. Reserving results under backpressure costs
 O(window) metadata and at most the admitted speculative payload; range length does
-not allocate a segment/result per block. Extra bandwidth from hedging remains
-subject to its independent rate limit.
+not allocate a segment/result per block. Hedge contenders are canceled and joined before the block load returns, and
+origin coalescing cancels/joins when its last caller leaves. Shared work with a
+surviving caller remains owned by that caller. Extra hedge bandwidth retains its
+independent rate limit; backend cancellation must cooperate for prompt exit.
 
 ### 3.7 Cache classification (owned / borrowed)
 
@@ -423,7 +425,7 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.0%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.2%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -527,6 +529,10 @@ go test ./internal/engine/ -cover -count=1
 | `TestPrefetchOptions` | invalid limit values are rejected |
 | `TestWholeBlockRelayCommitsOnlyAfterValidation` | real partial parent responses commit no downstream byte before complete validation; short/failed parents fall back cleanly |
 | `TestWholeBlockRelayReportsCleanFailure` | an unrecoverable source failure yields a clean 500 without partial block/cache publication |
+
+| `TestRangePrefetchReservesUntilOriginFlightExits` | a canceled origin flight retains speculative admission through underlying cleanup |
+| `TestHedgedFetchCancelsAndJoinsContenders` | cancellation and a hedge win join all canceled contenders before returning |
+| `TestWarmPeerReadRecordsCacheHit` | a warm HTTP peer read records exactly one cache hit without peer/origin traffic |
 
 ## 8. Limitations & TODO
 
