@@ -301,7 +301,7 @@ bucket), and that changes three things:
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.0%** of statements (Go 1.27.0). The remaining uncovered lines are rare
+- **Coverage**: **91.1%** of statements (Go 1.27.0). The remaining uncovered lines are rare
   I/O-error branches (e.g. a mid-body read error) that need fault injection.
 - **Reproduce**:
 
