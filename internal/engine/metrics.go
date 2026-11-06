@@ -102,21 +102,31 @@ func (m *Metrics) recordCacheHit() {
 	m.cacheHits.Inc()
 }
 
-// Record one completed buffered read, independently of which caller executed
-// the load. The caller's duration includes waiting, retries and publication;
-// actual wire bytes belong only to the executing load, not its joined readers.
-func (m *Metrics) recordBlockRead(r blockRead, shared bool, d time.Duration) {
-	n := r.wireBytes
-	if shared {
-		n = 0
-	}
+// Record one successful serving read, independently of who executed the load.
+// The duration includes waiting, retries and publication. Ingress bytes are
+// recorded by the validated producer before a caller can abandon its result.
+func (m *Metrics) recordBlockRead(r blockRead, d time.Duration) {
 	switch r.source {
 	case blockFromPeer:
-		m.recordPeerHit(n, d)
+		m.recordPeerHit(0, d)
 	case blockFromOrigin:
-		m.recordOrigin(n, d, shared)
+		m.recordOrigin(0, d, false)
 	default:
 		m.recordCacheHit()
+	}
+}
+
+// Count fully received, validated payloads, not partial/invalid wire traffic.
+// Both completed hedge contenders count; a canceled result handoff loses none.
+func (m *Metrics) recordIngress(source blockSource, n int) {
+	if m == nil {
+		return
+	}
+	switch source {
+	case blockFromPeer:
+		m.peerBytes.Add(int64(n))
+	case blockFromOrigin:
+		m.originBytes.Add(int64(n))
 	}
 }
 

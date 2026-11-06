@@ -16,10 +16,9 @@ const (
 )
 
 type blockRead struct {
-	lease     store.Lease
-	data      []byte
-	source    blockSource
-	wireBytes int // zero when an underlying origin flight supplied shared bytes
+	lease  store.Lease
+	data   []byte
+	source blockSource
 }
 
 // Relay depth must stay in the flight identity: joining a shallower request
@@ -43,11 +42,11 @@ func (g *blockLoads) do(ctx context.Context, key blockLoadKey, url string, load 
 		if l.Bytes() == nil {
 			l = store.HeapLease(v.data)
 		}
-		return leasedRead{lease: l, source: v.source, wireBytes: v.wireBytes}, err
+		return leasedRead{lease: l, source: v.source}, err
 	})
 	if err != nil {
 		return blockRead{}, r.shared, err
 	}
 	defer r.lease.Release()
-	return blockRead{data: append([]byte(nil), r.lease.Bytes()...), source: r.source, wireBytes: r.wireBytes}, r.shared, nil
+	return blockRead{data: append([]byte(nil), r.lease.Bytes()...), source: r.source}, r.shared, nil
 }

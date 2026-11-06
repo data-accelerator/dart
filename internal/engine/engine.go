@@ -375,12 +375,12 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		if err != nil {
 			return blockRead{}, err
 		}
-		return blockRead{lease: r.lease, source: r.source, wireBytes: r.wireBytes}, nil
+		return blockRead{lease: r.lease, source: r.source}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	e.mx.recordBlockRead(r, false, time.Since(start))
+	e.mx.recordBlockRead(r, time.Since(start))
 	return r.data, nil
 }
 

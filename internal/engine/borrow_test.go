@@ -20,6 +20,7 @@ import (
 	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/cluster"
 	"github.com/data-accelerator/dart/internal/fetch"
+	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/metrics"
 	"github.com/data-accelerator/dart/internal/peer"
 	"github.com/data-accelerator/dart/internal/store"
@@ -145,7 +146,7 @@ func TestLeasedFlightSharesOneImmutableBuffer(t *testing.T) {
 		r, _ := st.Reserve(ctx, store.BlockKey{}, 16, store.Owned)
 		copy(r.Bytes(), "shared immutable")
 		l, err := r.Commit()
-		return leasedRead{lease: l, source: blockFromPeer, wireBytes: 16}, err
+		return leasedRead{lease: l, source: blockFromPeer}, err
 	}
 	results := make(chan leasedRead, 2)
 	go func() { r, _ := g.do(ctx, blockLoadKey{}, "url", false, load); results <- r }()
@@ -155,8 +156,8 @@ func TestLeasedFlightSharesOneImmutableBuffer(t *testing.T) {
 	waitBlockEvent(t, ctx, joined.joined)
 	close(release)
 	a, b := <-results, <-results
-	if &a.lease.Bytes()[0] != &b.lease.Bytes()[0] || a.wireBytes+b.wireBytes != 16 {
-		t.Fatal("flight copied data or duplicated transfer credit")
+	if &a.lease.Bytes()[0] != &b.lease.Bytes()[0] || a.shared == b.shared {
+		t.Fatal("flight copied data or lost sharing identity")
 	}
 	st.Delete(store.BlockKey{})
 	a.lease.Release()
@@ -188,7 +189,7 @@ func TestSharedLeaseFlightCancellationOwnership(t *testing.T) {
 					<-release
 					return leasedRead{}, work.Err()
 				case <-release:
-					return leasedRead{lease: store.HeapLease([]byte("good")), wireBytes: 4}, nil
+					return leasedRead{lease: store.HeapLease([]byte("good"))}, nil
 				}
 			}
 			go func() { r, err := g.do(caller, blockLoadKey{}, "url", true, load); r.lease.Release(); done <- err }()
@@ -218,8 +219,8 @@ func TestSharedLeaseFlightCancellationOwnership(t *testing.T) {
 				}
 				close(release)
 				r := <-waiter
-				if string(r.lease.Bytes()) != "good" || r.wireBytes != 4 {
-					t.Fatal("survivor lost result/credit")
+				if string(r.lease.Bytes()) != "good" {
+					t.Fatal("survivor lost result")
 				}
 				r.lease.Release()
 			} else {
@@ -763,5 +764,171 @@ func TestExpiredEngineFlightsAllowFreshAdmission(t *testing.T) {
 				t.Fatal("underlying calls", calls.Load())
 			}
 		})
+	}
+}
+
+func TestCompletedOriginIngressSurvivesCanceledHandoff(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		for _, survivor := range []bool{false, true} {
+			t.Run(fmt.Sprintf("owned=%v/survivor=%v", owned, survivor), func(t *testing.T) {
+				ctx, end := prefetchContext(t)
+				defer end()
+				caller, cancel := context.WithCancel(ctx)
+				defer cancel()
+				started, release := make(chan struct{}), make(chan struct{})
+				handoff, resume := make(chan struct{}), make(chan struct{})
+				var releaseOnce, resumeOnce sync.Once
+				freeBackend := func() { releaseOnce.Do(func() { close(release) }) }
+				defer freeBackend()
+				freeHandoff := func() { resumeOnce.Do(func() { close(resume) }) }
+				defer freeHandoff()
+				e := prefetchEngine(t, blob(16), 1, intoFetchFunc(func(work context.Context, _ string, _, _ int64, dst []byte) (fetch.Range, error) {
+					close(started)
+					select {
+					case <-release:
+					case <-work.Done():
+						return fetch.Range{}, work.Err()
+					}
+					copy(dst, "completed origin")
+					return fetch.Range{Data: dst, Total: 16}, nil
+				}))
+				e.mx = NewMetrics(metrics.NewRegistry())
+				oid, _ := chunk.ObjectID(prefetchURL)
+				run := func(work context.Context) error {
+					if owned {
+						data, err := e.block(work, prefetchURL, oid, 16, 0, 0)
+						if err == nil && string(data) != "completed origin" {
+							return errors.New("wrong owned data")
+						}
+						return err
+					}
+					l, err := e.borrowBlock(work, prefetchURL, oid, 16, 0, 0)
+					defer l.Release()
+					if err == nil && string(l.Bytes()) != "completed origin" {
+						return errors.New("wrong borrowed data")
+					}
+					return err
+				}
+				first := make(chan error, 1)
+				go func() { first <- run(caller) }()
+				waitBlockEvent(t, ctx, started)
+				var second chan error
+				if survivor {
+					second = make(chan error, 1)
+					waiter := &blockJoinContext{Context: ctx, joined: make(chan struct{})}
+					go func() { second <- run(waiter) }()
+					waitBlockEvent(t, ctx, waiter.joined)
+				}
+				// Pause the inner consumer after it has accepted the completed result but
+				// before it hands it to the outer flight. This models ordinary preemption.
+				e.origins.mu.Lock()
+				for _, c := range e.origins.m {
+					originalCancel := c.cancel
+					c.cancel = func() { originalCancel(); close(handoff); <-resume }
+				}
+				e.origins.mu.Unlock()
+				freeBackend()
+				waitBlockEvent(t, ctx, handoff)
+				cancel()
+				if survivor {
+					select {
+					case err := <-second:
+						if err != nil {
+							t.Fatal(err)
+						}
+					case <-ctx.Done():
+						t.Fatal("surviving reader did not finish")
+					}
+				}
+				freeHandoff()
+				select {
+				case err := <-first:
+					if !errors.Is(err, context.Canceled) {
+						t.Fatal(err)
+					}
+				case <-ctx.Done():
+					t.Fatal("canceled reader did not join")
+				}
+				if n := e.mx.originBytes.Value(); n != 16 {
+					t.Fatalf("completed origin ingress lost after cancellation: %d", n)
+				}
+			})
+		}
+	}
+}
+
+func TestCompletedHedgeIngressCountsBothTransfers(t *testing.T) {
+	ctx, cancel := prefetchContext(t)
+	defer cancel()
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	defer free()
+	addr := func() string {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			w.Header().Set("Content-Length", "16")
+			_, _ = w.Write([]byte("completed origin"))
+		}))
+		t.Cleanup(server.Close)
+		return strings.TrimPrefix(server.URL, "http://")
+	}
+	a, b := addr(), addr()
+	key := prefetchKey(prefetchURL, 0)
+	ranked := hashring.Rank(key.Chunk, []hashring.Node{{ID: "a", Weight: 1}, {ID: "b", Weight: 1}, {ID: "c", Weight: 1}})
+	prov := cluster.NewStaticProvider(cluster.Member{ID: ranked[0].ID, Addr: a, Weight: 1, State: cluster.Ready}, cluster.Member{ID: ranked[1].ID, Addr: b, Weight: 1, State: cluster.Ready}, cluster.Member{ID: ranked[2].ID, Weight: 1, State: cluster.Ready})
+	e := newHedgeEngine(t, prov, ranked[2].ID)
+	e.mx = NewMetrics(metrics.NewRegistry())
+	e.sizes[fetch.OriginKey(prefetchURL)] = sizeMeta{size: 16}
+	done := make(chan error, 1)
+	go func() {
+		var output bytes.Buffer
+		err := e.Serve(ctx, &output, prefetchURL, 0, 15)
+		if err == nil && output.String() != "completed origin" {
+			err = errors.New("wrong hedge bytes")
+		}
+		done <- err
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("both contenders did not start")
+		}
+	}
+	// Hold result delivery after each successful receive. Both validated network
+	// transfers must be counted even though only one contender can supply the read.
+	e.latency.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			e.latency.mu.Unlock()
+		}
+	}()
+	free()
+	for e.mx.peerBytes.Value() != 32 {
+		if ctx.Err() != nil {
+			t.Fatal("completed hedge transfers not counted before handoff", e.mx.peerBytes.Value())
+		}
+		runtime.Gosched()
+	}
+	e.latency.mu.Unlock()
+	locked = false
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("hedged read did not finish")
+	}
+	if e.mx.peerBytes.Value() != 32 || e.mx.peerHits.Value() != 1 {
+		t.Fatal("wrong ingress/read attribution", e.mx.peerBytes.Value(), e.mx.peerHits.Value())
 	}
 }

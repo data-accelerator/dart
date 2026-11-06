@@ -83,7 +83,7 @@ handler that ignores cancellation past 10s drain + force-close + 2s grace.
 flag parsing, validation, store/engine construction and `ListenAndServe` are
 returned, not logged-and-continued.
 
-Node assembly mounts `peer.Server` with `Engine.PeerSource`: peer success begins
+Node assembly mounts `peer.Server.Borrow` with `Engine.PeerLeaseSource`: peer success begins
 only after a complete validated block is available. `-prefetch-window`,
 `-prefetch-bytes` and `-prefetch-loads` configure the shared engine budgets;
 client and registry front-ends therefore share speculative admission. Request-owned

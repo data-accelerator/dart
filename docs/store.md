@@ -334,10 +334,10 @@ if ok {
   therefore uses owned `Get` or a pinned `Acquire`, **not** an unpinned disk
   `GetReader` — the peer plane
   must never emit a torn block. `GetReader` remains for callers that hold the
-  block's lifetime externally; note no store API can *make* a block
-  non-evictable, so in practice that means single-threaded consumers or blocks
-  pinned by a higher layer. It currently has no in-tree callers, which is
-  deliberate.
+  block's lifetime externally: disk `GetReader` does not pin its slot, so callers
+  must serialize removal/reuse externally. Memory `Acquire` separately pins its
+  physical slot, and disk `Acquire` returns an owned copy. Unpinned disk
+  `GetReader` currently has no in-tree callers, which is deliberate.
 - Verified with `-race` under concurrent Put/Get/Delete/Has with eviction churn.
 
 ## 5.1 Disk footprint and operational notes

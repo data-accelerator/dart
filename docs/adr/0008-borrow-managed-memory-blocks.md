@@ -54,8 +54,11 @@ Block flights retain relay depth to prevent skewed-loop wait cycles. Origin leas
 flights share across depths, with independent consumers and a final-caller
 cancel-and-join. A canceled block leader permits surviving waiter retry; failed
 credentials or URLs are not imposed on a different caller URL. Completed failures
-are not retained. Exactly one successful consumer accounts each shared transfer,
-even when its first caller cancels. Endpoint-specific probes remain independent
+are not retained. Each exclusive producer accounts a fully received, validated
+ingress before publication or result handoff, independently of later consumer
+cancellation. Both completed hedge contenders count; partial/invalid transfers
+and compatible shared results marked Coalesced do not count again. Source counts
+and latency observations remain per successful read. Endpoint-specific probes remain independent
 of digest-keyed content. No background operation may access a released buffer.
 
 The new optional direct-fill API delegates exclusive buffers without lower-layer

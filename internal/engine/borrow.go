@@ -20,7 +20,7 @@ func (e *Engine) borrowBlock(ctx context.Context, url, objectID string, size, in
 	if err != nil {
 		return store.Lease{}, err
 	}
-	e.mx.recordBlockRead(blockRead{source: r.source, wireBytes: r.wireBytes}, false, time.Since(start))
+	e.mx.recordBlockRead(blockRead{source: r.source}, time.Since(start))
 	return r.lease, nil
 }
 
@@ -59,11 +59,12 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 						if err != nil || !held {
 							return peerResult{held: held, err: err}
 						}
+						e.mx.recordIngress(blockFromPeer, len(data))
 						l, err := e.finishBuffer(&r, key, data, cache)
 						return peerResult{lease: l, held: err == nil, err: err}
 					})
 					if ok {
-						return leasedRead{lease: result.lease, source: blockFromPeer, wireBytes: int(want)}, nil
+						return leasedRead{lease: result.lease, source: blockFromPeer}, nil
 					}
 				}
 			}
@@ -89,6 +90,9 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 			if int64(len(result.Data)) != want {
 				return leasedRead{}, fmt.Errorf("engine: origin returned %d bytes for block %d, want %d", len(result.Data), index, want)
 			}
+			if !result.Coalesced {
+				e.mx.recordIngress(blockFromOrigin, len(result.Data))
+			}
 			var l store.Lease
 			if result.RangeIgnored {
 				// A range-blind endpoint is passthrough-only. Keep these response bytes
@@ -97,11 +101,7 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 			} else {
 				l, err = e.finishBuffer(&r, key, result.Data, cache)
 			}
-			wire := 0
-			if !result.Coalesced {
-				wire = len(result.Data)
-			}
-			return leasedRead{lease: l, source: blockFromOrigin, wireBytes: wire}, err
+			return leasedRead{lease: l, source: blockFromOrigin}, err
 		})
 	})
 	return r, err

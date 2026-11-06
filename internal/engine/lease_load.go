@@ -10,22 +10,21 @@ import (
 )
 
 type leasedRead struct {
-	shared    bool
-	lease     store.Lease
-	source    blockSource
-	wireBytes int
+	shared bool
+	lease  store.Lease
+	source blockSource
 }
 type leaseCall struct {
-	stale             time.Time
-	leader            context.Context
-	key               blockLoadKey
-	done              chan struct{}
-	url               string
-	refs              int
-	finished, claimed bool
-	read              leasedRead
-	err               error
-	cancel            context.CancelFunc
+	stale    time.Time
+	leader   context.Context
+	key      blockLoadKey
+	done     chan struct{}
+	url      string
+	refs     int
+	finished bool
+	read     leasedRead
+	err      error
+	cancel   context.CancelFunc
 }
 
 // leaseLoads owns one result reference until every admitted consumer detaches.
@@ -151,11 +150,6 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 		r.shared = !lead
 		if err == nil {
 			r.lease = r.lease.Clone()
-			if c.claimed {
-				r.wireBytes = 0
-			} else {
-				c.claimed = true
-			}
 		} else {
 			// The flight retains any failed result until consumers detach;
 			// an error does not transfer an un-cloned owner to this caller.

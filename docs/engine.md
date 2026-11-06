@@ -138,8 +138,11 @@ copies. Metadata probes remain endpoint-scoped independently. Origin lease
 flights share across relay depths while retaining one result until all consumers
 detach. The final departing origin consumer cancels and joins its backend.
 
-Exactly one successful consumer records wire bytes, including when the first
-origin caller cancels while another consumer remains. Each successful buffered miss
+Each exclusive producer records a fully received, validated ingress exactly
+once before publication or result handoff. Later consumer cancellation cannot
+lose this event; two fully completed hedge contenders count as two transfers.
+Partial/invalid responses are excluded, and compatible fetch results marked
+Coalesced do not count again. Each successful buffered miss
 records one latency from its first admission attempt through waiting, retries
 and publication, even if a waiter takes over as leader. Joined reads use the
 same block source without adding another transfer.
@@ -474,7 +477,7 @@ Managed-memory regression coverage:
 | `TestBorrowedOriginUsesReceiveSlot` | receive/cache/sender share one payload; zero warm block allocation |
 | `TestBorrowedPressureBypassesPublication` | correct subrange and temporary accounting with a pinned full arena |
 | `TestBorrowedWriteFailureReleasesPins` | all queued/current pins and speculative reservations released on client error |
-| `TestLeasedFlightSharesOneImmutableBuffer` | joined readers share a pointer and single transfer credit |
+| `TestLeasedFlightSharesOneImmutableBuffer` | joined readers share a pointer with independent lease owners |
 | `TestPeerDeclinesBlocksOutsideObject` | key-consistent past-end blocks decline in memory/disk/Hybrid before any worker or allocation |
 | `TestOversizedCacheSlotFallsBackToOrigin` | smaller cache slots do not fail valid origin reads |
 | `TestExpiredEngineFlightsAllowFreshAdmission` | nested MaxFlight expiry replaces both outer/origin admission while original owners join; late completion preserves the replacement, including owned and cross-depth reads |
@@ -484,11 +487,13 @@ Managed-memory regression coverage:
 | `TestBackendTimeoutSharedByEngineWaiters` | actual MaxFlight timeout is shared by live borrowed/owned callers without starting successive same-URL flights |
 | `TestAbandonedOriginLeaseFlightStopsAdmission` | new callers start fresh while abandoned backend cleanup is joined |
 | `TestSharedLeaseFlightCancellationOwnership` | survivor ownership and final-caller cancel/join |
+| `TestCompletedOriginIngressSurvivesCanceledHandoff` | completed origin bytes survive canceled inner/outer handoff for borrowed/owned reads, with or without a surviving reader |
+| `TestCompletedHedgeIngressCountsBothTransfers` | two validated peer contenders count both ingress payloads while one serving read succeeds |
 | `TestBorrowedPeerHTTPAndWarmReuse` | actual borrowed peer HTTP path into memory budgets and warm reuse |
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.5%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.9%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
