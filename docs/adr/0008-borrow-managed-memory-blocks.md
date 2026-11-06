@@ -1,6 +1,6 @@
 # ADR-0008: Borrow managed memory blocks through validated publication and sending
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-06
 - Supersedes: ADR-0006
 - Binds: docs/store.md memory lifecycle / Stability Contract; docs/engine.md block ownership / prefetch / Stability Contract; docs/fetch.md exclusive fills; docs/peer.md borrowed responses / bounded ingress; docs/node.md handler lifetime; docs/dart.md cache behavior; docs/observability.md memory pressure accounting

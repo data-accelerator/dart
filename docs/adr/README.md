@@ -131,4 +131,4 @@ acceptable in current law — it is a pointer, not a narrative.
 | [0005](./0005-coalesce-caller-owned-block-loads.md) | Coalesce caller-owned buffered block loads through cache publication | superseded by ADR-0006 |
 | [0006](./0006-pipeline-whole-block-transfers.md) | Pipeline whole-block transfers with bounded Range prefetch | superseded by ADR-0008 |
 | [0007](./0007-select-node-local-cache-backends.md) | Select node-local cache backends without weakening class isolation | accepted |
-| [0008](./0008-borrow-managed-memory-blocks.md) | Borrow managed memory blocks through validated publication and sending | proposed |
+| [0008](./0008-borrow-managed-memory-blocks.md) | Borrow managed memory blocks through validated publication and sending | accepted |
