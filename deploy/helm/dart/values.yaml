@@ -66,9 +66,10 @@ cache:
   # for arena metadata; the node kills the pod if the volume outgrows this.
   emptyDirSizeLimit: 10Gi
 
-# Keep the Go heap under the container limit. The block cache is a fixed-size
-# arena outside the heap, so this bounds the rest. Keep it comfortably below
-# resources.limits.memory.
+# Soft limit for Go-managed memory, including the Hybrid RAM hot set or a
+# memory-mode cache configured through extraArgs. Budget for that cache plus
+# metadata, request buffers and runtime state; live cache bytes cannot be GC'd.
+# Leave additional headroom below resources.limits.memory for total process RSS.
 gomemlimit: 1500MiB
 
 resources:
