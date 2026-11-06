@@ -129,6 +129,29 @@ c := peer.NewClient()
 data, held, err := c.Get(ctx, ownerAddr, peer.BlockRequest{Key: store.BlockKey{Chunk: ck, Block: bi}})
 ```
 
+### 3.3.1 Borrowed serving and direct ingress
+
+```go
+type LeaseSource func(context.Context, BlockRequest) (store.Lease, bool, error)
+// Server.Borrow LeaseSource takes precedence over Server.Src.
+func (c *Client) GetInto(ctx context.Context, addr string, req BlockRequest,
+    dst []byte, validate func(context.Context, int64) error) ([]byte, bool, error)
+```
+
+`LeaseSource` transfers immutable pinned bytes to the server, including any lease
+returned on error/decline. `Server.Borrow` releases the result after success or
+write failure, without holding a store lock across the HTTP write. Existing Src
+and StoreSource keep their owned-copy contract. Node assembly uses borrowed
+serving; paths, headers, status and framing are identical.
+
+`GetInto` receives directly into caller storage, applies GetValidated's length,
+callback, timeout and captured-generation breaker rules, and returns a slice
+aliasing dst only on successful complete validation. No caller buffer is retained
+after return. On error dst may contain partial bytes and must not be published.
+It reads at most len(dst)+1 bytes, without a growing payload allocation. The
+known-length GetValidated compatibility API allocates one expected-size payload
+buffer. Read-only sharing and cache publication belong to the engine (ADR-0008).
+
 ### 3.4 Validated whole-block reads: `Client.GetValidated`
 
 ```go
@@ -143,7 +166,7 @@ no data and `held=false`, opening the current-generation circuit. Transport body
 errors retain their transport classification. After exact length validation,
 invoke the optional validator with the length and timeout-bounded request context.
 `Get` uses the same transport with no expected-length bound; engine ingestion
-always uses bounded `GetValidated`. Misses, HTTP errors and interrupted bodies do
+always uses bounded `GetInto` or `GetValidated`. Misses, HTTP errors and interrupted bodies do
 not invoke validation.
 Validation failure returns no data and `held=false`, wraps the error and opens
 the current-generation circuit before another request can record success. The
@@ -155,7 +178,7 @@ geometry.
 byte. Failed loads produce a clean `500`, credential refusals a `502` with
 `HeaderUpstreamStatus`, and declines a `404`. A failure writing an already valid
 block still truncates its Content-Length response. See
-[ADR-0006](./adr/0006-pipeline-whole-block-transfers.md) for the cross-package rule.
+[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md) for the cross-package rule.
 
 `UpstreamRefusedError` is the source error interface with `UpstreamStatus() int`;
 `Server` uses it to preserve the origin refusal code without blaming the relay.
@@ -347,22 +370,31 @@ data-probe failure.
   is concurrency-safe).
 - `Client` is safe for concurrent use; its pooled transport reuses connections
   across goroutines. Verified with `-race`.
-- Response bytes are read fully into a caller-owned buffer.
+- Response bytes are read fully into a caller-owned buffer or exclusive reserved
+  slot; borrowed server responses remain pinned through the synchronous write.
 
 ## 6. Determinism / Stability Contract
 
 - The wire path (`/peer/v1/block/<hex>/<dec>`) is part of the peer protocol.
   Changing it is a peer-protocol version bump.
 - Peer-plane traffic is plaintext by design; encryption is a CNI concern.
-- ADR-0006 requires full validated engine blocks before peer success is committed.
+- ADR-0008 requires full validated engine blocks before peer success is committed.
   Server responses use Content-Length; clients also accept older chunked peers.
   Whole-block forwarding preserves paths, keys and epoch framing. The removed
   streaming APIs are internal and have no compatibility shim.
 
 ## 7. Testing
 
+Managed-memory regression coverage:
+
+| Test | Property |
+|---|---|
+| `TestGetIntoBoundedAndGeneration` | destination aliasing and invalid-length quarantine |
+| `TestLeaseServerReleasesOnWriteError` | failed borrowed HTTP writes release their pin |
+
+
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **92.0%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
+- **Coverage**: **92.4%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
   I/O-error branches.
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
@@ -437,7 +469,7 @@ go test ./internal/peer/ -race -count=1
   by `X-DART-Hop`; full epoch convergence is future work.
 - **Whole-block only**: a complete validated block is transferred as one
   Content-Length body. Cold multi-hop startup waits for each whole-block load;
-  concurrent covering-block requests supply steady-state pipelining (ADR-0006).
+  concurrent covering-block requests supply steady-state pipelining (ADR-0008).
 - **Epoch convergence**: `X-DART-Epoch` is defined but not yet exchanged/acted
   on; membership-skew convergence is a later addition.
 - **Zero-copy**: the server currently `Write`s a buffer; serving via

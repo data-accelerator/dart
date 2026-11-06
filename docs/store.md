@@ -1,7 +1,7 @@
 # `internal/store`
 
 DART's block cache: fixed-size blocks keyed by `BlockKey`, backed by
-RAM slabs or preallocated disk arenas.
+managed RAM arenas or preallocated disk arenas.
 
 - Source: `internal/store/store.go`
 - Tests: `internal/store/store_test.go`
@@ -127,7 +127,7 @@ func (t *Tiered) Touch(k BlockKey) // record an access in the estimator without 
 `DiskStore` files. With `Memory=true`, it opens two `MemStore` instances and
 ignores `Path`, creating no files or locks. Both share the class split and
 TinyLFU policy (ADR-0007); RAM admission compares and evicts under the same
-backend lock. Memory capacity is allocated lazily in block slabs, with copied
+backend lock. Memory capacity is allocated lazily in arena segments, with compatible copied
 reads and immutable existing keys as in §3.5. Closing/reopening starts empty.
 `Slots >= 2` and the existing fraction validation apply to both backends.
 Memory-only `Stats().MemBlocks/MemSlots` sum both budgets; in a Hybrid those
@@ -193,13 +193,19 @@ func (d *DiskStore) Slots() int                  // capacity in blocks
 func NewHybrid(mem *MemStore, back ClassStore) *Hybrid
 ```
 
-`MemStore` is an in-memory `Store`: fixed-size slabs with LRU eviction, recycled
-through a `sync.Pool` so steady-state operation performs **no per-block
-allocation** — which matters at DART's target throughput, where churning
-multi-megabyte buffers would otherwise dominate GC time. `Get`/`GetReader`
-return **copies**, because a slab may be recycled the moment the lock is
-released; handing out a view of live slab memory would risk serving recycled
-bytes.
+`MemStore` manages fixed slots in lazy arena segments of at most 64 MiB (one
+slot when larger). Slot and chunk descriptors, two bounded open-addressed indices,
+free lists and intrusive LRU links allocate once at `OpenMem`. A chunk key maps to
+a reusable local descriptor; descriptor plus block index maps to a payload slot.
+Indices use backward-shift deletion, so steady churn does not accumulate tombstones
+or allocate new entries. Lookup is expected O(1), worst-case O(slots).
+
+`Acquire` pins immutable bytes without copying. `Get`/`GetReader` remain compatible
+owned-copy APIs; copying happens outside the metadata lock. `Reserve` fills a
+private slot, and `Reservation.Commit` publishes only after caller validation.
+The arena and cache metadata perform zero steady-state allocations after the
+needed payload segments exist; this does not claim zero allocations in HTTP,
+request scheduling, flights, compatibility copies or pressure fallback (ADR-0008).
 
 `Hybrid` is a `ClassStore` that puts a `MemStore` hot set in front of a backing
 `ClassStore` (normally a `Tiered`):
@@ -223,12 +229,87 @@ h := store.NewHybrid(mem, tieredDisk) // Close(h) closes both tiers
 `Hybrid.Len` is O(mem slots): the mem tier is checked for duplicates against
 the backing store's count. It exists for metrics/diagnostics, not hot paths.
 
+### 3.6 Managed block ownership and direct fills
+
+```go
+type Lease struct { /* private data, owner, slot and generation */ }
+func HeapLease(data []byte) Lease
+func (l Lease) Bytes() []byte
+func (l Lease) Clone() Lease
+func (l *Lease) Release()
+type LeaseStore interface { Acquire(BlockKey) (Lease, bool, error) }
+func Acquire(s Store, k BlockKey) (Lease, bool, error)
+func (m *MemStore) Acquire(k BlockKey) (Lease, bool, error)
+func (t *Tiered) Acquire(k BlockKey) (Lease, bool, error)
+func (h *Hybrid) Acquire(k BlockKey) (Lease, bool, error)
+type Reserver interface {
+    Reserve(context.Context, BlockKey, int64, Class) (Reservation, error)
+}
+func (m *MemStore) Reserve(ctx context.Context, k BlockKey, n int64, c Class) (Reservation, error)
+func (t *Tiered) Reserve(ctx context.Context, k BlockKey, n int64, c Class) (Reservation, error)
+type Reservation struct { /* private exclusive slot ownership */ }
+func (r Reservation) Bytes() []byte
+func (r *Reservation) Commit() (Lease, error)
+func (r *Reservation) Abort()
+```
+
+A `Lease` owns one reference. Move it by assignment, or call `Clone` to create
+another owner; every owner calls `Release`. `Bytes` is a read-only view until that
+release, with capacity restricted to valid bytes. Do not mutate it or concurrently
+operate on the same lease variable. Different owners can read/release concurrently.
+The zero value and repeated release of the same variable are safe. `HeapLease`
+takes an existing buffer as immutable owned storage; the caller relinquishes
+mutation. The generic `Acquire` wraps a legacy store's copy when needed.
+
+Memory Acquire/Clone/Release use O(1) space and expected O(1) metadata work.
+`Tiered` prefers owned and feeds only borrowed accesses to TinyLFU. Disk Acquire
+returns a copy. Hybrid borrows RAM hits and uses its ordinary promoting backing
+read on a miss; disk storage is never exposed as an unpinned live reader.
+
+`Reservation` is exclusive and unpublished: write only before `Commit`, which
+transfers ownership to an immutable lease, or call `Abort`. A concurrent fill
+never overwrites an existing key; its result can remain an uncached lease. An
+owned publication removes borrowed visibility under the class-publication lock.
+The class is ignored by an unclassified MemStore. Non-positive lengths return
+`ErrEmptyBlock`, oversize returns `ErrBlockTooLarge`, and canceled waits return
+`ctx.Err()`. Disk Tiered returns `ErrNoReservation` to select buffered ingress.
+
+A reservation first uses a free slot or an unpinned eviction candidate, preserving
+atomic TinyLFU victim admission. If all slots are pinned/filling it waits at most
+2 ms, honoring cancellation, then rechecks capacity under the metadata lock before
+returning `ErrNoSlot`. Coalesced release notifications cannot turn reusable
+capacity into a false bypass; expiry never starts another wait. An admission rejection
+returns that error immediately. This initial fixed wait is a pressure policy.
+Callers may allocate a temporary buffer and bypass caching. No per-reader quota
+or adaptive backoff is imposed. Generation-checked handles prevent a stale slot
+identity from referring to a new occupant; callers must still obey ownership.
+
+Delete hides an entry immediately. Pinned slots remain unavailable until the
+last release. Among unpinned candidates the LRU is refreshed when a borrow ends;
+a pinned candidate is skipped. `Close` rejects new operations with `ErrClosed`,
+hides entries and releases payload segments after the final pin; active leases
+remain valid. It never closes storage under a node handler (ADR-0003).
+`TieredStats.SlotWaits` counts pressure waits and `WriteBypasses` counts failed
+memory reservation due to pressure/admission. Temporary payloads, metadata,
+retired pins and HTTP state remain separate from visible occupancy and RSS.
+
+```go
+l, ok, err := store.Acquire(cache, key)
+if err != nil { return err }
+if ok {
+    defer l.Release()
+    _, err = output.Write(l.Bytes()[offset:end])
+    return err
+}
+```
+
 ## 4. Invariants & Guarantees
 
-1. **O(1) operations**: Put/Get/Has/Delete are O(1) (map + intrusive LRU +
-   free-list); eviction frees a slot with no fragmentation or compaction.
-2. **Bounded capacity**: `Len() <= Slots` always; inserting beyond capacity
-   evicts exactly the LRU block.
+1. **Bounded indices**: disk lookup is O(1) average; memory's fixed indices are
+   expected O(1), worst-case O(slots). Payload copies cost O(block bytes).
+2. **Bounded capacity**: `Len() <= Slots`; published, filling and retired pinned
+   slots share the same physical capacity. Memory pressure may decline insertion;
+   eviction selects an unpinned LRU candidate without fragmentation.
 3. **Copy on Get**: returned bytes are a fresh copy, unaffected by later eviction
    or reuse of the slot.
 4. **Immutable keys**: `Put` on an existing key keeps the original bytes (only
@@ -243,18 +324,20 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
 - `DiskStore` is safe for concurrent use, guarded by a **single mutex** in this
   first cut (including the `ReadAt` in `Get`, so reads are serialized). Per-shard
   locking and pin/refcount for lock-free reads are future optimizations (§8).
-- `Get` returns caller-owned copies; no internal buffers are shared out.
+- `Get` returns caller-owned copies. `Acquire` returns immutable shared bytes
+  pinned until explicit release; reservation bytes are exclusive until publication.
   `GetReader`, by contrast, hands back a reader **backed by the slot** and valid
   only until that slot is reused — and reuse follows **any** removal of the
   block, eviction *and* `Delete` alike: without a pin, a concurrent eviction or
   delete can tear the bytes mid-read, and a torn read is **silent** (no error,
   no generation check exists to detect one). Streaming a block to a socket
-  therefore uses `Get` (an in-lock copy), **not** `GetReader` — the peer plane
+  therefore uses owned `Get` or a pinned `Acquire`, **not** an unpinned disk
+  `GetReader` — the peer plane
   must never emit a torn block. `GetReader` remains for callers that hold the
-  block's lifetime externally; note no store API can *make* a block
-  non-evictable, so in practice that means single-threaded consumers or blocks
-  pinned by a higher layer. It currently has no in-tree callers, which is
-  deliberate.
+  block's lifetime externally: disk `GetReader` does not pin its slot, so callers
+  must serialize removal/reuse externally. Memory `Acquire` separately pins its
+  physical slot, and disk `Acquire` returns an owned copy. Unpinned disk
+  `GetReader` currently has no in-tree callers, which is deliberate.
 - Verified with `-race` under concurrent Put/Get/Delete/Has with eviction churn.
 
 ## 5.1 Disk footprint and operational notes
@@ -284,10 +367,31 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
   keep stable. The backing file layout is a private implementation detail and
   **not** persisted across restarts (§7), so it is free to change.
 
+The additive managed-memory contract follows
+[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md). Existing owned-copy APIs
+and wire keys retain their contract. Memory reservation can decline under pins;
+callers treat caching as best effort. These rules also apply to Hybrid's RAM tier.
+
 ## 7. Testing
 
+Managed-memory regression coverage:
+
+| Test | Property |
+|---|---|
+| `TestLeasePinsDeletedSlot` | active clones prevent reuse after deletion; short tails remain private |
+| `TestReservationPublicationAndAbort` | unpublished fills, abort, direct slot publication and duplicate immutability |
+| `TestReservationRechecksCoalescedCapacity` | simultaneous releases coalesced before waiters select still allow both reservations |
+| `TestLeasePressureCancellationAndClose` | canceled reservations and close preserve active bytes |
+| `TestLeaseSteadyStateAllocations` | zero warm borrow and metadata/payload reuse allocations after segment warmup |
+| `TestFixedIndexChurnMatchesMap` | 50,000 deterministic random operations cross-checked against an independent map |
+| `TestHybridAdmissionFalseWhenBothTiersDecline` | backing admission rejection plus pinned RAM returns false; memory-only admission still returns true |
+| `TestReservationCloseBeforePublication` | closing an unfinished fill rejects publication and frees its arena |
+| `TestTieredBorrowedLeaseSurvivesPromotion` | promotion preserves old readers, isolation and pressure counters |
+| `TestLeaseConcurrentReuse` | concurrent borrowed-slot churn under race detector |
+
+
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **95.1%** of statements. The uncovered lines are the `ReadAt`/
+- **Coverage**: **93.0%** of statements. The uncovered lines are the `ReadAt`/
   `WriteAt` I/O-error branches in `Get`/`Put`, which require fault injection to
   hit and are left as defensive handling.
 - **Note**: tests use `t.TempDir()`, which honors `TMPDIR`; in the sandbox export
@@ -368,15 +472,13 @@ go test ./internal/store/ -cover -count=1
   would buy nothing while leaving stale bytes readable on disk (including bytes
   fetched from an authenticated origin), so they are discarded. A WAL or per-slot
   commit header for warm restart is a future addition.
-- **Single mutex**: fine for correctness; for 100 Gbps, shard the store per
-  CPU/NIC queue and add pin/refcount so `Get` can serve `ReadAt`/`sendfile`
-  without holding the lock.
-- **No pinned zero-copy serving**: `GetReader` returns a slot-backed reader, so
-  without a pin an eviction could reuse the slot mid-read. Callers that stream a
-  block to a socket therefore use `Get` and pay one copy (§5). Lifting that copy
-  needs pin/refcount, and true `sendfile`/`splice` additionally needs the slot's
-  descriptor and offset exposed (plus an `http.ResponseWriter` supporting
-  `ReaderFrom`); that is future work.
+- **Metadata contention**: memory uses a short mutex for its bounded indices and
+  reference/LRU updates, with no payload copy or I/O inside it. Sharding and NUMA
+  placement remain future tuning work guided by measured contention.
+- **Socket copy avoidance**: pinned memory serving avoids the cache's payload
+  copy. Ordinary HTTP writes still use the kernel's normal copying socket path;
+  vector writes and kernel zero-copy sends are separate future work. Disk
+  GetReader remains unpinned, so disk serving uses owned bytes.
 - **No hybrid admission coupling**: the memory tier uses plain LRU; it does not
   yet consult TinyLFU, so a one-shot block can transiently occupy a slab (it
   cannot displace disk contents, and the slab is recycled on eviction).

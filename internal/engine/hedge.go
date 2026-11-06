@@ -9,6 +9,7 @@ import (
 	"github.com/data-accelerator/dart/internal/cluster"
 	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/peer"
+	"github.com/data-accelerator/dart/internal/store"
 )
 
 // Hedging bounds tail latency on the peer path.
@@ -151,10 +152,11 @@ func (e *Engine) hedgeDelay() (time.Duration, bool) {
 
 // peerResult is one contender's outcome in a hedged fetch.
 type peerResult struct {
-	data []byte
-	held bool
-	err  error
-	from string
+	lease store.Lease
+	data  []byte
+	held  bool
+	err   error
+	from  string
 }
 
 // fetchHedged asks primary for the block, with two distinct escalations to
@@ -171,24 +173,45 @@ type peerResult struct {
 // The first answer with held=true wins and the loser is cancelled. If neither
 // contender can serve the block, ok is false and the caller falls back to origin.
 func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req peer.BlockRequest, want int64) ([]byte, bool) {
+	r, ok := e.fetchHedgedResult(ctx, primary, backup, func(ctx context.Context, addr string) peerResult {
+		data, held, err := e.peer.GetValidated(ctx, addr, req, want, nil)
+		return peerResult{data: data, held: held, err: err}
+	})
+	return r.data, ok
+}
+
+func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, get func(context.Context, string) peerResult) (peerResult, bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
-	defer func() { cancel(); workers.Wait() }() // all contender buffers stay owned until exit
-
 	results := make(chan peerResult, 2)
+	// Join first, then release every unconsumed loser result.
+	defer func() {
+		cancel()
+		workers.Wait()
+		for {
+			select {
+			case r := <-results:
+				r.lease.Release()
+			default:
+				return
+			}
+		}
+	}()
+
 	launch := func(addr string) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			start := time.Now()
-			data, held, err := e.peer.GetValidated(ctx, addr, req, want, nil)
-			if err == nil && held {
+			r := get(ctx, addr)
+			if r.err == nil && r.held {
 				// Only a real fetch informs the latency estimate: a fast 404
 				// miss would otherwise collapse the p99 to the floor and arm
 				// hedges a few milliseconds into genuine fetches.
 				e.latency.Observe(time.Since(start))
 			}
-			results <- peerResult{data: data, held: held, err: err, from: addr}
+			r.from = addr
+			results <- r
 		}()
 	}
 
@@ -231,8 +254,9 @@ func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req pe
 				if hedgeFired {
 					e.mx.recordHedgeWin(r.from == primary)
 				}
-				return r.data, true
+				return r, true
 			}
+			r.lease.Release()
 			// Definite failure: fail over now, regardless of the hedge budget.
 			if backupUsable && !backupLaunched {
 				timerC = nil
@@ -242,10 +266,10 @@ func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req pe
 				e.mx.recordFailover()
 			}
 		case <-ctx.Done():
-			return nil, false
+			return peerResult{}, false
 		}
 	}
-	return nil, false
+	return peerResult{}, false
 }
 
 // hedgeTargets picks the primary (tree parent) and a backup for a chunk. The

@@ -699,7 +699,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 		// Serve only fully obtained, validated blocks. Client-range prefetch
 		// pipelines separate blocks without exposing partial upstream responses.
 		// The tracker (if enabled) shares the peer listener so readers can JOIN.
-		blocks := &peer.Server{NodeID: cfg.selfID, Src: e.PeerSource()}
+		blocks := &peer.Server{NodeID: cfg.selfID, Borrow: e.PeerLeaseSource()}
 		var mux *http.ServeMux
 		if trackerReg != nil {
 			mux = (&tracker.Server{R: trackerReg}).Handler()

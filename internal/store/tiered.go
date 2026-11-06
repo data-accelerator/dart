@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 // The tiered layer splits the block cache into two physically isolated budgets:
 //
 //	owned    blocks this node is the authoritative holder of (HRW top-R).
-//	         Default 80% of capacity, LRU, admitted unconditionally.
+//	         Default 80% of capacity, LRU, exempt from TinyLFU admission.
 //	borrowed copies obtained because a local client asked for them or because
 //	         this node relayed them. Default 20%, TinyLFU-admitted.
 //
@@ -57,6 +58,9 @@ type ClassStore interface {
 
 // TieredStats is a snapshot of per-class occupancy.
 type TieredStats struct {
+	// SlotWaits and WriteBypasses count memory reservation pressure/admission.
+	SlotWaits      uint64
+	WriteBypasses  uint64
 	OwnedBlocks    int
 	OwnedSlots     int
 	BorrowedBlocks int
@@ -174,6 +178,61 @@ func (t *Tiered) Get(k BlockKey) ([]byte, bool, error) {
 	return t.borrowed.Get(k)
 }
 
+// Acquire borrows immutable memory hits; disk budgets return an owned copy.
+func (t *Tiered) Acquire(k BlockKey) (Lease, bool, error) {
+	if l, ok, err := Acquire(t.owned, k); err != nil || ok {
+		return l, ok, err
+	}
+	t.sk.Increment(keyHash(k))
+	return Acquire(t.borrowed, k)
+}
+
+// Reserve obtains a private slot in the selected memory budget. Disk-backed
+// budgets return ErrNoSlot so callers use the ordinary buffered write path.
+func (t *Tiered) Reserve(ctx context.Context, k BlockKey, n int64, c Class) (Reservation, error) {
+	if !t.memory {
+		return Reservation{}, ErrNoReservation
+	}
+	m := t.owned.(*MemStore)
+	var admit func(BlockKey) bool
+	rejected := false
+	if c != Owned {
+		m = t.borrowed.(*MemStore)
+		t.sk.Increment(keyHash(k))
+		admit = func(victim BlockKey) bool {
+			ok := t.sk.Admit(keyHash(k), keyHash(victim))
+			rejected = !ok
+			return ok
+		}
+	}
+	r, err := m.reserve(ctx, k, n, admit)
+	if rejected {
+		t.mu.Lock()
+		t.rejected++
+		t.mu.Unlock()
+	}
+	if err == nil {
+		r.tier, r.class = t, c
+	}
+	return r, err
+}
+
+func (t *Tiered) commit(r *Reservation) (Lease, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r.class != Owned && t.owned.Has(r.key) {
+		l := r.lease
+		*r = Reservation{}
+		return l, nil
+	}
+	k, c := r.key, r.class
+	l, err := r.commit()
+	if err == nil && c == Owned {
+		t.borrowed.Delete(k)
+	}
+	return l, err
+}
+
 // GetReader streams the block from either budget, with the same estimator
 // scoping as Get.
 func (t *Tiered) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
@@ -204,11 +263,46 @@ func (t *Tiered) Put(k BlockKey, data []byte) error {
 
 // PutClass inserts a block into the given budget.
 //
-// Owned blocks are admitted unconditionally: this node is responsible for them,
-// so refusing one would create a hole in the distributed cache. Borrowed blocks
+// Owned blocks bypass TinyLFU admission because this node is responsible for
+// them. A pinned/filling memory arena may still decline physical insertion.
+// Borrowed blocks
 // go through TinyLFU admission once the budget is full, so a one-shot block
 // cannot evict a warm one.
 func (t *Tiered) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
+	if t.memory {
+		if len(data) == 0 {
+			return false, ErrEmptyBlock
+		}
+		if int64(len(data)) > t.owned.(*MemStore).slotSize {
+			return false, ErrBlockTooLarge
+		}
+		// Serialize the existing-entry check with class promotion. Borrowing keeps
+		// the entry stable without copying or holding the lock across payload work.
+		t.mu.Lock()
+		l, ok, err := Acquire(t.owned, k)
+		if err == nil && !ok && c != Owned {
+			l, ok, err = Acquire(t.borrowed, k)
+		}
+		t.mu.Unlock()
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			l.Release()
+			return true, nil
+		}
+		r, err := t.Reserve(context.Background(), k, int64(len(data)), c)
+		if errors.Is(err, ErrNoSlot) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		copy(r.Bytes(), data)
+		l, err = r.Commit()
+		l.Release()
+		return err == nil, err
+	}
 	if c == Owned {
 		if err := t.owned.Put(k, data); err != nil {
 			return false, err
@@ -282,6 +376,10 @@ func (t *Tiered) Stats() TieredStats {
 	if t.memory {
 		st.MemBlocks = st.OwnedBlocks + st.BorrowedBlocks
 		st.MemSlots = st.OwnedSlots + st.BorrowedSlots
+		for _, s := range []*MemStore{t.owned.(*MemStore), t.borrowed.(*MemStore)} {
+			st.SlotWaits += s.waits.Load()
+			st.WriteBypasses += s.bypasses.Load()
+		}
 	}
 	return st
 }

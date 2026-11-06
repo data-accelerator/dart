@@ -84,8 +84,8 @@ It never creates or opens a cache directory, arena or directory lock; `-cache-di
 and `-mem-size` are unused. The existing `-owned-fraction` split and borrowed
 TinyLFU admission remain, so single-node owned traffic can fill only its reserved
 share. Capacity rounds down to whole blocks and must contain at least two blocks
-(one per class); invalid modes, capacities and fractions fail clearly. RAM slabs
-are allocated lazily; cache capacity excludes metadata, returned copies and
+(one per class); invalid modes, capacities and fractions fail clearly. RAM payloads
+are managed in lazy arena segments; cache capacity excludes metadata, temporary buffers and
 in-flight reads/prefetch, so it is not a process RSS limit. Restart starts cold.
 Backend choice is node-local and can mix within a uniform-geometry cluster
 (ADR-0007); paths, keys and placement are unchanged.
@@ -137,7 +137,7 @@ dart -listen :8080 -peer-listen :9000 -self-id B \
 
 ## 3. Behavior & guarantees
 
-Long ranges use bounded ordered in-range prefetch (ADR-0006). The byte/load
+Long ranges use bounded ordered in-range prefetch (ADR-0008). The byte/load
 limits cover speculative payload/results, not cache memory, foreground reads or
 transient copies. Prefetch workers are canceled and joined before handler exit.
 `-prefetch-window=1` selects serial block reads; no peer handler expands its range.
@@ -203,6 +203,12 @@ stamped at build time (`-ldflags "-X main.version=..."`) and reported by
 - The discovery-scheme set is a property of the binary (`dns`+`static` for
   `dart`, plus `k8s` for `dart-k8s`); embedding applications choose it via
   `node.Run`'s scheme registration.
+
+Memory reads borrow pinned blocks and supported refills receive directly into
+unpublished slots (ADR-0008). A pin delays slot reuse after eviction. Slot pressure
+waits at most 2 ms with cancellation and then serves through temporary buffers
+without cache insertion. This exceptional path may allocate/copy. Existing cache
+flags and owned/borrowed policy remain; no persistent shared memory is provided.
 
 ## 4. Testing
 

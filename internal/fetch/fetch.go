@@ -150,6 +150,10 @@ var _ Fetcher = (*HTTPFetcher)(nil)
 // start are discarded, at most end-start+1 are read, the rest of the response
 // is aborted — and Range.RangeIgnored is set. Any other status is an error.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (Range, error) {
+	return f.fetch(ctx, url, start, end, nil)
+}
+
+func (f *HTTPFetcher) fetch(ctx context.Context, url string, start, end int64, dst []byte) (Range, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Range{}, err
@@ -184,7 +188,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	}
 
 	if resp.StatusCode == http.StatusOK && ranged {
-		return sliceIgnoredRange(resp, url, start, end)
+		return sliceIgnoredRangeInto(resp, url, start, end, dst)
 	}
 
 	// A 206 is bounded by the requested window (read one byte past it so an
@@ -194,7 +198,12 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	if ranged {
 		bodyReader = io.LimitReader(resp.Body, end-start+2)
 	}
-	body, err := io.ReadAll(bodyReader)
+	var body []byte
+	if dst != nil {
+		body, err = ReadBounded(bodyReader, dst)
+	} else {
+		body, err = io.ReadAll(bodyReader)
+	}
 	if err != nil {
 		return Range{}, fmt.Errorf("fetch: %s: read body: %w", Redact(url), err)
 	}
@@ -245,6 +254,10 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 // the window, and let Body.Close abort the rest. The total is taken from
 // Content-Length (-1 when the response is chunked).
 func sliceIgnoredRange(resp *http.Response, url string, start, end int64) (Range, error) {
+	return sliceIgnoredRangeInto(resp, url, start, end, nil)
+}
+
+func sliceIgnoredRangeInto(resp *http.Response, url string, start, end int64, dst []byte) (Range, error) {
 	if resp.ContentLength == 0 && start == 0 {
 		// The window [0,0] of an empty object is the empty window, not an
 		// error — some origins answer the size probe this way instead of with
@@ -258,7 +271,14 @@ func sliceIgnoredRange(resp *http.Response, url string, start, end int64) (Range
 		// A body that ends before start puts the range beyond the object.
 		return Range{}, fmt.Errorf("fetch: %s: range start %d beyond body: %w", Redact(url), start, err)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
+	var data []byte
+	var err error
+	reader := io.LimitReader(resp.Body, end-start+1)
+	if dst != nil {
+		data, err = ReadBounded(reader, dst)
+	} else {
+		data, err = io.ReadAll(reader)
+	}
 	if err != nil {
 		return Range{}, fmt.Errorf("fetch: %s: read body: %w", Redact(url), err)
 	}
@@ -465,7 +485,7 @@ func (c *Coalescing) identity(url string) string {
 // just a block. The bound exists so a stalled origin connection — accepted,
 // then silent — cannot poison a cache key forever: the flight's context
 // expires at the bound, and the key's map entry becomes evictable a short
-// grace later (evictGrace) even if the leader's fetcher ignores context
+// grace later (FlightGrace) even if the leader's fetcher ignores context
 // cancellation.
 const DefaultMaxFlight = 10 * time.Minute
 
@@ -599,12 +619,12 @@ type call struct {
 	stale   time.Time // after this, a caller evicts the flight and leads a replacement
 }
 
-// evictGrace is the margin between a flight's own deadline and the moment it
+// FlightGrace is the margin between a flight's own deadline and the moment it
 // becomes evictable. A ctx-respecting worker delivers its result right at the
 // deadline; the margin guarantees that delivery lands before any waiter
 // declares the flight dead, so eviction only ever fires on a worker that
 // ignores its context.
-func evictGrace(maxFlight time.Duration) time.Duration {
+func FlightGrace(maxFlight time.Duration) time.Duration {
 	g := maxFlight / 8
 	if g < 25*time.Millisecond {
 		g = 25 * time.Millisecond
@@ -636,7 +656,7 @@ func (g *group) acquire(key string, maxFlight time.Duration) (c *call, lead bool
 	}
 	end := time.Now().Add(maxFlight)
 	flightCtx, cancel := context.WithDeadline(context.Background(), end)
-	c = &call{done: make(chan struct{}), end: end, stale: end.Add(evictGrace(maxFlight)), ctx: flightCtx, cancel: cancel, refs: 1}
+	c = &call{done: make(chan struct{}), end: end, stale: end.Add(FlightGrace(maxFlight)), ctx: flightCtx, cancel: cancel, refs: 1}
 	g.m[key] = c
 	return c, true
 }

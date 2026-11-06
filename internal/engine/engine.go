@@ -106,10 +106,12 @@ type Options struct {
 
 // Engine serves object byte ranges from cache with origin read-through.
 type Engine struct {
-	cfg     chunk.Config
-	store   store.Store
-	fetcher fetch.Fetcher
-	ns      string
+	borrowed leaseLoads
+	origins  leaseLoads
+	cfg      chunk.Config
+	store    store.Store
+	fetcher  fetch.Fetcher
+	ns       string
 
 	// P2P (optional)
 	cluster  cluster.Provider
@@ -201,6 +203,10 @@ func New(opt Options) (*Engine, error) {
 		trackerReg:    opt.TrackerRegistry,
 		rs:            make(map[string]*readerSet),
 	}
+	limit := fetch.FlightLimit(opt.Fetcher)
+	e.borrowed.maxFlight = limit
+	e.origins.maxFlight = limit
+	e.loads.leaseLoads.maxFlight = limit
 	e.opener, _ = opt.Fetcher.(fetch.Opener)
 	if e.fanout < 1 {
 		e.fanout = 2
@@ -357,14 +363,7 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		return data, nil
 	}
 	start := time.Now()
-	if !e.p2p {
-		r, err := e.loadBlock(ctx, url, objectID, size, blockIndex, hop, key)
-		if err == nil {
-			e.mx.recordBlockRead(r, false, time.Since(start))
-		}
-		return r.data, err
-	}
-	r, shared, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
+	r, _, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
 		// A previous leader can publish between our first miss and flight
 		// admission. Recheck after becoming leader, without holding the map lock.
 		if data, ok, err := e.store.Get(key); err != nil {
@@ -372,69 +371,17 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		} else if ok {
 			return blockRead{data: data, source: blockFromCache}, nil
 		}
-		return e.loadBlock(ctx, url, objectID, size, blockIndex, hop, key)
+		r, err := e.readBorrowedBlock(ctx, url, objectID, size, blockIndex, hop)
+		if err != nil {
+			return blockRead{}, err
+		}
+		return blockRead{lease: r.lease, source: r.source}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if shared {
-		// Buffered sources return caller-owned bytes. A waiter must not be
-		// able to mutate the leader's result or another waiter's response.
-		r.data = append([]byte(nil), r.data...)
-	}
-	e.mx.recordBlockRead(r, shared, time.Since(start))
+	e.mx.recordBlockRead(r, time.Since(start))
 	return r.data, nil
-}
-
-// loadBlock performs one miss. Its caller owns the flight through validation
-// and cache publication; no background worker can outlive a serving handler.
-func (e *Engine) loadBlock(ctx context.Context, url, objectID string, size, blockIndex int64, hop int, key store.BlockKey) (blockRead, error) {
-	ck := key.Chunk
-	// The block's byte length is fixed by the object geometry: a full BlockSize,
-	// or a shorter final block. Any source that returns a different length has
-	// handed us corrupt data, and caching it would be a permanent, self-
-	// propagating error because the block cache is write-once per key (a later
-	// correct fetch could never overwrite it, only eviction would clear it). So a
-	// mismatch is refused rather than stored. See docs/engine.md.
-	want := e.blockLen(size, blockIndex)
-	if e.p2p {
-		if data, ok := e.fromPeer(ctx, url, objectID, ck, key, hop, want); ok {
-			if int64(len(data)) == want {
-				e.putBlock(key, data, ck)
-				return blockRead{data: data, source: blockFromPeer, wireBytes: len(data)}, nil
-			}
-			// A peer served a wrongly-sized block: do not trust or cache it; fall
-			// through to origin, which is authoritative.
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return blockRead{}, err
-	}
-	r, err := fetch.FetchBlock(ctx, e.fetcher, url, e.cfg.BlockSize, blockIndex, size)
-	if err != nil {
-		return blockRead{}, err
-	}
-	if int64(len(r.Data)) != want {
-		return blockRead{}, fmt.Errorf("engine: origin returned %d bytes for block %d, want %d", len(r.Data), blockIndex, want)
-	}
-	// Separate engine flights (e.g. different relay depths) may still share
-	// an origin singleflight's read-only backing array. Detach before any
-	// cache publication or caller-owned return, including the origin leader.
-	data := append([]byte(nil), r.Data...)
-	read := blockRead{data: data, source: blockFromOrigin}
-	if !r.Coalesced {
-		read.wireBytes = len(data)
-	}
-	if r.RangeIgnored {
-		// The origin answered the ranged request with a whole-object 200 and we
-		// sliced the window out of it. Serving those bytes is fine, but caching
-		// them is not: a Range-blind origin pays a full object per block, and
-		// such objects are meant for the passthrough path (§3.9). This is
-		// defense in depth — callers already decline via RangeUnsupported.
-		return read, nil
-	}
-	e.putBlock(key, data, ck)
-	return read, nil
 }
 
 // blockLen is the exact byte length of block blockIndex given the object size:
@@ -527,37 +474,14 @@ func (e *Engine) fileKey(objectID string) uint64 {
 // P2P node; a store-only node can use peer.StoreSource instead.
 func (e *Engine) PeerSource() peer.Source {
 	return func(ctx context.Context, req peer.BlockRequest) ([]byte, bool, error) {
-		if !e.relayableRequest(req) {
-			e.mx.recordRelay(false)
-			return nil, false, nil // malformed requester addressing: decline cheaply
+		l, held, err := e.peerRead(ctx, req, true)
+		if err != nil || !held {
+			l.Release()
+			return nil, held, err
 		}
-		if data, ok, err := e.store.Get(req.Key); err != nil {
-			return nil, false, err
-		} else if ok {
-			e.mx.recordCacheHit()
-			return data, true, nil
-		}
-		if req.URL == "" || req.Hop >= maxHop {
-			e.mx.recordRelay(false)
-			return nil, false, nil // cannot / should not relay
-		}
-		size, err := e.Size(ctx, req.URL)
-		if err != nil {
-			return nil, false, asRelayError(err)
-		}
-		if e.RangeUnsupported(req.URL) {
-			// Blocks cannot be fetched piecemeal from this origin, so decline
-			// rather than pulling the
-			// whole object per block (and caching fragments of it).
-			e.mx.recordRelay(false)
-			return nil, false, nil
-		}
-		oid, _ := chunk.ObjectID(req.URL)
-		data, err := e.block(ctx, req.URL, oid, size, int64(req.Key.Block), req.Hop)
-		if err != nil {
-			return nil, false, asRelayError(err)
-		}
-		e.mx.recordRelay(true)
-		return data, true, nil
+		// The owned adapter returns only heap-backed, caller-owned bytes.
+		data := l.Bytes()
+		l.Release()
+		return data, held, err
 	}
 }
