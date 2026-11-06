@@ -11,7 +11,7 @@ image:
   # DART images are not published to any registry: build from source
   # (docker build -t dart:<tag> .) or point repository at your own registry.
   # For a tagged release build, set tag to the chart's appVersion (e.g.
-  # v0.2.0) so the deployed image matches what the chart was written for.
+  # v0.3.0) so the deployed image matches what the chart was written for.
   repository: dart
   tag: dev
   pullPolicy: IfNotPresent
