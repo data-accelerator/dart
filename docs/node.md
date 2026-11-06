@@ -30,6 +30,11 @@ Flags, origin-resolution modes, the registry mirror dispatch and P2P wiring
 behave exactly as documented in [dart.md](./dart.md); this document covers only
 what is new: the assembly API and the scheme mechanism.
 
+The Docker build uses Go 1.27.3 for both command variants, with `CGO_ENABLED=0`
+and a build-time `main.version` stamp. The module's Go 1.22 compatibility floor
+remains covered separately in CI alongside stable Go. Updating the release
+builder does not change the module floor or discovery-scheme registration.
+
 ## 2. Concepts
 
 | Term | Meaning |

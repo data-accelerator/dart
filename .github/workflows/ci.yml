@@ -206,9 +206,10 @@ jobs:
       # Build only: publishing is a separate, credentialed decision. This just
       # keeps the Dockerfile from rotting.
       #
-      # SKIP_TESTS=1 because the Dockerfile runs vet+test inside the build stage
-      # and the test job above already covers that on Go 1.22 (the version the
-      # build stage pins) -- running them again here would only double the wait.
+      # SKIP_TESTS=1 because the module jobs above cover vet+test on the Go 1.22
+      # compatibility floor and stable Go. The image uses a supported patched
+      # release builder; this job verifies both image targets without repeating
+      # the full test suite inside the container.
       - name: build image
         run: docker build --build-arg SKIP_TESTS=1 -t dart:ci .
 
