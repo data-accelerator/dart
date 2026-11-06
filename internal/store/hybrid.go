@@ -61,6 +61,19 @@ func (h *Hybrid) Get(k BlockKey) ([]byte, bool, error) {
 	return data, true, nil
 }
 
+// Acquire borrows a hot memory hit; a backing hit keeps the caller-owned copy
+// while promoting it. A disk miss never pins a reusable disk slot.
+func (h *Hybrid) Acquire(k BlockKey) (Lease, bool, error) {
+	if l, ok, err := h.mem.Acquire(k); err != nil || ok {
+		if ok {
+			h.touchBack(k)
+		}
+		return l, ok, err
+	}
+	data, ok, err := h.Get(k)
+	return HeapLease(data), ok, err
+}
+
 // GetReader streams the block, preferring memory.
 //
 // Unlike Get this does not promote: the streaming path is typically a one-shot
@@ -144,9 +157,11 @@ func (h *Hybrid) Close() error {
 func (m *MemStore) keys() []BlockKey {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]BlockKey, 0, len(m.index))
-	for k := range m.index {
-		out = append(out, k)
+	out := make([]BlockKey, 0, m.Len())
+	for i := range m.entries {
+		if m.entries[i].published {
+			out = append(out, m.entries[i].key)
+		}
 	}
 	return out
 }

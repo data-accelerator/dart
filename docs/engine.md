@@ -123,20 +123,23 @@ peer/origin timeouts. A waiter can cancel independently. If the leader is
 canceled, a live waiter may take over with its own context; a failed URL or
 credential is not reused against a different caller's URL. Completed failures
 are not retained. Successful immutable bytes can be shared across URL aliases,
-including when cache admission declines them. Each buffered caller receives
-owned bytes; a joined load adds O(block size) copying per caller, plus one
-snapshot per shared flight. Coordination holds a mutex only for map access,
-not store or network I/O. Metadata probes remain endpoint-scoped independently.
-Origin results are detached from the origin singleflight's read-only buffer
-before cache publication or return, including across separate relay depths.
+including when cache admission declines them. `Serve` and `PeerLeaseSource`
+share immutable leased results, cloning references without copying payloads.
+The compatibility `PeerSource` and owned block adapter still return independent
+mutable bytes, with O(block bytes) copying. Both adapters join the same leased
+miss path. Coordination protects metadata, never network operations or payload
+copies. Metadata probes remain endpoint-scoped independently. Origin lease
+flights share across relay depths while retaining one result until all consumers
+detach. The final departing origin consumer cancels and joins its backend.
 
-Only the executing load records wire bytes. Each successful buffered miss
+Exactly one successful consumer records wire bytes, including when the first
+origin caller cancels while another consumer remains. Each successful buffered miss
 records one latency from its first admission attempt through waiting, retries
 and publication, even if a waiter takes over as leader. Joined reads use the
 same block source without adding another transfer. This
 coalescing covers `Serve`/`PeerSource` block loads and their origin fallback.
 The lifecycle and whole-block pipeline contract is recorded in
-[ADR-0006](./adr/0006-pipeline-whole-block-transfers.md).
+[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md).
 
 **Block-length validation.** A block's byte length is fixed by the object
 geometry (a full `BlockSize`, or a shorter final block). Before a fetched block
@@ -146,7 +149,8 @@ origin and the peer paths:
 - an origin block of the wrong length fails the read (it is never cached);
 - a peer that returns a wrongly-sized block is not trusted — the read falls
   through to origin, which is authoritative;
-- peer candidates are checked by `Client.GetValidated` before recording success.
+- peer candidates are checked by `Client.GetInto` (or compatibility
+  `Client.GetValidated`) before recording success.
   A wrong length immediately quarantines that parent under the request's captured
   breaker generation. No peer bytes are published downstream until the complete
   block has been obtained and validated; failure may try a backup or origin.
@@ -219,6 +223,22 @@ a requested cached block from being blamed for a different URL's geometry.
 Requests without an Origin URL remain valid cache-only reads; a cold one
 cannot relay. Identity checking takes O(URL length) time and space, adds no
 network traffic.
+
+### 3.5.1 `func (e *Engine) PeerLeaseSource() peer.LeaseSource`
+
+The node wires this source into `peer.Server.Borrow`. It has PeerSource's key,
+URL, geometry, hop, credential and error rules, but transfers a `store.Lease`
+that the server releases after writing. Even error/decline results transfer any
+returned lease to the caller. Memory hits avoid full-block copies. Supported
+memory refills reserve an exclusive slot, receive directly, validate and commit;
+failed fills abort without visibility. Shared cold reads retain the same bytes.
+Disk and Hybrid preserve their compatible write/promote path.
+
+A full pinned/filling arena waits briefly with cancellation, then uses a temporary
+buffer and skips cache publication. Admission rejection has the same fallback.
+The exceptional path may allocate/copy. `fetch.IntoFetcher` permits direct origin
+fills; unsupported fetchers retain validation and copy into the receive buffer.
+Neither cache admission nor pressure may fail a read that already has valid bytes.
 
 ### 3.6 Bounded ordered Range prefetch
 
@@ -372,9 +392,8 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 2. **Read-through + cache**: a block is fetched from origin at most once per
    coalesced flight and zero times more *while cached*. Two qualifications:
    insertion is best-effort — under cache pressure a block may be evicted
-   before a later read, which then re-fetches it; and "at most once" assumes
-   the configured `Fetcher` coalesces (the node wires `fetch.Coalescing`; a
-   custom non-coalescing Fetcher re-fetches per concurrent miss). Bytes sliced
+   before a later read, which then re-fetches it. Engine origin lease flights
+   coalesce concurrent reads even with a custom Fetcher. Bytes sliced
    from a Range-ignored whole-object 200 are served but never cached (§3.9).
 3. **Non-chunked responses on the block path**: client reads served from the
    block engine always use Content-Length framing. Verbatim passthrough of a
@@ -398,19 +417,21 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
 
 - `Engine` is safe for concurrent use: the size cache is mutex-guarded, the
   store is concurrency-safe, and buffered P2P misses are coordinated by
-  block/depth through cache publication. The `Coalescing` fetcher independently
-  deduplicates origin ranges. Verified with `-race` under overlapping `Serve`.
+  block/depth through cache publication. Origin lease flights independently
+  share across depths; traditional Coalescing.Fetch remains available for owned
+  callers. Verified with `-race` under overlapping `Serve`.
 - Shared buffered loads keep store access in the leader caller's lifetime;
   Serve-owned prefetch workers are canceled and joined before Serve returns.
-  Returned block buffers are
-  caller-owned, including coalesced callers. Waiters do not keep a goroutine
-  after returning on cancellation (ADR-0003 and ADR-0006).
+  Serve and PeerLeaseSource release immutable block leases after writes. The
+  compatibility PeerSource retains owned copies. Waiters do not keep a goroutine
+  after cancellation; the last origin waiter joins shared backend cleanup
+  (ADR-0003 and ADR-0008).
 - `Handler` is safe for concurrent use if `Resolve`/`E` are not mutated after
   construction.
 
 ## 6. Determinism / Stability Contract
 
-- ADR-0006 specifies complete validated blocks before peer success responses and
+- ADR-0008 specifies complete validated blocks before peer success responses and
   bounded in-range prefetch. The removed streaming internal APIs are not retained.
   GET paths, keys, hop headers, credentials and HTTP/1.1 interoperability remain
   unchanged; cold multi-hop first-block latency includes full transfer per hop.
@@ -420,12 +441,31 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
   but nothing else here is on the wire. HTTP Range/Content-Range is the external
   client contract.
 - Buffered coalescing preserves geometry, key construction and the wire
-  protocol; caller ownership and cancellation follow §3.3 and ADR-0006.
+  protocol; caller ownership and cancellation follow §3.3 and ADR-0008.
+
+Managed-memory serving preserves whole-block validation and the existing HTTP
+wire contract. Borrowed results require explicit release; legacy owned-copy APIs
+remain compatible. Prefetch reuses a fixed ring and worker set per request;
+queued/error/unused results release pins and speculative budgets before exit.
 
 ## 7. Testing
 
+Managed-memory regression coverage:
+
+| Test | Property |
+|---|---|
+| `TestBorrowedOriginUsesReceiveSlot` | receive/cache/sender share one payload; zero warm block allocation |
+| `TestBorrowedPressureBypassesPublication` | correct subrange and temporary accounting with a pinned full arena |
+| `TestBorrowedWriteFailureReleasesPins` | all queued/current pins and speculative reservations released on client error |
+| `TestLeasedFlightSharesOneImmutableBuffer` | joined readers share a pointer and single transfer credit |
+| `TestInlineLeaseFlightRetriesCancellationAndDifferentURL` | canceled leader retry, renewed URL retry, and same-URL error preservation |
+| `TestAbandonedOriginLeaseFlightStopsAdmission` | new callers start fresh while abandoned backend cleanup is joined |
+| `TestSharedLeaseFlightCancellationOwnership` | survivor ownership and final-caller cancel/join |
+| `TestBorrowedPeerHTTPAndWarmReuse` | actual borrowed peer HTTP path into memory budgets and warm reuse |
+
+
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.3%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **90.8%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.

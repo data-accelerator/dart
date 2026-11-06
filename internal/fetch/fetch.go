@@ -150,6 +150,10 @@ var _ Fetcher = (*HTTPFetcher)(nil)
 // start are discarded, at most end-start+1 are read, the rest of the response
 // is aborted — and Range.RangeIgnored is set. Any other status is an error.
 func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (Range, error) {
+	return f.fetch(ctx, url, start, end, nil)
+}
+
+func (f *HTTPFetcher) fetch(ctx context.Context, url string, start, end int64, dst []byte) (Range, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return Range{}, err
@@ -184,7 +188,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	}
 
 	if resp.StatusCode == http.StatusOK && ranged {
-		return sliceIgnoredRange(resp, url, start, end)
+		return sliceIgnoredRangeInto(resp, url, start, end, dst)
 	}
 
 	// A 206 is bounded by the requested window (read one byte past it so an
@@ -194,7 +198,12 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 	if ranged {
 		bodyReader = io.LimitReader(resp.Body, end-start+2)
 	}
-	body, err := io.ReadAll(bodyReader)
+	var body []byte
+	if dst != nil {
+		body, err = ReadBounded(bodyReader, dst)
+	} else {
+		body, err = io.ReadAll(bodyReader)
+	}
 	if err != nil {
 		return Range{}, fmt.Errorf("fetch: %s: read body: %w", Redact(url), err)
 	}
@@ -245,6 +254,10 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, url string, start, end int64) (
 // the window, and let Body.Close abort the rest. The total is taken from
 // Content-Length (-1 when the response is chunked).
 func sliceIgnoredRange(resp *http.Response, url string, start, end int64) (Range, error) {
+	return sliceIgnoredRangeInto(resp, url, start, end, nil)
+}
+
+func sliceIgnoredRangeInto(resp *http.Response, url string, start, end int64, dst []byte) (Range, error) {
 	if resp.ContentLength == 0 && start == 0 {
 		// The window [0,0] of an empty object is the empty window, not an
 		// error — some origins answer the size probe this way instead of with
@@ -258,7 +271,14 @@ func sliceIgnoredRange(resp *http.Response, url string, start, end int64) (Range
 		// A body that ends before start puts the range beyond the object.
 		return Range{}, fmt.Errorf("fetch: %s: range start %d beyond body: %w", Redact(url), start, err)
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, end-start+1))
+	var data []byte
+	var err error
+	reader := io.LimitReader(resp.Body, end-start+1)
+	if dst != nil {
+		data, err = ReadBounded(reader, dst)
+	} else {
+		data, err = io.ReadAll(reader)
+	}
 	if err != nil {
 		return Range{}, fmt.Errorf("fetch: %s: read body: %w", Redact(url), err)
 	}

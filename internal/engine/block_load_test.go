@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -539,13 +540,28 @@ func TestMixedDepthOriginFlightsReturnOwnedBytes(t *testing.T) {
 			done <- result{data, err}
 		}(hop)
 	}
-	for i := 0; i < 2; i++ {
-		select {
-		case waiting := <-f.waiting:
-			waitBlockEvent(t, ctx, waiting)
-		case <-ctx.Done():
-			t.Fatal("mixed-depth loads did not join the origin flight")
+	// Both relay depths now join the engine's immutable origin lease flight;
+	// only its one backend consumer enters the Fetcher-level compatibility flight.
+	select {
+	case waiting := <-f.waiting:
+		waitBlockEvent(t, ctx, waiting)
+	case <-ctx.Done():
+		t.Fatal("origin backend did not start")
+	}
+	for {
+		e.origins.mu.Lock()
+		joined := false
+		for _, c := range e.origins.m {
+			joined = c.refs == 2
 		}
+		e.origins.mu.Unlock()
+		if joined {
+			break
+		}
+		if ctx.Err() != nil {
+			t.Fatal("mixed-depth loads did not join the origin lease flight")
+		}
+		runtime.Gosched()
 	}
 	unblock()
 	a, b := <-done, <-done

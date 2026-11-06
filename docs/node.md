@@ -87,7 +87,7 @@ Node assembly mounts `peer.Server` with `Engine.PeerSource`: peer success begins
 only after a complete validated block is available. `-prefetch-window`,
 `-prefetch-bytes` and `-prefetch-loads` configure the shared engine budgets;
 client and registry front-ends therefore share speculative admission. Request-owned
-workers join inside Serve before the handler admission gate is released (ADR-0006).
+workers join inside Serve before the handler admission gate is released (ADR-0008).
 
 Cache assembly selects `memory`, `disk` or default `hybrid` (ADR-0007).
 `cache-size` sizes each backend; only Hybrid consumes `mem-size`. Memory mode
@@ -177,10 +177,16 @@ The exact path the roster server is mounted on (no trailing slash, so a
   provider would need a deliberately narrowed exported seam (e.g. a future
   `pkg/discovery`), which is a separate design decision.
 
+Node peer serving uses `Engine.PeerLeaseSource` and `Server.Borrow`. Client and
+peer writes retain immutable memory blocks until completion; direct peer/origin
+fills publish only after validation. All request-owned workers and shared origin
+backends are joined before their last serving owner exits (ADR-0008), retaining
+ADR-0003's store-close ordering. No new flag, wire setting or epoch is required.
+
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **93.7%** of statements (the tests moved here with the code from
+- **Coverage**: **93.4%** of statements (the tests moved here with the code from
   `cmd/dart`; the uncovered remainder is the blocking serve loop and signal
   handling).
 - **Reproduce**:

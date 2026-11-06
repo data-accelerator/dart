@@ -20,7 +20,7 @@ The engine's instrumentation lives in `internal/engine/metrics.go`
 `*Metrics` disables instrumentation, so tests and embedders need not wire a
 registry.
 
-Bounded Range prefetch (ADR-0006) uses the same block-source and wire accounting
+Bounded Range prefetch (ADR-0008) uses the same block-source and wire accounting
 as demand. Completed prefetched loads count even if the client later stops before
 consuming them; client bytes count only writes actually accepted by its writer.
 The block latency histogram measures loads, not client-perceived Range latency.
@@ -148,6 +148,22 @@ Behavior notes:
   series. The exposition format itself is standard 0.0.4 text.
 - Admin JSON shapes are debugging aids, not a stable API, but avoid gratuitous
   changes.
+
+Managed-memory pressure follows ADR-0008. `TieredStats.SlotWaits` and
+`TieredStats.WriteBypasses` feed two cumulative counters:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `dart_store_slot_wait_total` | counter | memory reservations that waited for a reusable slot |
+| `dart_store_write_bypass_total` | counter | memory reservations declined by pressure or TinyLFU admission |
+| `dart_temporary_buffers_total` | counter | temporary block receive buffers allocated outside cache arenas |
+| `dart_temporary_buffer_bytes_total` | counter | cumulative requested bytes in those temporary buffers |
+
+Temporary-buffer counters include compatible disk/Hybrid ingress and unsupported
+reserving stores; they are cumulative allocation volume, not live RSS. Memory
+occupancy counts published blocks, excluding unpublished fills and retired pins;
+all occupy the same bounded arena slots. A full pinned arena can have lower visible
+occupancy. The slot counters are zero for disk-backed Tiered stores.
 
 ## 7. Testing
 

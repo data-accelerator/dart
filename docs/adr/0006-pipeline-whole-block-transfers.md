@@ -1,6 +1,6 @@
 # ADR-0006: Pipeline whole-block transfers with bounded Range prefetch
 
-- Status: accepted
+- Status: superseded by ADR-0008
 - Date: 2026-11-05
 - Supersedes: ADR-0005
 - Binds: docs/engine.md §3.3 / §3.6 / §5 / Stability Contract; docs/peer.md §3.4 / Stability Contract; docs/fetch.md shared-flight lifecycle / Stability Contract; docs/node.md handler lifetime; docs/dart.md prefetch flags; docs/observability.md block-source and wire-byte accounting

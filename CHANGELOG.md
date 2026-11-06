@@ -7,6 +7,15 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+- Manage memory cache blocks in segmented arenas with fixed reusable metadata
+  and chunk/descriptor/block indices (#87, ADR-0008). Node reads borrow immutable
+  pinned blocks; supported peer/origin ingress fills unpublished slots directly,
+  validates complete blocks and publishes without an intermediate payload copy.
+  Shared readers retain leases, and long ranges reuse bounded prefetch workers.
+  Slot pressure waits briefly, then serves through a temporary buffer without
+  caching. Existing owned-copy APIs, disk/Hybrid policy, cache flags, wire keys
+  and HTTP/1.1 framing remain compatible; no epoch change is required.
+
 - Add `-cache-mode=memory|disk|hybrid` (#85, ADR-0007). Memory mode uses RAM-only
   class budgets sized by `-cache-size` without files, directories or cache locks.
   Hybrid remains the default; its `-mem-size=0` behavior remains compatible.

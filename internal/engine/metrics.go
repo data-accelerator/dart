@@ -12,6 +12,7 @@ import (
 // it in Options; a nil *Metrics disables instrumentation (all record* helpers
 // become no-ops), so tests and embedders need not wire a registry.
 type Metrics struct {
+	temporaryBuffers, temporaryBytes *metrics.Counter
 	// Where a served block came from.
 	cacheHits *metrics.Counter
 	peerHits  *metrics.Counter
@@ -50,6 +51,8 @@ var blockLatencyBounds = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10}
 // NewMetrics registers the engine's metrics on r and returns the handle.
 func NewMetrics(r *metrics.Registry) *Metrics {
 	return &Metrics{
+		temporaryBuffers: r.NewCounter("dart_temporary_buffers_total", "temporary block receive buffers"),
+		temporaryBytes:   r.NewCounter("dart_temporary_buffer_bytes_total", "bytes allocated for temporary block receive buffers"),
 		cacheHits: r.NewCounter("dart_block_source_total",
 			"blocks served, by source", metrics.LabelPair{Name: "source", Value: "cache"}),
 		peerHits: r.NewCounter("dart_block_source_total",
@@ -217,6 +220,8 @@ func RegisterStoreMetrics(r *metrics.Registry, s store.ClassStore) {
 		blocksHelp = "cached blocks by cache class"
 		slotsHelp  = "capacity in blocks by cache class"
 	)
+	r.NewCounterFunc("dart_store_slot_wait_total", "memory slot reservation waits", func() float64 { return float64(s.Stats().SlotWaits) })
+	r.NewCounterFunc("dart_store_write_bypass_total", "memory fills bypassed by pressure or admission", func() float64 { return float64(s.Stats().WriteBypasses) })
 	class := func(v string) metrics.LabelPair { return metrics.LabelPair{Name: "class", Value: v} }
 
 	r.NewGaugeFunc("dart_store_blocks", blocksHelp,
@@ -248,4 +253,11 @@ func RegisterPeerMetrics(r *metrics.Registry, b *peer.Breaker) {
 	r.NewGaugeFunc("dart_peer_circuits_open",
 		"peers whose circuit is currently open",
 		func() float64 { return float64(b.OpenCount()) })
+}
+
+func (m *Metrics) recordTemporary(n int64) {
+	if m != nil {
+		m.temporaryBuffers.Inc()
+		m.temporaryBytes.Add(n)
+	}
 }

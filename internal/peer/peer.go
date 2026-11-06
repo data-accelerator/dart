@@ -20,13 +20,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/data-accelerator/dart/internal/fetch"
 	"github.com/data-accelerator/dart/internal/store"
 )
 
@@ -72,6 +72,10 @@ type BlockRequest struct {
 // node cannot provide it; err is for unexpected failures only.
 type Source func(ctx context.Context, req BlockRequest) ([]byte, bool, error)
 
+// LeaseSource returns immutable bytes pinned until the server finishes writing.
+// A returned lease transfers ownership to the caller, including on failure.
+type LeaseSource func(context.Context, BlockRequest) (store.Lease, bool, error)
+
 // UpstreamRefusedError reports an origin credential refusal without blaming the relay.
 type UpstreamRefusedError interface {
 	error
@@ -98,8 +102,10 @@ func StoreSource(s store.Store) Source {
 type Server struct {
 	// NodeID is this node's stable identity, echoed in responses.
 	NodeID string
-	// Src provides block bytes. Required.
+	// Src provides owned block bytes when Borrow is nil.
 	Src Source
+	// Borrow, when set, takes precedence over the compatibility Src callback.
+	Borrow LeaseSource
 }
 
 var _ http.Handler = (*Server)(nil)
@@ -123,7 +129,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	req := BlockRequest{Key: key, URL: r.Header.Get(HeaderOrigin), Hop: hop}
 
-	data, held, err := s.Src(r.Context(), req)
+	var l store.Lease
+	var held bool
+	var err error
+	if s.Borrow != nil {
+		l, held, err = s.Borrow(r.Context(), req)
+	} else {
+		var data []byte
+		data, held, err = s.Src(r.Context(), req)
+		l = store.HeapLease(data)
+	}
+	defer l.Release()
+	data := l.Bytes()
 	if err != nil {
 		// Distinguish "the origin refused our requester's credential" from "this
 		// node failed", so the requester does not open a circuit against a healthy
@@ -350,7 +367,7 @@ func (c *Client) record(addr string, permit breakerPermit, o outcome) {
 // Get fetches a block from the peer at addr (host:port) per req. held is false
 // if the peer returned 404 (cannot provide the block).
 func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data []byte, held bool, err error) {
-	return c.get(ctx, addr, req, -1, nil)
+	return c.get(ctx, addr, req, -1, nil, nil)
 }
 
 // GetValidated rejects negative expected lengths and reads at most expected+1
@@ -360,13 +377,13 @@ func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest
 	if expected < 0 {
 		return nil, false, errors.New("peer: negative expected block length")
 	}
-	return c.get(ctx, addr, req, expected, validate)
+	return c.get(ctx, addr, req, expected, validate, nil)
 }
 
 // ErrBlockLength reports a peer body that does not match the expected geometry.
 var ErrBlockLength = errors.New("peer: invalid block length")
 
-func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
+func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error, dst []byte) (data []byte, held bool, err error) {
 	permit, err := c.allow(addr)
 	if err != nil {
 		return nil, false, err
@@ -407,11 +424,20 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 			c.record(addr, permit, outcomeHardFail)
 			return nil, false, fmt.Errorf("peer %s: advertised %d bytes, want %d: %w", addr, resp.ContentLength, expected, ErrBlockLength)
 		}
-		var reader io.Reader = resp.Body
-		if expected >= 0 && expected < math.MaxInt64 {
-			reader = io.LimitReader(resp.Body, expected+1)
+		var body []byte
+		var err error
+		if expected >= 0 {
+			if dst == nil {
+				dst = make([]byte, expected)
+			}
+			body, err = fetch.ReadBounded(resp.Body, dst)
+		} else {
+			body, err = io.ReadAll(resp.Body)
 		}
-		body, err := io.ReadAll(reader)
+		if errors.Is(err, fetch.ErrBodyTooLong) {
+			c.record(addr, permit, outcomeHardFail)
+			return nil, false, fmt.Errorf("peer %s: oversized body: %w", addr, ErrBlockLength)
+		}
 		if err != nil {
 			if caller.Err() != nil {
 				c.record(addr, permit, outcomeAnswered) // we aborted; the peer is fine
@@ -443,4 +469,11 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 		c.record(addr, permit, outcomeSoftFail)
 		return nil, false, fmt.Errorf("peer %s: unexpected status %s", addr, resp.Status)
 	}
+}
+
+// GetInto validates a complete peer block received directly into dst. On error
+// dst may contain partial bytes and must not be published. The caller owns dst;
+// it is never retained after this call, including on cancellation.
+func (c *Client) GetInto(ctx context.Context, addr string, req BlockRequest, dst []byte, validate func(context.Context, int64) error) ([]byte, bool, error) {
+	return c.get(ctx, addr, req, int64(len(dst)), validate, dst)
 }
