@@ -485,7 +485,7 @@ func (c *Coalescing) identity(url string) string {
 // just a block. The bound exists so a stalled origin connection — accepted,
 // then silent — cannot poison a cache key forever: the flight's context
 // expires at the bound, and the key's map entry becomes evictable a short
-// grace later (evictGrace) even if the leader's fetcher ignores context
+// grace later (FlightGrace) even if the leader's fetcher ignores context
 // cancellation.
 const DefaultMaxFlight = 10 * time.Minute
 
@@ -619,12 +619,12 @@ type call struct {
 	stale   time.Time // after this, a caller evicts the flight and leads a replacement
 }
 
-// evictGrace is the margin between a flight's own deadline and the moment it
+// FlightGrace is the margin between a flight's own deadline and the moment it
 // becomes evictable. A ctx-respecting worker delivers its result right at the
 // deadline; the margin guarantees that delivery lands before any waiter
 // declares the flight dead, so eviction only ever fires on a worker that
 // ignores its context.
-func evictGrace(maxFlight time.Duration) time.Duration {
+func FlightGrace(maxFlight time.Duration) time.Duration {
 	g := maxFlight / 8
 	if g < 25*time.Millisecond {
 		g = 25 * time.Millisecond
@@ -656,7 +656,7 @@ func (g *group) acquire(key string, maxFlight time.Duration) (c *call, lead bool
 	}
 	end := time.Now().Add(maxFlight)
 	flightCtx, cancel := context.WithDeadline(context.Background(), end)
-	c = &call{done: make(chan struct{}), end: end, stale: end.Add(evictGrace(maxFlight)), ctx: flightCtx, cancel: cancel, refs: 1}
+	c = &call{done: make(chan struct{}), end: end, stale: end.Add(FlightGrace(maxFlight)), ctx: flightCtx, cancel: cancel, refs: 1}
 	g.m[key] = c
 	return c, true
 }

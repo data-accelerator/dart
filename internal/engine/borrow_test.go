@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/cluster"
@@ -577,5 +580,117 @@ func TestInlineLeaseWaiterCanReplaceCanceledCleanup(t *testing.T) {
 	close(release)
 	if err := <-oldDone; !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+func TestExpiredEngineFlightsAllowFreshAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owned bool
+		hop   int
+	}{
+		{"borrowed-same-depth", false, 0}, {"borrowed-other-depth", false, 1}, {"owned-adapter", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, end := context.WithTimeout(context.Background(), 5*time.Second)
+			defer end()
+			started1, canceled1, release1 := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			started2, release2 := make(chan struct{}), make(chan struct{})
+			var once1, once2 sync.Once
+			free1 := func() { once1.Do(func() { close(release1) }) }
+			free2 := func() { once2.Do(func() { close(release2) }) }
+			defer free1()
+			defer free2()
+			var calls atomic.Int64
+			backend := intoFetchFunc(func(work context.Context, _ string, s, end int64, dst []byte) (fetch.Range, error) {
+				switch calls.Add(1) {
+				case 1:
+					close(started1)
+					<-work.Done()
+					close(canceled1)
+					<-release1
+					return fetch.Range{}, work.Err()
+				case 2:
+					close(started2)
+					<-release2
+				default:
+					t.Error("late completion evicted replacement")
+				}
+				copy(dst, "replacement data")
+				return fetch.Range{Data: dst, Total: 16}, nil
+			})
+			f := &fetch.Coalescing{F: &fetch.Coalescing{F: backend, MaxFlight: 250 * time.Millisecond}, MaxFlight: time.Second}
+			e := prefetchEngine(t, blob(16), 1, f)
+			oid, _ := chunk.ObjectID(prefetchURL)
+			if e.origins.maxFlight != 250*time.Millisecond || e.borrowed.maxFlight != e.origins.maxFlight || e.loads.maxFlight != e.origins.maxFlight {
+				t.Fatal("nested deadline not propagated")
+			}
+			run := func(hop int) error {
+				if tc.owned {
+					data, err := e.block(ctx, prefetchURL, oid, 16, 0, hop)
+					if err == nil && string(data) != "replacement data" {
+						err = errors.New("wrong owned bytes")
+					}
+					return err
+				}
+				l, err := e.borrowBlock(ctx, prefetchURL, oid, 16, 0, hop)
+				defer l.Release()
+				if err == nil && string(l.Bytes()) != "replacement data" {
+					err = errors.New("wrong borrowed bytes")
+				}
+				return err
+			}
+			first := make(chan error, 1)
+			go func() { first <- run(0) }()
+			waitBlockEvent(t, ctx, started1)
+			e.origins.mu.Lock()
+			var expiry time.Time
+			for _, c := range e.origins.m {
+				expiry = c.stale
+			}
+			e.origins.mu.Unlock()
+			waitBlockEvent(t, ctx, canceled1)
+			timer := time.NewTimer(time.Until(expiry) + time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				t.Fatal("flight expiry did not arrive")
+			}
+			second := make(chan error, 1)
+			go func() { second <- run(tc.hop) }()
+			waitBlockEvent(t, ctx, started2)
+			select {
+			case <-first:
+				t.Fatal("original owner stopped joining cleanup")
+			default:
+			}
+			free1() // old completion must not remove the still-running replacement
+			for {
+				e.origins.mu.Lock()
+				joined := false
+				for _, c := range e.origins.m {
+					joined = c.refs >= 2
+				}
+				e.origins.mu.Unlock()
+				if joined {
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatal("old live caller did not rejoin replacement")
+				}
+				runtime.Gosched()
+			}
+			free2()
+			if err := <-second; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-first; err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() != 2 {
+				t.Fatal("underlying calls", calls.Load())
+			}
+		})
 	}
 }

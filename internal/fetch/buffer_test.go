@@ -169,3 +169,28 @@ type bufferFetcher func(context.Context, string, int64, int64) (Range, error)
 func (f bufferFetcher) Fetch(ctx context.Context, u string, s, e int64) (Range, error) {
 	return f(ctx, u, s, e)
 }
+
+func TestExclusiveFlightPolicyBounds(t *testing.T) {
+	plain := &HTTPFetcher{}
+	for _, tc := range []struct {
+		name string
+		f    Fetcher
+		want time.Duration
+	}{
+		{"default", plain, DefaultMaxFlight},
+		{"short-inner", &Coalescing{F: &Coalescing{F: plain, MaxFlight: time.Second}, MaxFlight: time.Minute}, time.Second},
+		{"short-outer", &Coalescing{F: &Coalescing{F: plain, MaxFlight: time.Minute}, MaxFlight: time.Second}, time.Second},
+		{"unset", &Coalescing{F: plain}, DefaultMaxFlight},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FlightLimit(tc.f); got != tc.want {
+				t.Fatal(got, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct{ limit, want time.Duration }{{time.Millisecond, 25 * time.Millisecond}, {time.Second, 125 * time.Millisecond}, {time.Hour, 30 * time.Second}} {
+		if got := FlightGrace(tc.limit); got != tc.want {
+			t.Fatal(got, tc.want)
+		}
+	}
+}

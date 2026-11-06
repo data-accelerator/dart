@@ -138,7 +138,16 @@ Exactly one successful consumer records wire bytes, including when the first
 origin caller cancels while another consumer remains. Each successful buffered miss
 records one latency from its first admission attempt through waiting, retries
 and publication, even if a waiter takes over as leader. Joined reads use the
-same block source without adding another transfer. This
+same block source without adding another transfer.
+Block, owned-adapter and origin admission have a finite lifetime captured from
+fetch.FlightLimit at construction (default ten minutes, shortest exposed nested
+Coalescing limit). Expiry adds fetch.FlightGrace. A stale call stops admitting
+new readers; live waiters can retry, while the original owner continues joining
+cleanup before releasing its buffer. Shared origin contexts expire at the limit;
+inline leaders keep their caller's I/O context and their own cleanup obligation.
+Late completions cannot delete replacement entries. This bounds sharing age,
+independently of peer transport timeout or total client Range duration.
+ This
 coalescing covers `Serve`/`PeerSource` block loads and their origin fallback.
 The lifecycle and whole-block pipeline contract is recorded in
 [ADR-0008](./adr/0008-borrow-managed-memory-blocks.md).
@@ -464,6 +473,7 @@ Managed-memory regression coverage:
 | `TestLeasedFlightSharesOneImmutableBuffer` | joined readers share a pointer and single transfer credit |
 | `TestPeerDeclinesBlocksOutsideObject` | key-consistent past-end blocks decline in memory/disk/Hybrid before any worker or allocation |
 | `TestOversizedCacheSlotFallsBackToOrigin` | smaller cache slots do not fail valid origin reads |
+| `TestExpiredEngineFlightsAllowFreshAdmission` | nested MaxFlight expiry replaces both outer/origin admission while original owners join; late completion preserves the replacement, including owned and cross-depth reads |
 | `TestCanceledEngineLeaderDoesNotBlockReplacement` | new engine requests progress while the canceled original handler joins delayed cleanup, for borrowed and owned adapters |
 | `TestInlineLeaseWaiterCanReplaceCanceledCleanup` | an already joined inline waiter retries before the original cleanup completes |
 | `TestInlineLeaseFlightRetriesCancellationAndDifferentURL` | canceled leader retry, renewed URL retry, and same-URL error preservation |
@@ -473,7 +483,7 @@ Managed-memory regression coverage:
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.3%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.1%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.

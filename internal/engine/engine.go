@@ -203,6 +203,10 @@ func New(opt Options) (*Engine, error) {
 		trackerReg:    opt.TrackerRegistry,
 		rs:            make(map[string]*readerSet),
 	}
+	limit := fetch.FlightLimit(opt.Fetcher)
+	e.borrowed.maxFlight = limit
+	e.origins.maxFlight = limit
+	e.loads.leaseLoads.maxFlight = limit
 	e.opener, _ = opt.Fetcher.(fetch.Opener)
 	if e.fanout < 1 {
 		e.fanout = 2

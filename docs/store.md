@@ -388,7 +388,7 @@ Managed-memory regression coverage:
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **93.4%** of statements. The uncovered lines are the `ReadAt`/
+- **Coverage**: **93.0%** of statements. The uncovered lines are the `ReadAt`/
   `WriteAt` I/O-error branches in `Get`/`Put`, which require fault injection to
   hit and are left as defensive handling.
 - **Note**: tests use `t.TempDir()`, which honors `TMPDIR`; in the sandbox export

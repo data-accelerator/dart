@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"errors"
+	"github.com/data-accelerator/dart/internal/fetch"
 	"sync"
+	"time"
 
 	"github.com/data-accelerator/dart/internal/store"
 )
@@ -15,6 +17,7 @@ type leasedRead struct {
 	wireBytes int
 }
 type leaseCall struct {
+	stale             time.Time
 	leader            context.Context
 	key               blockLoadKey
 	done              chan struct{}
@@ -31,9 +34,16 @@ type leaseCall struct {
 // their final departing consumer cancels and joins the backend before returning.
 // No lease or reservation survives without a serving caller owning that join.
 type leaseLoads struct {
-	mu sync.Mutex
-	m  map[blockLoadKey]*leaseCall
+	maxFlight time.Duration // immutable after Engine construction; zero in unbounded unit adapters
+	mu        sync.Mutex
+	m         map[blockLoadKey]*leaseCall
 }
+
+const (
+	leaseReady = iota
+	leaseCanceled
+	leaseRetry
+)
 
 func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, sharedWorker bool, load func(context.Context) (leasedRead, error)) (leasedRead, error) {
 	for {
@@ -45,10 +55,12 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 			g.m = make(map[blockLoadKey]*leaseCall)
 		}
 		c := g.m[key]
-		if c != nil && c.leader != nil && c.leader.Err() != nil {
+		var cancelOld context.CancelFunc
+		if c != nil && ((c.leader != nil && c.leader.Err() != nil) || (!c.stale.IsZero() && !time.Now().Before(c.stale))) {
 			// The original handler retains its cleanup ownership. A canceled inline
 			// leader must not retain admission while joining that cleanup.
 			delete(g.m, key)
+			cancelOld = c.cancel
 			c = nil
 		}
 		lead := c == nil
@@ -56,8 +68,17 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 		if lead {
 			c = &leaseCall{done: make(chan struct{}), url: url, key: key}
 			g.m[key] = c
+			var deadline time.Time
+			if g.maxFlight > 0 {
+				deadline = time.Now().Add(g.maxFlight)
+				c.stale = deadline.Add(fetch.FlightGrace(g.maxFlight))
+			}
 			if sharedWorker {
-				work, c.cancel = context.WithCancel(context.Background())
+				if g.maxFlight > 0 {
+					work, c.cancel = context.WithDeadline(context.Background(), deadline)
+				} else {
+					work, c.cancel = context.WithCancel(context.Background())
+				}
 			} else {
 				work = ctx
 				c.leader = ctx
@@ -65,6 +86,9 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 		}
 		c.refs++
 		g.mu.Unlock()
+		if cancelOld != nil {
+			cancelOld()
+		}
 		if lead {
 			run := func() {
 				// Publish failure even if an inline backend panics, releasing waiters.
@@ -88,14 +112,36 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 		if !lead && c.leader != nil {
 			abandoned = c.leader.Done()
 		}
-		select {
-		case <-ctx.Done():
+		// Inline leaders keep cleanup ownership synchronously. Other consumers
+		// may stop waiting at the admission expiry and join a fresh replacement.
+		outcome := func() int {
+			var expired <-chan time.Time
+			if (sharedWorker || !lead) && !c.stale.IsZero() {
+				remaining := time.Until(c.stale)
+				if remaining <= 0 {
+					return leaseRetry
+				}
+				timer := time.NewTimer(remaining)
+				defer timer.Stop()
+				expired = timer.C
+			}
+			select {
+			case <-ctx.Done():
+				return leaseCanceled
+			case <-abandoned:
+				return leaseRetry
+			case <-expired:
+				return leaseRetry
+			case <-c.done:
+				return leaseReady
+			}
+		}()
+		if outcome != leaseReady {
 			g.drop(c)
-			return leasedRead{shared: !lead}, ctx.Err()
-		case <-abandoned:
-			g.drop(c)
+			if outcome == leaseCanceled {
+				return leasedRead{shared: !lead}, ctx.Err()
+			}
 			continue
-		case <-c.done:
 		}
 		if err := ctx.Err(); err != nil {
 			g.drop(c)

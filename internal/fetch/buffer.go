@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 // ErrBodyTooLong reports a body exceeding the caller's bounded buffer.
@@ -76,4 +77,30 @@ func (f *HTTPFetcher) FetchInto(ctx context.Context, url string, start, end int6
 		return Range{}, errors.New("fetch: buffer does not match requested range")
 	}
 	return f.fetch(ctx, url, start, end, dst)
+}
+
+// FlightLimiter exposes an exclusive-fill deadline policy for shared-flight
+// admission. Cleanup may outlive the deadline and retains its original owner.
+type FlightLimiter interface{ FlightLimit() time.Duration }
+
+// FlightLimit returns f's positive direct-fill limit, or DefaultMaxFlight.
+func FlightLimit(f Fetcher) time.Duration {
+	if limiter, ok := f.(FlightLimiter); ok {
+		if d := limiter.FlightLimit(); d > 0 {
+			return d
+		}
+	}
+	return DefaultMaxFlight
+}
+
+// FlightLimit reports the shortest deadline among nested Coalescing fills.
+// An opaque custom wrapper may implement FlightLimiter to expose its policy.
+func (c *Coalescing) FlightLimit() time.Duration {
+	d := c.maxFlight()
+	if inner, ok := c.F.(FlightLimiter); ok {
+		if bound := inner.FlightLimit(); bound > 0 && bound < d {
+			d = bound
+		}
+	}
+	return d
 }

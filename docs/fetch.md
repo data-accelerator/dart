@@ -166,7 +166,7 @@ nested coalescers (ADR-0006). No abandoned worker can outlive all its callers.
 Backends must honor cancellation for prompt cleanup; an ignoring backend keeps
 its final departing caller waiting rather than silently releasing its resources.
 
-A deadline expires the backend context; a grace margin (`evictGrace`) allows a
+A deadline expires the backend context; a grace margin (`FlightGrace`) allows a
 live caller to replace an unresponsive stale flight. The old callers retain
 ownership until cleanup, and a late old completion cannot delete its replacement.
 Anchor: `internal/fetch/fetch.go::acquire`.
@@ -259,6 +259,10 @@ bucket), and that changes three things:
 type IntoFetcher interface {
     FetchInto(context.Context, string, int64, int64, []byte) (Range, error)
 }
+type FlightLimiter interface { FlightLimit() time.Duration }
+func FlightLimit(f Fetcher) time.Duration
+func (c *Coalescing) FlightLimit() time.Duration
+func FlightGrace(maxFlight time.Duration) time.Duration
 func FetchInto(ctx context.Context, f Fetcher, url string, start, end int64, dst []byte) (Range, error)
 func (f *HTTPFetcher) FetchInto(ctx context.Context, url string, start, end int64, dst []byte) (Range, error)
 func (c *Coalescing) FetchInto(ctx context.Context, url string, start, end int64, dst []byte) (Range, error)
@@ -283,6 +287,20 @@ MaxFlight timeout, composing through nested wrappers. It deliberately does not
 share a caller-owned writable buffer: the engine's origin lease flight performs
 sharing, final-caller cancellation/join and transfer-credit assignment above this
 API (ADR-0008). Fetch and Probe retain their ordinary byte-sharing contracts.
+
+FlightLimiter exposes the deadline policy without promising that cleanup finishes
+at that deadline. The FlightLimit helper defaults to DefaultMaxFlight when no
+positive policy is exposed. Coalescing.FlightLimit takes the minimum deadline
+among its own and nested exposed policies, matching nested exclusive fills.
+Custom wrappers can expose their inner policy through FlightLimiter. Configure
+these limits before Engine construction: its block/owned/origin admission layers
+capture the limit. FlightGrace is the shared expiry margin: limit/8, floored at
+25 ms and capped at 30 s. Each layer admits replacements after limit plus grace,
+while original callers retain buffer ownership and any final backend join.
+Admission expiry is separate from peer transport timeouts; it never releases a
+live backend's buffer. FlightGrace uses O(1) time/space; nested Coalescing policy lookup uses O(depth)
+time and stack space. Custom FlightLimiter implementations define their own cost.
+
 
 ## 4. Invariants & Guarantees
 
@@ -335,6 +353,7 @@ Managed-memory regression coverage:
 
 | Test | Property |
 |---|---|
+| `TestExclusiveFlightPolicyBounds` | nested fill deadline selection and shared expiry-grace bounds |
 | `TestHTTPFetchIntoValidation` | direct full/short/oversized/offset/tail/truncated/chunked/ignored/refused responses |
 | `TestFetchIntoCompatibilityOwnership` | exclusive fallback copies preserve metadata and never mutate shared source bytes |
 | `TestFetchIntoNestedTimeoutAndFallback` | nested exclusive fills keep MaxFlight cancellation |
@@ -342,7 +361,7 @@ Managed-memory regression coverage:
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **92.1%** of statements (Go 1.27.0). The remaining uncovered lines are rare
+- **Coverage**: **92.3%** of statements (Go 1.27.0). The remaining uncovered lines are rare
   I/O-error branches (e.g. a mid-body read error) that need fault injection.
 - **Reproduce**:
 
