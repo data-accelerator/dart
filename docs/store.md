@@ -381,13 +381,14 @@ Managed-memory regression coverage:
 | `TestLeasePressureCancellationAndClose` | canceled reservations and close preserve active bytes |
 | `TestLeaseSteadyStateAllocations` | zero warm borrow and metadata/payload reuse allocations after segment warmup |
 | `TestFixedIndexChurnMatchesMap` | 50,000 deterministic random operations cross-checked against an independent map |
+| `TestHybridAdmissionFalseWhenBothTiersDecline` | backing admission rejection plus pinned RAM returns false; memory-only admission still returns true |
 | `TestReservationCloseBeforePublication` | closing an unfinished fill rejects publication and frees its arena |
 | `TestTieredBorrowedLeaseSurvivesPromotion` | promotion preserves old readers, isolation and pressure counters |
 | `TestLeaseConcurrentReuse` | concurrent borrowed-slot churn under race detector |
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **93.0%** of statements. The uncovered lines are the `ReadAt`/
+- **Coverage**: **93.4%** of statements. The uncovered lines are the `ReadAt`/
   `WriteAt` I/O-error branches in `Get`/`Put`, which require fault injection to
   hit and are left as defensive handling.
 - **Note**: tests use `t.TempDir()`, which honors `TMPDIR`; in the sandbox export

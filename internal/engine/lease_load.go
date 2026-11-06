@@ -9,11 +9,13 @@ import (
 )
 
 type leasedRead struct {
+	shared    bool
 	lease     store.Lease
 	source    blockSource
 	wireBytes int
 }
 type leaseCall struct {
+	leader            context.Context
 	key               blockLoadKey
 	done              chan struct{}
 	url               string
@@ -43,6 +45,12 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 			g.m = make(map[blockLoadKey]*leaseCall)
 		}
 		c := g.m[key]
+		if c != nil && c.leader != nil && c.leader.Err() != nil {
+			// The original handler retains its cleanup ownership. A canceled inline
+			// leader must not retain admission while joining that cleanup.
+			delete(g.m, key)
+			c = nil
+		}
 		lead := c == nil
 		var work context.Context
 		if lead {
@@ -52,6 +60,7 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 				work, c.cancel = context.WithCancel(context.Background())
 			} else {
 				work = ctx
+				c.leader = ctx
 			}
 		}
 		c.refs++
@@ -75,18 +84,26 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 				run()
 			}
 		}
+		var abandoned <-chan struct{}
+		if !lead && c.leader != nil {
+			abandoned = c.leader.Done()
+		}
 		select {
 		case <-ctx.Done():
 			g.drop(c)
-			return leasedRead{}, ctx.Err()
+			return leasedRead{shared: !lead}, ctx.Err()
+		case <-abandoned:
+			g.drop(c)
+			continue
 		case <-c.done:
 		}
 		if err := ctx.Err(); err != nil {
 			g.drop(c)
-			return leasedRead{}, err
+			return leasedRead{shared: !lead}, err
 		}
 		g.mu.Lock()
 		r, err := c.read, c.err
+		r.shared = !lead
 		if err == nil {
 			r.lease = r.lease.Clone()
 			if c.claimed {
@@ -94,6 +111,10 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 			} else {
 				c.claimed = true
 			}
+		} else {
+			// The flight retains any failed result until consumers detach;
+			// an error does not transfer an un-cloned owner to this caller.
+			r.lease = store.Lease{}
 		}
 		retry := err != nil && !lead && (c.url != url || (!sharedWorker && contextError(err)))
 		g.mu.Unlock()

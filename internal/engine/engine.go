@@ -359,7 +359,7 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		return data, nil
 	}
 	start := time.Now()
-	r, shared, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
+	r, _, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
 		// A previous leader can publish between our first miss and flight
 		// admission. Recheck after becoming leader, without holding the map lock.
 		if data, ok, err := e.store.Get(key); err != nil {
@@ -371,18 +371,12 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		if err != nil {
 			return blockRead{}, err
 		}
-		defer r.lease.Release()
-		return blockRead{data: append([]byte(nil), r.lease.Bytes()...), source: r.source, wireBytes: r.wireBytes}, nil
+		return blockRead{lease: r.lease, source: r.source, wireBytes: r.wireBytes}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	if shared {
-		// Buffered sources return caller-owned bytes. A waiter must not be
-		// able to mutate the leader's result or another waiter's response.
-		r.data = append([]byte(nil), r.data...)
-	}
-	e.mx.recordBlockRead(r, shared, time.Since(start))
+	e.mx.recordBlockRead(r, false, time.Since(start))
 	return r.data, nil
 }
 

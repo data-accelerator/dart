@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -383,5 +385,197 @@ func TestInlineLeaseFlightRetriesCancellationAndDifferentURL(t *testing.T) {
 				t.Fatal("live waiter did not retry", err, retries.Load())
 			}
 		})
+	}
+}
+
+func TestPeerDeclinesBlocksOutsideObject(t *testing.T) {
+	for _, mode := range []string{"memory", "disk", "hybrid"} {
+		t.Run(mode, func(t *testing.T) {
+			var st store.Store
+			mem, _ := store.OpenMem(store.MemOptions{SlotSize: 16, Slots: 8})
+			if mode == "memory" {
+				st = mem
+			} else {
+				disk, err := store.OpenTiered(store.TieredOptions{Path: filepath.Join(t.TempDir(), "cache"), SlotSize: 16, Slots: 8})
+				if err != nil {
+					t.Fatal(err)
+				}
+				st = disk
+				if mode == "hybrid" {
+					st = store.NewHybrid(mem, disk)
+				} else {
+					mem.Close()
+				}
+			}
+			defer st.Close()
+			f := blockFetchFunc(func(context.Context, string, int64, int64) (fetch.Range, error) {
+				t.Error("out-of-object request reached origin")
+				return fetch.Range{}, nil
+			})
+			e, err := New(Options{Chunk: testCfg(), Store: st, Fetcher: f})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.sizes[fetch.OriginKey(prefetchURL)] = sizeMeta{size: 16}
+			req := peer.BlockRequest{Key: prefetchKey(prefetchURL, 2), URL: prefetchURL}
+			for _, owned := range []bool{false, true} {
+				l, held, err := e.peerRead(context.Background(), req, owned)
+				l.Release()
+				if held || err != nil {
+					t.Fatal("malformed peer block not declined", held, err)
+				}
+			}
+			oid, _ := chunk.ObjectID(prefetchURL)
+			for _, index := range []int64{-1, 1, 2, math.MaxInt64} {
+				l, err := e.borrowBlock(context.Background(), prefetchURL, oid, 16, index, 0)
+				l.Release()
+				if !errors.Is(err, ErrRangeNotSatisfiable) {
+					t.Fatal("bad geometry reached a worker", index, err)
+				}
+			}
+		})
+	}
+}
+
+func TestOversizedCacheSlotFallsBackToOrigin(t *testing.T) {
+	mem, err := store.OpenMem(store.MemOptions{SlotSize: 8, Slots: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mem.Close()
+	e, err := New(Options{Chunk: testCfg(), Store: mem, Fetcher: intoFetchFunc(func(_ context.Context, _ string, s, end int64, dst []byte) (fetch.Range, error) {
+		copy(dst, "0123456789abcdef")
+		return fetch.Range{Data: dst, Total: 16}, nil
+	}), PrefetchWindow: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.sizes[fetch.OriginKey(prefetchURL)] = sizeMeta{size: 16}
+	var out bytes.Buffer
+	if err := e.Serve(context.Background(), &out, prefetchURL, 0, 15); err != nil || out.String() != "0123456789abcdef" || mem.Len() != 0 {
+		t.Fatal("cache capacity failed valid read", out.String(), err)
+	}
+}
+
+func TestCanceledEngineLeaderDoesNotBlockReplacement(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		t.Run(fmt.Sprint("owned=", owned), func(t *testing.T) {
+			ctx, end := prefetchContext(t)
+			defer end()
+			leader, cancel := context.WithCancel(ctx)
+			defer cancel()
+			started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var calls atomic.Int64
+			f := intoFetchFunc(func(work context.Context, _ string, s, end int64, dst []byte) (fetch.Range, error) {
+				if calls.Add(1) == 1 {
+					close(started)
+					<-work.Done()
+					close(canceled)
+					<-release
+					return fetch.Range{}, work.Err()
+				}
+				copy(dst, "replacement data")
+				return fetch.Range{Data: dst, Total: 16}, nil
+			})
+			e := prefetchEngine(t, blob(16), 1, f)
+			oid, _ := chunk.ObjectID(prefetchURL)
+			run := func(ctx context.Context) ([]byte, error) {
+				if owned {
+					return e.block(ctx, prefetchURL, oid, 16, 0, 0)
+				}
+				l, err := e.borrowBlock(ctx, prefetchURL, oid, 16, 0, 0)
+				defer l.Release()
+				return append([]byte(nil), l.Bytes()...), err
+			}
+			oldDone := make(chan error, 1)
+			go func() { _, err := run(leader); oldDone <- err }()
+			waitBlockEvent(t, ctx, started)
+			freshDone := make(chan error, 1)
+			fresh := func(freshCtx context.Context) {
+				data, err := run(freshCtx)
+				if err == nil && string(data) != "replacement data" {
+					err = errors.New("wrong replacement bytes")
+				}
+				freshDone <- err
+			}
+			cancel()
+			waitBlockEvent(t, ctx, canceled)
+			go fresh(ctx)
+			select {
+			case err := <-freshDone:
+				if err != nil {
+					t.Error(err)
+				}
+			case <-ctx.Done():
+				close(release)
+				t.Fatal("new engine request joined canceled cleanup")
+			}
+			select {
+			case <-oldDone:
+				t.Fatal("original owner did not join cleanup")
+			default:
+			}
+			close(release)
+			if err := <-oldDone; !errors.Is(err, context.Canceled) {
+				t.Fatal(err)
+			}
+			if calls.Load() != 2 {
+				t.Fatal("replacement backend count", calls.Load())
+			}
+		})
+	}
+}
+
+func TestInlineLeaseWaiterCanReplaceCanceledCleanup(t *testing.T) {
+	ctx, end := prefetchContext(t)
+	defer end()
+	leader, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var g leaseLoads
+	started, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	oldDone := make(chan error, 1)
+	go func() {
+		_, err := g.do(leader, blockLoadKey{}, "url", false, func(work context.Context) (leasedRead, error) {
+			close(started)
+			<-work.Done()
+			close(canceled)
+			<-release
+			return leasedRead{}, work.Err()
+		})
+		oldDone <- err
+	}()
+	waitBlockEvent(t, ctx, started)
+	joiner := &blockJoinContext{Context: ctx, joined: make(chan struct{})}
+	waiterDone := make(chan error, 1)
+	go func() {
+		r, err := g.do(joiner, blockLoadKey{}, "url", false, func(context.Context) (leasedRead, error) {
+			return leasedRead{lease: store.HeapLease([]byte("replacement"))}, nil
+		})
+		if err == nil && string(r.lease.Bytes()) != "replacement" {
+			err = errors.New("wrong replacement")
+		}
+		r.lease.Release()
+		waiterDone <- err
+	}()
+	waitBlockEvent(t, ctx, joiner.joined)
+	cancel()
+	waitBlockEvent(t, ctx, canceled)
+	select {
+	case err := <-waiterDone:
+		if err != nil {
+			t.Error(err)
+		}
+	case <-ctx.Done():
+		close(release)
+		t.Fatal("joined waiter remained coupled to cleanup")
+	}
+	select {
+	case <-oldDone:
+		t.Fatal("leader released cleanup ownership")
+	default:
+	}
+	close(release)
+	if err := <-oldDone; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
 	}
 }

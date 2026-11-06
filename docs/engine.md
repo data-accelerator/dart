@@ -119,14 +119,16 @@ blocks and relay depths remain independent; depth is retained so membership
 skew cannot turn a forwarding loop into a wait cycle before the hop bound.
 
 The leader runs synchronously in its serving caller, retaining the existing
-peer/origin timeouts. A waiter can cancel independently. If the leader is
-canceled, a live waiter may take over with its own context; a failed URL or
+peer/origin timeouts. A waiter can cancel independently. If an inline leader is
+canceled, new callers and existing waiters may lead a replacement while the old
+handler retains ownership of its backend cleanup; a failed URL or
 credential is not reused against a different caller's URL. Completed failures
 are not retained. Successful immutable bytes can be shared across URL aliases,
 including when cache admission declines them. `Serve` and `PeerLeaseSource`
 share immutable leased results, cloning references without copying payloads.
-The compatibility `PeerSource` and owned block adapter still return independent
-mutable bytes, with O(block bytes) copying. Both adapters join the same leased
+The compatibility `PeerSource` and owned block adapter use the same lease-flight
+lifetime algorithm and copy immutable results into independent mutable bytes,
+with O(block bytes) copying. Both adapters join the same leased
 miss path. Coordination protects metadata, never network operations or payload
 copies. Metadata probes remain endpoint-scoped independently. Origin lease
 flights share across relay depths while retaining one result until all consumers
@@ -234,7 +236,9 @@ memory refills reserve an exclusive slot, receive directly, validate and commit;
 failed fills abort without visibility. Shared cold reads retain the same bytes.
 Disk and Hybrid preserve their compatible write/promote path.
 
-A full pinned/filling arena waits briefly with cancellation, then uses a temporary
+A cache slot smaller than the requested block also selects an uncached temporary
+buffer; cache geometry never turns a valid origin read into a failure. A full
+pinned/filling arena waits briefly with cancellation, then uses a temporary
 buffer and skips cache publication. Admission rejection has the same fallback.
 The exceptional path may allocate/copy. `fetch.IntoFetcher` permits direct origin
 fills; unsupported fetchers retain validation and copy into the receive buffer.
@@ -401,12 +405,12 @@ requests; their bytes are counted as both `client` and `origin_in` wire bytes
    An empty object is a valid `200` with `Content-Length: 0`; a Range request
    on it is `416` (`bytes */0`), suffix ranges included.
 4. **Range semantics**: standard `200`/`206`/`416` with correct `Content-Range`.
-5. **No wrapped geometry on the relay path**: a peer-supplied block index that
-   cannot be represented in int64 range arithmetic
-   (`> chunk.Config.MaxBlockIndex()`) is declined before any cache lookup,
-   relay selection, size probe, or origin I/O — never served, never cached,
-   never turned into a whole-object origin GET (issue #52; the fetch-layer
-   arithmetic guard is in docs/fetch.md §3.4).
+5. **No invalid geometry on the relay path**: after probing, an uncached block
+   starting at or beyond the object size is declined before scheduling a worker
+   or allocating its receive buffer. Signed-overflow indices
+   (`> chunk.Config.MaxBlockIndex()`) are declined before cache lookup,
+   relay selection, size probe or origin I/O, preserving the issue #52 geometry
+   guarantee (docs/fetch.md §3.4).
 
 6. **No requester identity confusion on the relay path**: when an Origin URL
    is supplied, its namespace/object/chunk key must match the requested key.
@@ -458,6 +462,10 @@ Managed-memory regression coverage:
 | `TestBorrowedPressureBypassesPublication` | correct subrange and temporary accounting with a pinned full arena |
 | `TestBorrowedWriteFailureReleasesPins` | all queued/current pins and speculative reservations released on client error |
 | `TestLeasedFlightSharesOneImmutableBuffer` | joined readers share a pointer and single transfer credit |
+| `TestPeerDeclinesBlocksOutsideObject` | key-consistent past-end blocks decline in memory/disk/Hybrid before any worker or allocation |
+| `TestOversizedCacheSlotFallsBackToOrigin` | smaller cache slots do not fail valid origin reads |
+| `TestCanceledEngineLeaderDoesNotBlockReplacement` | new engine requests progress while the canceled original handler joins delayed cleanup, for borrowed and owned adapters |
+| `TestInlineLeaseWaiterCanReplaceCanceledCleanup` | an already joined inline waiter retries before the original cleanup completes |
 | `TestInlineLeaseFlightRetriesCancellationAndDifferentURL` | canceled leader retry, renewed URL retry, and same-URL error preservation |
 | `TestAbandonedOriginLeaseFlightStopsAdmission` | new callers start fresh while abandoned backend cleanup is joined |
 | `TestSharedLeaseFlightCancellationOwnership` | survivor ownership and final-caller cancel/join |
@@ -465,7 +473,7 @@ Managed-memory regression coverage:
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **90.8%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.3%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.

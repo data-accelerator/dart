@@ -263,3 +263,31 @@ func TestTieredBorrowedLeaseSurvivesPromotion(t *testing.T) {
 	pin.Release()
 	a.Abort()
 }
+
+func TestHybridAdmissionFalseWhenBothTiersDecline(t *testing.T) {
+	h, mem, back := openHybrid(t, 1, 2)
+	key := bk(1)
+	if ok, err := h.PutClass(key, []byte("pinned"), Borrowed); !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	for i := 0; i < 40; i++ {
+		back.Get(key)
+	}
+	pin, ok, err := mem.Acquire(key)
+	if !ok || err != nil {
+		t.Fatal(ok, err)
+	}
+	if admitted, err := h.PutClass(bk(2), []byte("candidate"), Borrowed); err != nil || admitted || h.Has(bk(2)) {
+		t.Fatal("false cache admission", admitted, err)
+	}
+	if h.Stats().SlotWaits != 1 || h.Stats().WriteBypasses != 1 {
+		t.Fatal("hybrid pressure counters", h.Stats())
+	}
+	if string(pin.Bytes()) != "pinned" {
+		t.Fatal("pressure overwrote borrowed bytes")
+	}
+	pin.Release()
+	if admitted, err := h.PutClass(bk(2), []byte("candidate"), Borrowed); err != nil || !admitted || !mem.Has(bk(2)) || back.Has(bk(2)) {
+		t.Fatal("memory-only admission not reported", admitted, err)
+	}
+}

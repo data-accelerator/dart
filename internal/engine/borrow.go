@@ -25,6 +25,10 @@ func (e *Engine) borrowBlock(ctx context.Context, url, objectID string, size, in
 }
 
 func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, size, index int64, hop int) (leasedRead, error) {
+	if index < 0 || index > e.cfg.MaxBlockIndex() || size <= 0 || e.cfg.BlockStart(index) >= size {
+		return leasedRead{}, ErrRangeNotSatisfiable
+	}
+
 	key := store.BlockKey{Chunk: chunk.ChunkKey(e.ns, objectID, e.cfg.ChunkOfBlock(index)), Block: uint64(index)}
 	if l, ok, err := store.Acquire(e.store, key); err != nil {
 		return leasedRead{}, err
@@ -110,7 +114,7 @@ func (e *Engine) receiveBuffer(ctx context.Context, key store.BlockKey, n int64)
 		if err == nil {
 			return r, r.Bytes(), false, nil
 		}
-		if errors.Is(err, store.ErrNoSlot) {
+		if errors.Is(err, store.ErrNoSlot) || errors.Is(err, store.ErrBlockTooLarge) {
 			cache = false
 		} else if !errors.Is(err, store.ErrNoReservation) {
 			return store.Reservation{}, nil, false, err
@@ -174,6 +178,11 @@ func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool
 		e.mx.recordRelay(false)
 		return store.Lease{}, false, nil
 	}
+	if size <= 0 || e.cfg.BlockStart(int64(req.Key.Block)) >= size {
+		e.mx.recordRelay(false)
+		return store.Lease{}, false, nil
+	}
+
 	oid, _ := chunk.ObjectID(req.URL)
 	if owned {
 		var data []byte

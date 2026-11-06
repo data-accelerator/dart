@@ -106,8 +106,8 @@ func (h *Hybrid) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	memErr := h.mem.Put(k, data)
-	return admitted || memErr == nil, nil
+	memAdmitted, _ := h.mem.putIfAdmitted(k, data, nil)
+	return admitted || memAdmitted, nil
 }
 
 // Has reports whether either tier holds the block.
@@ -141,6 +141,8 @@ func (h *Hybrid) Stats() TieredStats {
 	st := h.back.Stats()
 	st.MemBlocks = h.mem.Len()
 	st.MemSlots = h.mem.Slots()
+	st.SlotWaits += h.mem.waits.Load()
+	st.WriteBypasses += h.mem.bypasses.Load()
 	return st
 }
 

@@ -163,7 +163,8 @@ Temporary-buffer counters include compatible disk/Hybrid ingress and unsupported
 reserving stores; they are cumulative allocation volume, not live RSS. Memory
 occupancy counts published blocks, excluding unpublished fills and retired pins;
 all occupy the same bounded arena slots. A full pinned arena can have lower visible
-occupancy. The slot counters are zero for disk-backed Tiered stores.
+occupancy. The slot counters are zero for disk-backed Tiered stores; Hybrid adds its RAM
+front-arena waits and bypasses to the backing counters.
 
 ## 7. Testing
 
