@@ -333,7 +333,7 @@ func TestAbandonedOriginLeaseFlightStopsAdmission(t *testing.T) {
 }
 
 func TestInlineLeaseFlightRetriesCancellationAndDifferentURL(t *testing.T) {
-	for _, mode := range []string{"canceled-leader", "different-url", "same-url-failure"} {
+	for _, mode := range []string{"canceled-leader", "different-url", "same-url-failure", "backend-timeout", "backend-canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, end := prefetchContext(t)
 			defer end()
@@ -343,6 +343,11 @@ func TestInlineLeaseFlightRetriesCancellationAndDifferentURL(t *testing.T) {
 			started, release := make(chan struct{}), make(chan struct{})
 			firstDone := make(chan error, 1)
 			failure := errors.New("origin refused request")
+			if mode == "backend-timeout" {
+				failure = fmt.Errorf("backend: %w", context.DeadlineExceeded)
+			} else if mode == "backend-canceled" {
+				failure = fmt.Errorf("backend: %w", context.Canceled)
+			}
 			go func() {
 				r, err := g.do(leader, blockLoadKey{}, "first", false, func(context.Context) (leasedRead, error) {
 					close(started)
@@ -380,12 +385,60 @@ func TestInlineLeaseFlightRetriesCancellationAndDifferentURL(t *testing.T) {
 				t.Fatal("leader unexpectedly succeeded")
 			}
 			err := <-waiterDone
-			if mode == "same-url-failure" {
+			if mode == "same-url-failure" || mode == "backend-timeout" || mode == "backend-canceled" {
 				if !errors.Is(err, failure) || retries.Load() != 0 {
 					t.Fatal("unexpected same-URL retry", err)
 				}
 			} else if err != nil || retries.Load() != 1 {
 				t.Fatal("live waiter did not retry", err, retries.Load())
+			}
+		})
+	}
+}
+
+func TestBackendTimeoutSharedByEngineWaiters(t *testing.T) {
+	for _, owned := range []bool{false, true} {
+		t.Run(map[bool]string{false: "borrowed", true: "owned"}[owned], func(t *testing.T) {
+			ctx, cancel := prefetchContext(t)
+			defer cancel()
+			started := make(chan struct{})
+			var once sync.Once
+			var calls atomic.Int64
+			backend := intoFetchFunc(func(work context.Context, _ string, _, _ int64, _ []byte) (fetch.Range, error) {
+				calls.Add(1)
+				once.Do(func() { close(started) })
+				<-work.Done()
+				return fetch.Range{}, work.Err()
+			})
+			e := prefetchEngine(t, blob(16), 1, &fetch.Coalescing{F: backend, MaxFlight: 500 * time.Millisecond})
+			oid, _ := chunk.ObjectID(prefetchURL)
+			run := func(caller context.Context) error {
+				if owned {
+					_, err := e.block(caller, prefetchURL, oid, 16, 0, 0)
+					return err
+				}
+				l, err := e.borrowBlock(caller, prefetchURL, oid, 16, 0, 0)
+				l.Release()
+				return err
+			}
+			results := make(chan error, 2)
+			go func() { results <- run(ctx) }()
+			waitBlockEvent(t, ctx, started)
+			waiter := &blockJoinContext{Context: ctx, joined: make(chan struct{})}
+			go func() { results <- run(waiter) }()
+			waitBlockEvent(t, ctx, waiter.joined)
+			for i := 0; i < 2; i++ {
+				select {
+				case err := <-results:
+					if !errors.Is(err, context.DeadlineExceeded) {
+						t.Fatal("backend timeout was not shared", err)
+					}
+				case <-ctx.Done():
+					t.Fatal("joined caller did not finish")
+				}
+			}
+			if ctx.Err() != nil || calls.Load() != 1 {
+				t.Fatal("live callers retried the shared timeout", ctx.Err(), calls.Load())
 			}
 		})
 	}

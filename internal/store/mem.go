@@ -140,16 +140,17 @@ func (m *MemStore) reserve(ctx context.Context, k BlockKey, n int64, admit func(
 	if n > m.slotSize {
 		return Reservation{}, ErrBlockTooLarge
 	}
-	if err := ctx.Err(); err != nil {
-		return Reservation{}, err
-	}
 	var timer *time.Timer
+	expired := false
 	defer func() {
 		if timer != nil {
 			timer.Stop()
 		}
 	}()
 	for {
+		if err := ctx.Err(); err != nil {
+			return Reservation{}, err
+		}
 		m.mu.Lock()
 		if m.closed {
 			m.mu.Unlock()
@@ -182,6 +183,10 @@ func (m *MemStore) reserve(ctx context.Context, k BlockKey, n int64, admit func(
 			return Reservation{lease: Lease{data: data[:n:n], mem: m, slot: i, generation: generation}, key: k}, nil
 		}
 		m.mu.Unlock()
+		if expired {
+			m.bypasses.Add(1)
+			return Reservation{}, ErrNoSlot
+		}
 		if timer == nil {
 			m.waits.Add(1)
 			timer = time.NewTimer(2 * time.Millisecond)
@@ -190,8 +195,9 @@ func (m *MemStore) reserve(ctx context.Context, k BlockKey, n int64, admit func(
 		case <-ctx.Done():
 			return Reservation{}, ctx.Err()
 		case <-timer.C:
-			m.bypasses.Add(1)
-			return Reservation{}, ErrNoSlot
+			// Notifications may coalesce. Recheck capacity under the lock once
+			// more before reporting exhaustion; never start another wait.
+			expired = true
 		case <-m.available:
 		}
 	}

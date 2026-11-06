@@ -7,7 +7,71 @@ import (
 	"math/rand"
 	"sync"
 	"testing"
+	"time"
 )
+
+// Pause after a reserver observes pressure but before it waits, modeling a
+// scheduler pause while multiple releases coalesce into one notification.
+type reservationGateContext struct {
+	context.Context
+	entered chan struct{}
+	resume  <-chan struct{}
+	once    sync.Once
+}
+
+func (c *reservationGateContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.entered) })
+	<-c.resume
+	return c.Context.Done()
+}
+
+func TestReservationRechecksCoalescedCapacity(t *testing.T) {
+	m := openMem(t, 16, 2)
+	a, _ := m.Reserve(context.Background(), bk(1), 4, Owned)
+	b, _ := m.Reserve(context.Background(), bk(2), 4, Owned)
+	defer a.Abort()
+	defer b.Abort()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resume := make(chan struct{})
+	var once sync.Once
+	proceed := func() { once.Do(func() { close(resume) }) }
+	defer proceed()
+	type result struct {
+		r   Reservation
+		err error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		waiter := &reservationGateContext{Context: ctx, entered: make(chan struct{}), resume: resume}
+		go func(i int) {
+			r, err := m.Reserve(waiter, bk(i+3), 4, Owned)
+			results <- result{r, err}
+		}(i)
+		select {
+		case <-waiter.entered:
+		case <-ctx.Done():
+			t.Fatal("reserver did not observe pressure")
+		}
+	}
+	a.Abort()
+	b.Abort() // capacity-one notification channel now contains only one wakeup
+	proceed()
+	for i := 0; i < 2; i++ {
+		select {
+		case got := <-results:
+			defer got.r.Abort() // retain both successes until both waiters finish
+			if got.err != nil {
+				t.Error("reusable slot reported as exhausted", got.err)
+			}
+		case <-ctx.Done():
+			t.Fatal("reserver did not finish")
+		}
+	}
+	if m.bypasses.Load() != 0 {
+		t.Fatal("available capacity counted as a write bypass")
+	}
+}
 
 func TestLeasePinsDeletedSlot(t *testing.T) {
 	m := openMem(t, 64, 1)

@@ -2,11 +2,10 @@ package engine
 
 import (
 	"context"
-	"errors"
-	"github.com/data-accelerator/dart/internal/fetch"
 	"sync"
 	"time"
 
+	"github.com/data-accelerator/dart/internal/fetch"
 	"github.com/data-accelerator/dart/internal/store"
 )
 
@@ -162,7 +161,9 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 			// an error does not transfer an un-cloned owner to this caller.
 			r.lease = store.Lease{}
 		}
-		retry := err != nil && !lead && (c.url != url || (!sharedWorker && contextError(err)))
+		// Only cancellation of the serving leader permits same-URL takeover.
+		// A backend timeout with a live leader is a shared failure.
+		retry := err != nil && !lead && (c.url != url || (!sharedWorker && c.leader.Err() != nil))
 		g.mu.Unlock()
 		g.drop(c)
 		if retry {
@@ -172,9 +173,6 @@ func (g *leaseLoads) do(ctx context.Context, key blockLoadKey, url string, share
 	}
 }
 
-func contextError(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
 func (g *leaseLoads) finish(key blockLoadKey, c *leaseCall, r leasedRead, err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

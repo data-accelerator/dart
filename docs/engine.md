@@ -126,6 +126,10 @@ credential is not reused against a different caller's URL. Completed failures
 are not retained. Successful immutable bytes can be shared across URL aliases,
 including when cache admission declines them. `Serve` and `PeerLeaseSource`
 share immutable leased results, cloning references without copying payloads.
+Backend context errors remain shared same-URL failures while an inline leader's
+client context is live. Same-URL takeover checks that client's cancellation,
+rather than classifying the backend error as a canceled leader.
+
 The compatibility `PeerSource` and owned block adapter use the same lease-flight
 lifetime algorithm and copy immutable results into independent mutable bytes,
 with O(block bytes) copying. Both adapters join the same leased
@@ -147,7 +151,7 @@ cleanup before releasing its buffer. Shared origin contexts expire at the limit;
 inline leaders keep their caller's I/O context and their own cleanup obligation.
 Late completions cannot delete replacement entries. This bounds sharing age,
 independently of peer transport timeout or total client Range duration.
- This
+This
 coalescing covers `Serve`/`PeerSource` block loads and their origin fallback.
 The lifecycle and whole-block pipeline contract is recorded in
 [ADR-0008](./adr/0008-borrow-managed-memory-blocks.md).
@@ -476,14 +480,15 @@ Managed-memory regression coverage:
 | `TestExpiredEngineFlightsAllowFreshAdmission` | nested MaxFlight expiry replaces both outer/origin admission while original owners join; late completion preserves the replacement, including owned and cross-depth reads |
 | `TestCanceledEngineLeaderDoesNotBlockReplacement` | new engine requests progress while the canceled original handler joins delayed cleanup, for borrowed and owned adapters |
 | `TestInlineLeaseWaiterCanReplaceCanceledCleanup` | an already joined inline waiter retries before the original cleanup completes |
-| `TestInlineLeaseFlightRetriesCancellationAndDifferentURL` | canceled leader retry, renewed URL retry, and same-URL error preservation |
+| `TestInlineLeaseFlightRetriesCancellationAndDifferentURL` | canceled leader retry, renewed URL retry, and shared same-URL backend failures including wrapped context errors |
+| `TestBackendTimeoutSharedByEngineWaiters` | actual MaxFlight timeout is shared by live borrowed/owned callers without starting successive same-URL flights |
 | `TestAbandonedOriginLeaseFlightStopsAdmission` | new callers start fresh while abandoned backend cleanup is joined |
 | `TestSharedLeaseFlightCancellationOwnership` | survivor ownership and final-caller cancel/join |
 | `TestBorrowedPeerHTTPAndWarmReuse` | actual borrowed peer HTTP path into memory budgets and warm reuse |
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **91.1%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
+- **Coverage**: **91.5%** of statements (Go 1.27.0). Uncovered lines are mostly rare I/O
   error branches (short block, mid-stream write error).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.

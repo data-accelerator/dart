@@ -276,7 +276,9 @@ The class is ignored by an unclassified MemStore. Non-positive lengths return
 
 A reservation first uses a free slot or an unpinned eviction candidate, preserving
 atomic TinyLFU victim admission. If all slots are pinned/filling it waits at most
-2 ms, honoring cancellation, then returns `ErrNoSlot`; an admission rejection
+2 ms, honoring cancellation, then rechecks capacity under the metadata lock before
+returning `ErrNoSlot`. Coalesced release notifications cannot turn reusable
+capacity into a false bypass; expiry never starts another wait. An admission rejection
 returns that error immediately. This initial fixed wait is a pressure policy.
 Callers may allocate a temporary buffer and bypass caching. No per-reader quota
 or adaptive backoff is imposed. Generation-checked handles prevent a stale slot
@@ -378,6 +380,7 @@ Managed-memory regression coverage:
 |---|---|
 | `TestLeasePinsDeletedSlot` | active clones prevent reuse after deletion; short tails remain private |
 | `TestReservationPublicationAndAbort` | unpublished fills, abort, direct slot publication and duplicate immutability |
+| `TestReservationRechecksCoalescedCapacity` | simultaneous releases coalesced before waiters select still allow both reservations |
 | `TestLeasePressureCancellationAndClose` | canceled reservations and close preserve active bytes |
 | `TestLeaseSteadyStateAllocations` | zero warm borrow and metadata/payload reuse allocations after segment warmup |
 | `TestFixedIndexChurnMatchesMap` | 50,000 deterministic random operations cross-checked against an independent map |
