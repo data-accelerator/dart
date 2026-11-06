@@ -11,7 +11,9 @@
 #     an HTTPS registry or object store. `scratch` has none and every fetch would
 #     fail x509 verification, so we use distroless/static, which ships them.
 
-FROM golang:1.22-alpine AS build
+# Use a supported patched compiler for distributed binaries. The module's
+# Go 1.22 compatibility floor is tested separately in CI.
+FROM golang:1.27.3-alpine AS build
 
 WORKDIR /src
 
