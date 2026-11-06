@@ -698,8 +698,10 @@ func TestExpiredEngineFlightsAllowFreshAdmission(t *testing.T) {
 			waitBlockEvent(t, ctx, started1)
 			e.origins.mu.Lock()
 			var expiry time.Time
+			var original *leaseCall
 			for _, c := range e.origins.m {
 				expiry = c.stale
+				original = c
 			}
 			e.origins.mu.Unlock()
 			waitBlockEvent(t, ctx, canceled1)
@@ -709,6 +711,22 @@ func TestExpiredEngineFlightsAllowFreshAdmission(t *testing.T) {
 			case <-timer.C:
 			case <-ctx.Done():
 				t.Fatal("flight expiry did not arrive")
+			}
+			// Hold cleanup until the original consumer actually observes expiry
+			// and enters its final-owner join. Otherwise done and expiry can both
+			// become ready before its select runs, legitimately sharing a timeout
+			// instead of retrying the replacement.
+			for {
+				e.origins.mu.Lock()
+				joining := original != nil && original.refs == 0
+				e.origins.mu.Unlock()
+				if joining {
+					break
+				}
+				if ctx.Err() != nil {
+					t.Fatal("original consumer did not enter cleanup join")
+				}
+				runtime.Gosched()
 			}
 			second := make(chan error, 1)
 			go func() { second <- run(tc.hop) }()
