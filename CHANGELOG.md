@@ -7,6 +7,10 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+## [v0.3.0] — 2026-11-06
+
+### Highlights
+
 - Manage memory cache blocks in segmented arenas with fixed reusable metadata
   and chunk/descriptor/block indices (#87, ADR-0008). Node reads borrow immutable
   pinned blocks; supported peer/origin ingress fills unpublished slots directly,
@@ -32,6 +36,8 @@ every release's upgrade notes.
   avoiding repeated full-block transfers for concurrent sub-block ranges (#81).
   Preserve independent waiter cancellation, caller-owned buffers, per-URL
   failure retries, relay hop progression and actual wire-byte accounting.
+- Unpublish completed origin fetch flights before waking waiters, preventing
+  later callers from joining a completed failed flight (#69).
 - Preserve escaped origin paths in fallback cache identities; encoded slashes
   and separators no longer conflate different immutable objects. Digest
   recognition respects encoded path boundaries.
@@ -47,6 +53,19 @@ every release's upgrade notes.
   Decline inconsistent block key/Origin URL pairs before cache or upstream access
   so malformed requester addressing cannot quarantine honest parents.
 
+### Packaging and documentation
+
+- Build release images with Go 1.27.3 while retaining Go 1.22/stable compatibility
+  checks for the main module and separate Kubernetes provider module.
+- Update the Helm chart version/appVersion to 0.3.0/v0.3.0. The default image tag
+  remains `dev` for source builds; set `image.tag=v0.3.0` for a tagged build.
+- Correct memory-budget guidance: RAM cache arenas count toward Go-managed
+  memory. Budget `GOMEMLIMIT` for cache payloads and overhead, and leave further
+  headroom in the container limit.
+- Add Architecture Decision Records and a documentation floor covering the
+  package index, documented tests, exported API coverage, canonical statements,
+  ADR links and evidence anchors.
+
 ### Upgrade notes
 
 Digest keys, ChunkKey, HRW and their golden vectors are unchanged. Fallback
@@ -54,6 +73,28 @@ identities for affected non-digest paths now use the escaped path rather than
 the decoded path; upgrade all nodes together when serving such URLs. Cache
 stores restart cold. Each new endpoint now needs its own one-byte capability
 probe even when another endpoint has already populated the digest cache.
+
+
+Whole-block relays validate each block before sending it; cold multi-hop startup
+waits for complete blocks. Long Range reads use bounded in-range prefetch by
+default; `-prefetch-window=1` selects serial reads. The default cache mode remains
+Hybrid. In memory mode `-cache-size` sizes the RAM class budgets, while `-mem-size`
+and `-cache-dir` are ignored. All modes restart cold. Memory capacity bounds
+payload slots rather than total process RSS.
+
+The v0.3.0 cache/backend changes retain the existing peer HTTP/1.1 framing and
+placement derivations. The affected escaped-URL identity change above is the
+coordinated-upgrade exception; do not assume every v0.2.0 deployment can roll
+through a mixed-version window unchanged.
+
+### Verification
+
+Main and separate `providers/k8s` modules: vet, race tests, coverage tests and
+builds pass. Independent chunk/hashring/cluster golden references and all eight
+documentation checks pass. CI covers Go 1.22 and stable Go, both container targets,
+and Linux cross-builds. Version-stamped static `dart` and `dart-k8s` binaries are
+built for linux/amd64 and linux/arm64; amd64 startup and HTTP reads are checked
+in memory, disk and Hybrid modes. ARM64 binaries are cross-built, not executed.
 
 ## [v0.2.0] — 2026-08-26
 
