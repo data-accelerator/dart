@@ -94,6 +94,16 @@ Backend choice is node-local and can mix within a uniform-geometry cluster
 dart -cache-mode=memory -cache-size=2GiB -origin https://example.com/blob
 ```
 
+**Memory budgets.** RAM arena segments are allocated by Go and count toward
+`GOMEMLIMIT`: include the memory-mode cache capacity or Hybrid RAM hot set,
+metadata, in-flight/temporary buffers and runtime state in that budget.
+`GOMEMLIMIT` is a soft runtime memory limit, not a cache eviction mechanism or
+a process RSS cap; garbage collection cannot reclaim live cache payloads.
+Leave further headroom in the container memory limit for memory outside the Go
+runtime's accounting. Disk arena files and their OS page cache are separate
+from the RAM payload budget, but page cache can still count against container
+memory. See [Go's memory-limit contract](https://pkg.go.dev/runtime/debug#SetMemoryLimit).
+
 ### Origin resolution modes
 
 - **Fixed origin** (`-origin URL`): every request is served from that one

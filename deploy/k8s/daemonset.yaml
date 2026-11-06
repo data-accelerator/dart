@@ -94,8 +94,9 @@ spec:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef: {fieldPath: metadata.namespace}
-            # Keep the Go heap under the container limit. The block cache is a
-            # fixed-size arena outside the heap, so this bounds the rest.
+            # Go-managed memory includes the Hybrid RAM hot set, or the whole
+            # memory-mode cache. Include runtime/request overhead and leave
+            # headroom below the container memory limit for total process RSS.
             - name: GOMEMLIMIT
               value: "1500MiB"
           ports:
