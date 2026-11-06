@@ -73,7 +73,7 @@ and safe for concurrent use, since it runs on the scrape path.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `dart_block_source_total` | counter | `source=cache\|peer\|origin` | blocks served, by where they came from |
-| `dart_bytes_total` | counter | `direction=client\|peer_in\|origin_in` | bytes written to clients / fully received and validated peer payloads / fully received and validated origin payloads |
+| `dart_bytes_total` | counter | `direction=client\|peer_in\|origin_in` | bytes written to clients / fully received and validated peer payloads / fully received and validated origin blocks, plus verbatim passthrough bytes |
 | `dart_relay_total` | counter | `result=served\|declined` | relay requests handled for peers |
 | `dart_block_fetch_seconds` | histogram | `source=peer\|origin` | block-path fetch latency: cache fills and peer reads only — Size probes and the uncached passthrough path are **not** observed here (`dart_passthrough_total` counts the latter). A coalesced fetch still observes its latency (the caller genuinely waited) even though its bytes are not double-counted in `dart_bytes_total` |
 | `dart_hedge_total` | counter | `event=fired\|primary_won\|backup_won` | tail-latency hedges: duplicates launched, and which contender served the block |

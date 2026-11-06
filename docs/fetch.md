@@ -285,7 +285,7 @@ O(len(dst)), space O(1) beyond caller storage.
 Coalescing.FetchInto delegates an exclusive fill to the inner fetcher with its
 MaxFlight timeout, composing through nested wrappers. It deliberately does not
 share a caller-owned writable buffer: the engine's origin lease flight performs
-sharing, final-caller cancellation/join and transfer-credit assignment above this
+sharing, final-caller cancellation/join and completed ingress accounting above this
 API (ADR-0008). Fetch and Probe retain their ordinary byte-sharing contracts.
 
 FlightLimiter exposes the deadline policy without promising that cleanup finishes
