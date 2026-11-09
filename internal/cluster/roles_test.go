@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"reflect"
 	"testing"
 )
@@ -36,6 +37,49 @@ func TestRolePlacementAndEpoch(t *testing.T) {
 	members[0].State = Suspect
 	if got := NewView(members); len(got.Roots()) != 2 || len(got.Readers()) != 1 {
 		t.Fatal("non-ready candidate included")
+	}
+}
+
+// A neighbor can keep advertising an old role after the member has directly
+// announced a new one and then become unreachable. The full refresh path must
+// retain that self-report; transport failure cannot restore root capability.
+func TestRoleRefreshRejectsStaleThirdPartyCapabilities(t *testing.T) {
+	const rootAddr, neighborAddr = "root:9000", "neighbor:9000"
+	root := Member{ID: "root", Addr: rootAddr, Weight: 1, Role: RootOnly}
+	neighbor := Member{ID: "neighbor", Addr: neighborAddr, Weight: 1, Role: Ordinary}
+	f := &fakeFetcher{}
+	f.set(rootAddr, root)
+	f.set(neighborAddr, neighbor, root)
+	d := NewDynamicProvider(DynamicConfig{
+		Self:   Member{ID: "self", Addr: "self:9000", Role: NonRoot},
+		Seeder: StaticSeeder{rootAddr, neighborAddr}, Fetcher: f,
+	})
+	ctx := context.Background()
+	before := d.Refresh(ctx)
+	if len(before.Roots()) != 2 || len(before.Readers()) != 2 {
+		t.Fatalf("initial capabilities: %v", before.Members())
+	}
+	root.Role = NonRoot
+	f.set(rootAddr, root) // neighbor retains its old RootOnly report
+	changed := d.Refresh(ctx)
+	if changed.Epoch() == before.Epoch() {
+		t.Fatal("direct role change left epoch unchanged")
+	}
+	f.breaks(rootAddr)
+	for i := 0; i < 5; i++ {
+		v := d.Refresh(ctx)
+		m, ok := v.Get(root.ID)
+		if !ok || m.Role != NonRoot || v.Epoch() != changed.Epoch() || len(v.Roots()) != 1 || len(v.Readers()) != 3 {
+			t.Fatalf("stale roster or dial failure restored a root: %v", v.Members())
+		}
+	}
+	// Inbound direct self-identification carries the same authority as an
+	// outbound handshake, even while the reverse dial remains unavailable.
+	root.Role = RootOnly
+	d.LearnMember(root)
+	v := d.Refresh(ctx)
+	if v.Epoch() != before.Epoch() || len(v.Roots()) != 2 || len(v.Readers()) != 2 {
+		t.Fatalf("inbound role update was lost: %v", v.Members())
 	}
 }
 

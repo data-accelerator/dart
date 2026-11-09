@@ -63,6 +63,10 @@ a stale `Addr` only causes a fallback to origin (safe under read-only
 semantics). It is retrievable via `Get`.
 
 Roles are defined by [ADR-0009](./adr/0009-root-eligible-peer-roles.md).
+`TestRoleRefreshRejectsStaleThirdPartyCapabilities` covers the complete refresh
+path: a direct role change changes the epoch and root/reader candidates, stale
+neighbor rosters and a subsequent dial failure cannot revert it, and an inbound
+self-report can update it again without changing the stable member ID.
 `Role.Valid` rejects unknown values; `CanRoot` permits Ordinary and RootOnly,
 while `CanRead` permits Ordinary and NonRoot. `String` returns `ordinary`,
 `root-only`, `non-root`, or `unknown`. These methods are pure and goroutine-safe.
