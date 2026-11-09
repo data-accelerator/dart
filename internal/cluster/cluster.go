@@ -2,8 +2,8 @@
 // lifecycle state and capacity weight, and a deterministic epoch derived from
 // the membership content.
 //
-// It feeds internal/hashring: the placement layer ranks the Ready members, the
-// distribution layer ranks a reader-set subset. A View is an immutable snapshot
+// It feeds internal/hashring: placement ranks root-eligible Ready members;
+// distribution anchors at that owner and ranks eligible reader descendants. A View is an immutable snapshot
 // so it can be shared across goroutines without locking; providers publish new
 // Views atomically (see provider.go).
 //

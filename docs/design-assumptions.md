@@ -46,23 +46,33 @@ contract.
 - DART therefore does **not** ship allowlist-style network configuration;
   enforcement belongs to the deployment environment.
 
-## A3. Cluster configuration is uniform
+## A3. Addressing and routing protocols are uniform
 
 Established by: [ADR-0001](./adr/0001-minimalist-assumptions-as-contract.md).
 
-Cache backend (`memory`, `disk`, `hybrid`) and capacity are node-local choices
-(ADR-0007); they do not affect addressing or placement.
+Cache backend (`memory`, `disk`, `hybrid`), capacity and owned/borrowed split are
+node-local choices (ADR-0009, superseding ADR-0007's two-class minimum); they do
+not affect addressing or placement. The explicit ordinary/root-only/non-root
+role is per-member configuration distributed consistently in membership and
+included in epoch agreement. Placement ranks root-eligible members; reader
+membership only shapes descendants below the preferred owner. Root-eligible
+peers can access all configured origins in the namespace. Non-root peers obtain
+metadata, blocks and uncached frontend responses through roots. Roles express
+operational capabilities within A2, not security identities.
 
 All nodes run the same `BlockSize`, `ChunkSize`, namespace, fanout, and
-feature set. Rolling changes that mix geometries are allowed to happen, but
-byte-level guarantees across a mixed-geometry window are out of scope.
+feature set. ADR-0009's role-aware epoch and v2 peer protocol require a
+coordinated deployment, including all-ordinary clusters: old binaries cannot
+interpret the new placement/tree contract. Drain requests and replace every
+participant with compatible binaries before admitting traffic. Mixed geometries
+or mixed old/new role protocols have no supported byte/routing guarantees.
 
 - **Buys**: placement and block math need no negotiation or version
   handshake; every node derives the same answer from the same inputs.
 - **If violated**: a peer may legitimately serve its own geometry's blocks;
   the engine's geometry validation (docs/engine.md §3.3) prevents caching
-  them, and reads fall back to origin — safe, but slower until the rollout
-  converges.
+  them. Routing may try eligible roots or return a bounded failure; a non-root
+  never gains direct origin access as a fallback.
 - Relied on by: docs/chunk.md, docs/engine.md, docs/peer.md.
 
 ## A4. Weights are finite; non-positive ones are normalized to 1

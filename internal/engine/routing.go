@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/data-accelerator/dart/internal/cluster"
+	"github.com/data-accelerator/dart/internal/fetch"
 	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/peer"
 	"github.com/data-accelerator/dart/internal/store"
@@ -25,6 +26,8 @@ var errNoRoot = errors.New("engine: no usable supply root")
 // pressure cause cache-holder searches. Each address is attempted at most once
 // here; all attempts share the caller's bounded block-flight context.
 func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, index int64, hop int, key store.BlockKey, want int64, view *cluster.View, roots []hashring.Node) (leasedRead, error) {
+	ctx, cancel := context.WithTimeout(ctx, fetch.FlightLimit(e.fetcher))
+	defer cancel()
 	if hop >= maxHop || !e.role.CanRead() {
 		return leasedRead{}, errNoRoot
 	}

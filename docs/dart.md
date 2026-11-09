@@ -43,9 +43,10 @@ dart [flags]
 | `-receive-bytes` | `0` (auto) | live temporary block receive payload; auto selects max(256 MiB, block-size); explicit limit must fit one block |
 | `-receive-loads` | `64` | live temporary block receive buffers, including retained shared results; separate from cache/prefetch capacity |
 | `-namespace` | `dart` | chunk-key namespace |
+| `-role` | `ordinary` | `ordinary`, `root-only` (no client listener), or `non-root` (delegate all origin access); restricted roles require P2P |
 | `-self-id` | `""` | this node's cluster ID (required with `-peers`) |
 | `-peer-listen` | `:9000` | peer block-server listen address (P2P mode) |
-| `-peers` | `""` | fixed membership: comma-separated `id@host:port` (incl. self). Mutually exclusive with `-discover` |
+| `-peers` | `""` | fixed membership: comma-separated `id@host:port#role` (incl. self; role defaults to ordinary). Mutually exclusive with `-discover` |
 | `-discover` | `""` | **maintain** membership by discovery: `<scheme>:<spec>` — `dns:<name>:<port>` (a headless Service), `static:<a>,<b>,...`, or a bare address list; the `dart-k8s` variant adds `k8s:<namespace>/<service>[/<port>]` |
 | `-peer-advertise` | `""` | `host:port` peers should dial; wildcard values are rejected. Defaults to `-peer-listen`, resolving a wildcard host in order: `DART_ADVERTISE_HOST` → `POD_IP` → hostname |
 | `-discover-interval` | `5s` | how often to re-resolve seeds and re-exchange rosters |
@@ -102,7 +103,7 @@ consume this temporary allowance. Defaults are capacity guardrails, not measured
 optimal concurrency; zero-cache-class workloads may need larger receive limits.
 
 Backend choice is node-local and can mix within a uniform-geometry cluster
-(ADR-0007); paths, keys and placement are unchanged.
+(ADR-0009); backend choice itself does not change paths, keys or placement.
 
 ```bash
 dart -cache-mode=memory -cache-size=2GiB -origin https://example.com/blob
@@ -274,7 +275,7 @@ go test ./cmd/dart/ ./internal/node/ -race -count=1
 
 - **P2P tree**: a miss routes to the parent in the preorder tree; relay nodes
   receive and validate whole blocks before forwarding, and cache best-effort. With `-reader-tree`
-  (default) the tree spans only the nodes reading the object, via a per-file
+  (default) the owner anchors the tree, with eligible readers below it via a per-file
   tracker served on the peer listener (see docs/tracker.md). `-hedge` bounds tail
   latency by racing a slow parent against its grandparent, and `-peer-timeout`
   bounds every peer request. A per-peer circuit breaker

@@ -131,16 +131,18 @@ capped at 64 KiB.
 
 `engine.Options.TrackerRegistry` (this node's local tracker) and
 `TrackerClient` (to reach remote trackers) enable the feature; leaving both nil
-keeps all-member routing. The engine then:
+uses all eligible Ready readers below the owner. The engine then:
 
 1. computes the file key and the HRW tracker for it;
 2. JOINs (locally if it *is* the tracker, else over HTTP) and caches the reader
    set for ~2s, so a read does not make a tracker call per block;
-3. ranks the reader set for the chunk and takes its tree parent from that.
+3. anchors the tree at the root-eligible chunk owner, appends ranked eligible
+   readers without duplicating the owner, and takes its parent from that sequence.
+   Root-only peers supply roots but do not JOIN as readers (ADR-0009).
 
-**Fallbacks — the read never fails because of a tracker:** if the tracker is
-unreachable, or the reader set has fewer than two usable members, routing falls
-back to all Ready members.
+**Fallbacks:** a missing/unreachable tracked snapshot routes directly to the
+preferred owner. A sole reader also fetches through that owner. Reader changes
+do not move ownership; loss of all usable roots can still fail a cache miss.
 
 ## 6. Concurrency & Call Permissions
 
@@ -195,15 +197,15 @@ Engine-side (in `internal/engine`):
 
 | Test | Property guarded |
 |---|---|
-| `TestTreeNodesPrefersReaderSet` | tree candidates are exactly the readers, not all Ready members |
-| `TestTreeNodesFallsBackToAllMembers` | no tracker, or a single reader, falls back to all-member routing |
+| `TestTreeNodesPrefersReaderSet` | tree anchors at the owner and uses eligible active readers below it |
+| `TestTreeNodesFallsBackToAllMembers` | tracking disabled uses eligible readers; a tracked sole reader retains the owner |
 | `TestReaderSetTreeEndToEnd` | 3 nodes sharing one tracker all read correct bytes |
 
 ## 9. Limitations & TODO
 
 - **Tracker liveness**: a tracker that dies is replaced by HRW on the next
   membership change, and `S` rebuilds from renewals — but in-flight reads during
-  the gap fall back to all-member routing rather than retrying.
+  the gap route directly to the owner.
 - **No epochS-driven invalidation**: the engine caches the reader set for a fixed
   ~2s rather than reacting to an `epochS` change pushed by the tracker.
 - **No append-only mode**: the design's option to add new readers as leaves and

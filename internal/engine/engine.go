@@ -53,9 +53,9 @@ type Options struct {
 
 	// --- P2P (optional) ---
 	// When Cluster, Peer, and SelfID are all set, a cache miss first tries to
-	// pull the block from the owning peer(s) (HRW over Cluster.Ready()) before
-	// falling back to origin. Leaving any unset disables peer pulls (single-node
-	// behavior: every miss goes to origin).
+	// route via eligible readers to the root-eligible owner. Non-root nodes
+	// never fall back to origin. Leaving any unset disables peer pulls; only
+	// root-capable standalone nodes can fill a miss.
 	Cluster cluster.Provider
 	Peer    *peer.Client
 	SelfID  string
@@ -107,10 +107,10 @@ type Options struct {
 
 	// TrackerClient and TrackerRegistry enable the active-reader-set tree: the
 	// distribution tree is built over the nodes currently reading the object
-	// (so a parent is always another reader) instead of over all Ready members.
+	// below the preferred owner, instead of using all eligible Ready readers.
 	// TrackerRegistry is this node's local tracker (used when this node is the
 	// HRW tracker for a file); TrackerClient reaches remote trackers. Leaving
-	// both nil keeps all-member routing.
+	// both nil uses all eligible Ready readers below the owner.
 	TrackerClient   *tracker.Client
 	TrackerRegistry *tracker.Registry
 }
@@ -432,34 +432,9 @@ func (e *Engine) blockLen(size, blockIndex int64) int64 {
 	return e.cfg.BlockSize
 }
 
-// fromPeer routes a miss to this node's parent in the preorder distribution
-// tree. The tree is built over the active reader set when available (so the
-// parent is another reader) and otherwise over all Ready members. The parent
-// relays (fetching from its own parent/origin as needed), so it usually holds
-// the block. If this node is the tree root it returns ok=false and the caller
-// fetches origin. hop guards against loops under membership skew.
-func (e *Engine) fromPeer(ctx context.Context, url, objectID string, chunkKey uint64, key store.BlockKey, hop int, want int64) ([]byte, bool) {
-	if hop >= maxHop {
-		return nil, false
-	}
-	view := e.cluster.Current()
-	if view == nil {
-		return nil, false
-	}
-	ranked, _ := e.treeNodes(ctx, view, objectID, e.fileKey(objectID), chunkKey)
-	if len(ranked) == 0 {
-		return nil, false
-	}
-	primary, backup := e.hedgeTargets(ranked, view)
-	if primary == "" {
-		return nil, false // we are the tree root: fetch origin
-	}
-	return e.fetchHedged(ctx, primary, backup, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1}, want)
-}
-
 // putBlock stores a block, classifying it as owned or borrowed so the two
 // budgets stay isolated (see store's tiered layer). A node owns a block when it
-// is in the HRW top-Replicas for the chunk over all Ready members — that is the
+// is in the HRW top-Replicas for the chunk over root-eligible Ready members — that is the
 // authoritative placement, independent of who happens to be reading. Everything
 // else (a copy fetched for a local client, or relayed for a peer) is borrowed.
 //

@@ -196,7 +196,7 @@ st := ts.Stats() // OwnedBlocks/Slots, BorrowedBlocks/Slots, AdmitRejected
 ```
 
 The engine classifies automatically: a block is `Owned` when this node is in the
-HRW top-`Replicas` for its chunk over all Ready members, else `Borrowed` (see
+HRW top-`Replicas` for its chunk over root-eligible Ready members, else `Borrowed` (see
 docs/engine.md).
 
 ### 3.5 Memory tier and `Hybrid`

@@ -1,13 +1,13 @@
 # ADR-0009: Anchor distribution at role-eligible owners
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-09
 - Supersedes: ADR-0007
-- Binds: docs/design-assumptions.md A3/A4; docs/cluster.md membership and epoch; docs/hashring.md placement and trees; docs/engine.md routing and metadata; docs/peer.md protocol; docs/store.md class budgets; docs/node.md assembly; docs/dart.md configuration; docs/k8s.md discovery; docs/observability.md diagnostics
+- Binds: docs/design-assumptions.md A3/A4; docs/cluster.md membership and epoch; docs/hashring.md placement and trees; docs/engine.md routing and metadata; docs/tracker.md reader integration; docs/peer.md protocol; docs/store.md class budgets; docs/node.md assembly; docs/dart.md configuration; docs/k8s.md discovery; docs/observability.md diagnostics
 
 ## Context
 
-Issue #95 requires compute peers without origin access and dedicated supply peers
+Issue [#95](https://github.com/data-accelerator/dart/issues/95) requires compute peers without origin access and dedicated supply peers
 without local clients. Ranking all Ready members for ownership cannot express
 these roles. Ranking only readers can choose an origin-isolated root. Local Size
 probes and unconditional origin fallback also prevent isolated consumers from

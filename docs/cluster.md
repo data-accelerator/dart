@@ -10,7 +10,7 @@ It feeds `internal/hashring`.
 
 ## 1. Overview
 
-DART discovers peers from Kubernetes (all peers equal, TCP only, no broadcast).
+DART discovers peers from Kubernetes (explicit roles, TCP only, no broadcast).
 This package models the resulting membership as an immutable snapshot (`View`)
 and exposes it to the placement/distribution layers. It deliberately contains no
 Kubernetes code: a pluggable `Provider` supplies Views, so the core is testable
@@ -59,8 +59,8 @@ type Member struct {
 
 `Addr` is routing metadata (where to pull blocks from this member) and is
 deliberately excluded from the epoch: it does not affect placement ordering, and
-a stale `Addr` only causes a fallback to origin (safe under read-only
-semantics). It is retrievable via `Get`.
+a stale `Addr` causes a failed attempt and role-permitted fallback or a read
+failure, without changing immutable content. It is retrievable via `Get`.
 
 Roles are defined by [ADR-0009](./adr/0009-root-eligible-peer-roles.md).
 `TestRoleRefreshRejectsStaleThirdPartyCapabilities` covers the complete refresh

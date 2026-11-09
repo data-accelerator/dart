@@ -14,10 +14,9 @@ already holds it instead of hitting origin. This package is the wire transport
 for that pull. It is plaintext HTTP/1.1 (peer-plane encryption is delegated to
 the CNI layer, per the design), which keeps `sendfile`/`splice` viable later.
 
-This first cut is transport only: a peer serves whatever its local `Source`
-holds and returns `404` otherwise. **Routing** — which peer to ask (placement
-via `internal/hashring`) and the distribution tree — is wired in a later step;
-this package does not decide who to contact.
+A peer invokes its configured source and returns `404` when it declines. The
+engine supplies role-aware routing and terminal supply sources; this transport
+does not select owners or readers.
 
 ## 2. Wire form
 
@@ -25,6 +24,7 @@ this package does not decide who to contact.
 GET /peer/v2/block/<chunkKey-hex>/<blockIndex>
 X-DART-Origin: <upstream url>   (optional; enables relay fetch-on-behalf)
 X-DART-Hop:    <n>              (relay depth, for loop safety)
+X-DART-Supply: 1                (optional; root must terminate at cache/origin)
 ```
 
 - `<chunkKey-hex>` is `store.BlockKey.Chunk` in base-16; `<blockIndex>` is
@@ -52,7 +52,8 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   is a valid wire value at this layer.
 - Responses: `200` + complete block bytes (`X-DART-Node`, explicit `Content-Length`), `404` if the peer cannot provide the block, `400`
   for a malformed path or an invalid `X-DART-Hop`, `405` for non-GET, `500`
-  on a source error, and `502` +
+  on an unclassified source error, `503` + `X-DART-Source-Failure` for a
+  reported source/path failure, and `502` +
   `X-DART-Upstream-Status: <origin code>` when a relay's origin fetch was
   refused (§3.6 — the peer is fine; the caller's credential is not).
 - The path has no embedded URLs, so it is parsed from `URL.Path` (no `//` trap).
@@ -66,6 +67,7 @@ type BlockRequest struct {
     Key store.BlockKey // the block
     URL string         // X-DART-Origin: origin for relay; "" = transport-only
     Hop int            // X-DART-Hop: relay depth
+    Supply bool        // X-DART-Supply: terminal root request
 }
 type Source func(ctx context.Context, req BlockRequest) ([]byte, bool, error)
 ```
@@ -85,7 +87,7 @@ type Server struct {
 ```
 
 An `http.Handler` for the wire form above: `ServeHTTP` dispatches
-`/peer/v1/block` (and rejects invalid `X-DART-Hop` values, §2); unknown paths
+`/peer/v2/block` (and rejects invalid `X-DART-Hop` values, §2); unknown paths
 get 404. Safe for concurrent use, as any handler must be.
 
 ### 3.3 `type Client` / `func NewClient() *Client`

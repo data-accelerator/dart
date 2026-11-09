@@ -12,10 +12,11 @@ oss) and is designed to let open-source **OverlayBD** use it as a P2P
 acceleration proxy over plain HTTP. Target throughput: 100 Gbps/node where
 network and media allow.
 
-Core ideas: cloud-native peer discovery (K8s only, all peers equal, TCP only, no
-broadcast); weighted Rendezvous Hashing (HRW) for chunk placement; a preorder
-full k-ary tree (derived from the HRW order, over the active reader set) for P2P
-distribution; two-tier cache (owned shards vs borrowed hot copies); mem/disk/
+Core ideas: cloud-native peer discovery (K8s, stable identities, TCP only, no
+broadcast); explicit ordinary/root-only/non-root roles; weighted Rendezvous
+Hashing (HRW) over root-eligible peers for chunk placement; an owner-rooted
+preorder full k-ary tree with eligible active readers as descendants for P2P
+distribution (ADR-0009); two-tier cache (owned shards vs borrowed hot copies); mem/disk/
 hybrid tiers.
 
 ## Repository layout

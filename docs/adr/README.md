@@ -130,6 +130,6 @@ acceptable in current law — it is a pointer, not a narrative.
 | [0004](./0004-preserve-escaped-origin-identities.md) | Preserve escaped origin identities independently of endpoint probes | accepted |
 | [0005](./0005-coalesce-caller-owned-block-loads.md) | Coalesce caller-owned buffered block loads through cache publication | superseded by ADR-0006 |
 | [0006](./0006-pipeline-whole-block-transfers.md) | Pipeline whole-block transfers with bounded Range prefetch | superseded by ADR-0008 |
-| [0007](./0007-select-node-local-cache-backends.md) | Select node-local cache backends without weakening class isolation | accepted |
+| [0007](./0007-select-node-local-cache-backends.md) | Select node-local cache backends without weakening class isolation | superseded by ADR-0009 |
 | [0008](./0008-borrow-managed-memory-blocks.md) | Borrow managed memory blocks through validated publication and sending | accepted |
-| [0009](./0009-root-eligible-peer-roles.md) | Anchor distribution at role-eligible owners | proposed |
+| [0009](./0009-root-eligible-peer-roles.md) | Anchor distribution at role-eligible owners | accepted |

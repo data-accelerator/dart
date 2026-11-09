@@ -69,6 +69,7 @@ For example, supply values can contain:
 ```yaml
 fullnameOverride: dart-supply
 role: root-only
+extraArgs: ["-owned-fraction=1"]
 discovery:
   mode: k8s
   serviceName: dart-peers
@@ -78,7 +79,12 @@ nodeSelector:
 ```
 
 Compute values use `fullnameOverride: dart-compute`, `role: non-root`, the same
-Service name and mode, `createService: false`, and `nodeSelector: {dart-pool: compute}`.
+Service name and mode, `createService: false`, `extraArgs: ["-owned-fraction=0"]`,
+and `nodeSelector: {dart-pool: compute}`. Roles and budgets are independent;
+these shares devote capacity to the class each group normally stores. Add
+`-cache-mode=memory` through extraArgs for RAM-only operation, sizing cache.size,
+gomemlimit and container resources together. `-receive-bytes` and `-receive-loads`
+can also be set there to bound temporary uncached delivery.
 Install both in the same namespace using binaries that implement ADR-0009;
 v0.3.0 binaries do not support these roles. Keep geometry/placement settings and
 peer ports compatible across groups. The chart derives stable identity from the

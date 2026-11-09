@@ -25,10 +25,12 @@ the preorder distribution tree** (branching factor `Fanout`); the parent
 so it usually holds the block. The tree root (owner) fetches origin. This offloads
 the owner under a thundering herd.
 
-The tree spans the **active reader set** when a tracker is configured (so a
-parent is always another reader — see docs/tracker.md) and otherwise all Ready
-members. Without P2P configured the engine is single-node (every miss goes to
-origin).
+The tree starts at the preferred owner among root-eligible Ready members. Its
+descendants are eligible **active readers** when a tracker is configured, or all
+eligible Ready readers when tracking is disabled (ADR-0009). Root-only peers
+never become descendants; non-root peers never contact origin. Without P2P,
+ordinary nodes operate as single-node caches; node assembly requires P2P for
+restricted roles.
 
 Reader-set lookups are **cached per object for half the granted tracker lease**
 (and the cache doubles as the lease renewal: a hit re-serves the frozen set, a
@@ -37,7 +39,7 @@ lease guarantees renewal always lands before the lease lapses; a tracker that
 grants nothing falls back to a 2 s period. Expired entries are swept as the
 cache grows past a few hundred objects, so the map tracks objects currently
 being read and stays small. When the tracker is unreachable the engine falls
-back to all-member routing for that lookup (the reader set is soft state).
+back to the preferred owner for that lookup (the reader set is soft state).
 
 ## 2. Concepts
 
@@ -62,6 +64,7 @@ type Options struct {
     Cluster  cluster.Provider // membership source
     Peer     *peer.Client     // peer block client
     SelfID   string           // this node's cluster ID
+    Role     cluster.Role     // Ordinary (zero), RootOnly, NonRoot
     Fanout   int              // distribution-tree branching factor (default 2)
     Replicas int              // HRW candidates that authoritatively hold a chunk (default 1)
     Hedge      bool           // hedge a slow peer fetch (default off)
@@ -82,6 +85,65 @@ type Options struct {
 `New` validates the chunk config and required fields. Peer pulls are enabled
 only when `Cluster`, `Peer`, and `SelfID` are all set. Negative prefetch limits
 or a window above 64 are rejected; zero selects each default.
+
+### 3.1.1 Owner-rooted role routing
+
+ADR-0009 fixes the preferred root to the first HRW candidate from `View.Roots`.
+`Options.Role` is the local capability. Active ordinary/non-root readers form the
+ordered descendants; other root-only peers never enter the tree. With tracking
+configured, an unavailable reader snapshot routes directly to the owner. With
+tracking disabled, the descendants are the Ready reader-eligible members.
+
+A root supply request terminates at cache/origin. A non-root never falls through
+to local origin; failed ancestors can be bypassed toward root candidates, with
+at most the existing hop-bound count of root candidates under the shared flight
+lifetime. Supply mode and relay depth are both in block-flight identity, so a
+backup root does not join an outer relay waiting for it. A healthy owner miss
+never probes another root or a reader. Source refusals preserve their status and
+stop redundant credential/source attempts; transport/path failure may fail over.
+
+`func (e *Engine) ProbeSource() func(context.Context, string) (peer.Metadata, error)`
+returns terminal metadata service for root-eligible nodes
+and nil for non-root nodes. Non-root Size probes use a file-key-ranked root,
+endpoint-scoped singleflight and the existing credential/cancellation rules.
+Root-eligible nodes retain local endpoint probing. Cached metadata and blocks
+continue to work without a reachable root. Uncached frontend operations use
+the terminal origin transport below.
+
+`TestRolesColdReadAndRootFailover` uses real HTTP roots and a forbidden local
+fetcher to verify delegated metadata, cold P2P reads, no replica query on owner
+miss, backup supply, warm reads without roots and bounded cold failure.
+
+### 3.1.2 Uncached origin delegation
+
+`func (e *Engine) OriginTransport() http.RoundTripper` supplies the non-root
+frontend transport. Each bodyless GET/HEAD chooses roots by the same file-key
+ranking as metadata, independently of object size or the reader tree. It tries
+at most the relay hop bound of candidates and skips duplicate addresses.
+Peer failures permit fallback; every actual origin HTTP response, including
+4xx/5xx, is terminal. No roots yields an error without calling the local fetcher.
+Requests are not coalesced or cached. Ranking costs O(N log N) over eligible roots;
+streaming storage is independent of object size. The transport is concurrent-safe.
+
+`func (e *Engine) OriginSource(rt http.RoundTripper) http.RoundTripper` supplies a
+root's terminal HTTP transport and accounts streamed response bytes as origin
+ingress. It returns nil on non-root engines or for a nil transport. The argument
+must perform local origin access and must never delegate to other DART peers.
+Node assembly mounts it through `peer.OriginServer` on the peer listener.
+
+For Range-unsupported reads, the delegated opener follows HTTP redirects through
+`OriginTransport` again; it never opens a direct connection to the redirected
+endpoint. Registry control delegation and redirect handling are wired separately
+in [node.md](./node.md), using the same transport. The raw peer client never
+follows a redirect itself. Header wait and blocked body reads have time bounds;
+successful long transfers have no block-sized whole-request deadline. Closing a
+body cancels the upstream operation. A midstream failure aborts the downstream
+response, including unknown-length framing, and never publishes partial blocks.
+
+`TestNonRootOriginFailoverKeepsRefusalsTerminal` covers definitive origin errors,
+root transport failure, and the no-root path. `TestNonRootPassthroughAbortsIncompleteResponse`
+covers truncated unknown-length delivery. `TestNonRootPassthroughCountsPeerBytes`
+checks both supply and consumer byte accounting and non-root source rejection.
 
 ### 3.2 `func (e *Engine) Size(ctx, url string) (int64, error)`
 
@@ -323,8 +385,8 @@ independent rate limit; backend cancellation must cooperate for prompt exit.
 When the configured `Store` also implements `store.ClassStore` (i.e. a
 `store.Tiered`), the engine classifies every block it caches:
 
-- **owned** — this node is in the HRW top-`Replicas` for the chunk over all Ready
-  members. That is the authoritative placement, independent of who is reading.
+- **owned** — this node is in the HRW top-`Replicas` for the chunk over root-eligible
+  Ready members. That is the authoritative placement, independent of who is reading.
 - **borrowed** — anything else: a copy fetched for a local client, or relayed for
   a peer.
 
@@ -335,10 +397,9 @@ admission-rejecting cache never fails a read whose bytes are already in hand.
 
 ### 3.8 Tail-latency hedging
 
-The failure paths already have fallbacks: a `404` or a transport error falls
-through to origin. What had no fallback is a peer that is **alive but slow** (GC
-pause, disk hitch, or itself waiting on its own parent) — and in a tree that
-stall cascades to the whole subtree below it.
+A `404` or transport error permits fallback toward ancestors and eligible supply
+roots. A peer can also be alive but slow (GC pause, disk hitch, or waiting for its
+parent), allowing a stall to propagate through the subtree.
 
 With `Hedge` enabled, a peer fetch has **two distinct escalations**, and keeping
 them separate matters:
@@ -355,9 +416,11 @@ So a peer fetch proceeds as:
    (or the tree root) — both sit closer to the source, so they more likely already
    hold the block;
 3. if a contender *fails* instead, escalate to the backup **immediately and
-   unconditionally**;
+   without rate limiting** (definitive source refusals and local receive-budget
+   exhaustion still stop new attempts);
 4. take whichever answers `held=true` first and **cancel the loser**;
-5. if neither can serve it, fall through to origin as before.
+5. if neither can serve it, try bounded eligible supply-root candidates. Only a
+   root serving supply fetches origin; exhaustion fails the read.
 
 The hedge delay comes from an online estimator (exact p99 over a bounded window of
 recent fetches), floored at 5 ms so a fast cluster does not hedge on noise and
@@ -368,13 +431,12 @@ Separately, `peer.Client` bounds every individual peer request with **three**
 timeouts (dial 1 s, response header 10 s, request 30 s — see docs/peer.md §3.3), so
 a stalled or departed peer can never hold a read open until the caller's context
 expires. And when a `peer.Breaker` is configured, target selection **skips peers
-whose circuit is open** — on the buffered Get path by walking further up the
-ancestor chain, and on the streaming relay path by skipping an open-circuit
-parent and falling through to origin — so a dead branch is routed around rather
-than forcing every reader beneath it back to origin. A parent that *errors* on
-the relay path before writing a byte is likewise treated as a decline (fall
-through to origin); once bytes have streamed to the requester, a failure can
-only propagate. If no ancestor is usable, the read falls through to origin.
+whose circuit is open** by walking toward usable ancestors and roots. Each
+attempt validates the full block before handing it to the requester. Reported
+source failures do not quarantine an honest relay; malformed data does. If no
+ancestor or supply-root candidate can serve, the read fails. The candidate
+sequence shares `fetch.FlightLimit(Fetcher)` (default 30 s), in addition to each
+peer's timeout and the caller's earlier deadline.
 
 Together these bound abrupt node death: the dial timeout makes the first affected
 read fail in ~1 s, a dial failure opens the circuit on that single observation, and
@@ -509,6 +571,11 @@ Managed-memory regression coverage:
 
 | Test | Property |
 |---|---|
+| `TestDelegatedSizeScopesRangeCapabilityToOrigin` / `TestConcurrentDelegatedSizeProbes` | real HTTP metadata roots preserve per-endpoint Range state, independent concurrent probes and cross-origin digest reuse |
+| `TestDelegatedProbeRecoveryAndCancellation` | failed/canceled delegated probes terminate and recover; successful results remain cached |
+| `TestRoleViewSkewTerminatesAtSupplyRoot` | live cyclic reader views advance to the hop bound, recover through terminal supply and release nested buffers |
+| `TestZeroClassBudgetsDeliverOverP2P` | a full multi-block Range crosses two nodes with both serving cache classes disabled and one temporary buffer each |
+| `TestRootCandidatesShareAttemptDeadline` | root fallback cannot restart the block-flight deadline; expiry cancels active HTTP and releases buffers |
 | `TestRolePlacementAndTreeGolden` | independent weighted mixed-role owners/trees, 25 cases, membership/reader permutations, fanout 1/2/4, no snapshot and sole-reader cases |
 | `TestRoleGoldenAgainstPythonReference` | `DART_GOLDEN_REF=1` regenerates and checks `testdata/roles.json` with `contrib/golden/role_reference.py`; CI runs this cross-check |
 | `TestReceiveBudgetTracksSharedDelivery` | disabled-class concurrent readers share one refill; final lease returns capacity; exhaustion prevents source I/O and updates metrics |
@@ -665,61 +732,3 @@ go test ./internal/engine/ -cover -count=1
 - **Mid-stream errors**: once headers are sent, a block error can only truncate
   the body (client detects via Content-Length); prefetching the first block
   before sending headers could turn some of these into clean error statuses.
-
-### Owner-rooted role routing
-
-ADR-0009 fixes the preferred root to the first HRW candidate from `View.Roots`.
-`Options.Role` is the local capability. Active ordinary/non-root readers form the
-ordered descendants; other root-only peers never enter the tree. With tracking
-configured, an unavailable reader snapshot routes directly to the owner. With
-tracking disabled, the descendants are the Ready reader-eligible members.
-
-A root supply request terminates at cache/origin. A non-root never falls through
-to local origin; failed ancestors can be bypassed toward root candidates, with
-at most the existing hop-bound count of root candidates under the shared flight
-lifetime. Supply mode and relay depth are both in block-flight identity, so a
-backup root does not join an outer relay waiting for it. A healthy owner miss
-never probes another root or a reader. Source refusals preserve their status and
-stop redundant credential/source attempts; transport/path failure may fail over.
-
-`Engine.ProbeSource` returns terminal metadata service for root-eligible nodes
-and nil for non-root nodes. Non-root Size probes use a file-key-ranked root,
-endpoint-scoped singleflight and the existing credential/cancellation rules.
-Root-eligible nodes retain local endpoint probing. Cached metadata and blocks
-continue to work without a reachable root. Uncached frontend operations use
-the terminal origin transport below.
-
-`TestRolesColdReadAndRootFailover` uses real HTTP roots and a forbidden local
-fetcher to verify delegated metadata, cold P2P reads, no replica query on owner
-miss, backup supply, warm reads without roots and bounded cold failure.
-
-### Uncached origin delegation
-
-`func (e *Engine) OriginTransport() http.RoundTripper` supplies the non-root
-frontend transport. Each bodyless GET/HEAD chooses roots by the same file-key
-ranking as metadata, independently of object size or the reader tree. It tries
-at most the relay hop bound of candidates and skips duplicate addresses.
-Peer failures permit fallback; every actual origin HTTP response, including
-4xx/5xx, is terminal. No roots yields an error without calling the local fetcher.
-Requests are not coalesced or cached. Ranking costs O(N log N) over eligible roots;
-streaming storage is independent of object size. The transport is concurrent-safe.
-
-`func (e *Engine) OriginSource(rt http.RoundTripper) http.RoundTripper` supplies a
-root's terminal HTTP transport and accounts streamed response bytes as origin
-ingress. It returns nil on non-root engines or for a nil transport. The argument
-must perform local origin access and must never delegate to other DART peers.
-Node assembly mounts it through `peer.OriginServer` on the peer listener.
-
-For Range-unsupported reads, the delegated opener follows HTTP redirects through
-`OriginTransport` again; it never opens a direct connection to the redirected
-endpoint. Registry control delegation and redirect handling are wired separately
-in [node.md](./node.md), using the same transport. The raw peer client never
-follows a redirect itself. Header wait and blocked body reads have time bounds;
-successful long transfers have no block-sized whole-request deadline. Closing a
-body cancels the upstream operation. A midstream failure aborts the downstream
-response, including unknown-length framing, and never publishes partial blocks.
-
-`TestNonRootOriginFailoverKeepsRefusalsTerminal` covers definitive origin errors,
-root transport failure, and the no-root path. `TestNonRootPassthroughAbortsIncompleteResponse`
-covers truncated unknown-length delivery. `TestNonRootPassthroughCountsPeerBytes`
-checks both supply and consumer byte accounting and non-root source rejection.

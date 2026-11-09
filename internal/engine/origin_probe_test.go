@@ -31,6 +31,10 @@ func contentKeyedEngine(t *testing.T) *Engine {
 }
 
 func TestSizeScopesRangeCapabilityToOrigin(t *testing.T) {
+	testSizeScopesRangeCapability(t, contentKeyedEngine)
+}
+
+func testSizeScopesRangeCapability(t *testing.T, newEngine func(*testing.T) *Engine) {
 	for _, chunked := range []bool{false, true} {
 		for _, blindFirst := range []bool{false, true} {
 			name := "known-total"
@@ -60,7 +64,7 @@ func TestSizeScopesRangeCapabilityToOrigin(t *testing.T) {
 				if blindFirst {
 					urls[0], urls[1] = urls[1], urls[0]
 				}
-				e := contentKeyedEngine(t)
+				e := newEngine(t)
 				for _, raw := range urls {
 					got, err := e.Size(context.Background(), raw+"?Signature=first")
 					want := int64(len(content))
@@ -101,6 +105,10 @@ func TestSizeScopesRangeCapabilityToOrigin(t *testing.T) {
 }
 
 func TestConcurrentSizeProbesDoNotShareCapabilities(t *testing.T) {
+	testConcurrentSizeProbes(t, contentKeyedEngine)
+}
+
+func testConcurrentSizeProbes(t *testing.T, newEngine func(*testing.T) *Engine) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	blind := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +122,7 @@ func TestConcurrentSizeProbesDoNotShareCapabilities(t *testing.T) {
 	defer close(release)
 	ranged := countingOrigin(t, []byte("abcd"), nil)
 	path := "/sha256:" + strings.Repeat("a", 64)
-	e := contentKeyedEngine(t)
+	e := newEngine(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
