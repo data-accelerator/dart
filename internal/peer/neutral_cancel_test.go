@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -405,7 +406,9 @@ func TestOriginHTTPClientBodyTimeoutIsFailure(t *testing.T) {
 	}
 	_, err = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	if !errors.Is(err, context.DeadlineExceeded) || req.Context().Err() != nil || c.Breaker.State(addr) != BreakerOpen {
+	// Go 1.22 exposes this as net.Error without matching DeadlineExceeded.
+	var timeout net.Error
+	if !errors.As(err, &timeout) || !timeout.Timeout() || req.Context().Err() != nil || c.Breaker.State(addr) != BreakerOpen {
 		t.Fatalf("client-owned timeout falsely recovered: err=%v caller=%v breaker=%v", err, req.Context().Err(), c.Breaker.State(addr))
 	}
 }
