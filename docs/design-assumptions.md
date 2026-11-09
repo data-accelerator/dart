@@ -60,8 +60,13 @@ peers can access all configured origins in the namespace. Non-root peers obtain
 metadata, blocks and uncached frontend responses through roots. Roles express
 operational capabilities within A2, not security identities.
 
-All nodes run the same `BlockSize`, `ChunkSize`, namespace, fanout, and
-feature set. ADR-0009's role-aware epoch and v2 peer protocol require a
+All nodes run the same `BlockSize`, `ChunkSize`, namespace, descendant fanout,
+root fanout, and feature set. ADR-0011 defines a root fanout of 1 by default,
+independently of descendant fanout (default 2). Both are deployment settings,
+not per-member discovery capabilities. A degree mismatch can change paths and
+actual root load but preserves strictly earlier ordinary dependencies under
+common HRW ordering; it does not require a new membership-ordering epoch.
+ADR-0009's role-aware epoch and v2 peer protocol require a
 coordinated deployment, including all-ordinary clusters: old binaries cannot
 interpret the new placement/tree contract. Drain requests and replace every
 participant with compatible binaries before admitting traffic. Mixed geometries

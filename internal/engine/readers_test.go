@@ -250,20 +250,26 @@ func TestReaderSnapshotChurnPreservesStrictOrder(t *testing.T) {
 					}
 					for _, fanout := range []int{1, 2, 4, 8} {
 						e.fanout = fanout
-						for i := 1; i < len(order); i++ {
-							parent := hashring.Parent(i, len(order), fanout)
-							if parent < 0 || positions[order[parent].ID] >= positions[order[i].ID] {
-								t.Fatal("non-descending parent edge")
+						for _, rootFanout := range []int{1, 2, 4, 8} {
+							e.rootFanout = rootFanout
+							for i := 1; i < len(order); i++ {
+								parent := hashring.ParentWithRootFanout(i, len(order), fanout, rootFanout)
+								if parent < 0 || positions[order[parent].ID] >= positions[order[i].ID] {
+									t.Fatal("non-descending parent edge")
+								}
 							}
-						}
-						primary, backup := e.hedgeTargets(order, view)
-						for _, addr := range []string{primary, backup} {
-							if addr == "" {
-								continue
+							primary, backup := e.hedgeTargets(order, view)
+							if primary == "" {
+								t.Fatal("eligible reader has no parent")
 							}
-							for _, m := range members {
-								if m.Addr == addr && positions[m.ID] >= positions[self.ID] {
-									t.Fatal("fallback points to later reader")
+							for _, addr := range []string{primary, backup} {
+								if addr == "" {
+									continue
+								}
+								for _, m := range members {
+									if m.Addr == addr && positions[m.ID] >= positions[self.ID] {
+										t.Fatal("fallback points to later reader")
+									}
 								}
 							}
 						}

@@ -1,7 +1,7 @@
 # `internal/hashring`
 
-Weighted Rendezvous Hashing (HRW) for placement, plus a full k-ary preorder
-tree derived from the HRW ordering for distribution. These are DART's two
+Weighted Rendezvous Hashing (HRW) for placement, plus a preorder
+tree with separate root/descendant degrees for distribution. These are DART's two
 **deterministic, coordination-free** primitives.
 
 - Source: `internal/hashring/hashring.go`, `internal/hashring/tree.go`
@@ -15,8 +15,8 @@ an **identical** result from the same `(key, member-set, weights)` inputs:
 
 - **Placement** — which node owns a chunk (plus replica candidates): weighted HRW.
 - **Distribution topology** — when many nodes read the same chunk, who relays to
-  whom: interpret the HRW total order as the preorder traversal of a full k-ary
-  tree.
+  whom: interpret the supplied total order as a preorder tree using common
+  root/descendant degrees (ADR-0011).
 
 This package provides only pure computation. Membership source, epoch handling,
 and reader-set maintenance belong to higher layers (`internal/cluster`, etc.).
@@ -28,7 +28,7 @@ and reader-set maintenance belong to higher layers (`internal/cluster`, etc.).
 | `key` | The 64-bit key fed into the hash (e.g. a chunkKey). |
 | `Node` | A cluster member with a stable `ID` and a capacity `Weight`. |
 | Placement order `L` | The return of `Rank(key, nodes)`: a total order by descending HRW score. `L[0]` = owner, `L[0..R-1]` = replica candidates. |
-| Preorder tree | An ordered node sequence (the placement order, or the active-reader-set order) interpreted as the preorder traversal of a full k-ary tree; `Parent`/`Children` operate on **index positions**. |
+| Preorder tree | An ordered node sequence (the placement order, or the active-reader-set order) interpreted as a preorder tree; navigation operates on **index positions**, with either a uniform degree or an independent root degree. |
 
 > Placement HRW runs over **root-eligible Ready nodes** (ADR-0009). The engine
 > anchors the tree at the preferred owner and appends HRW-ranked eligible active
@@ -102,25 +102,38 @@ length and `k` is the fanout (max children per node, ≥1). The sequence itself
 func Parent(i, n, k int) int     // parent index of i; root (i==0) returns -1
 func Children(i, n, k int) []int // direct children indices of i (ascending); leaf returns nil
 func Depth(i, n, k int) int      // number of edges from root to i (root = 0)
+
+func ParentWithRootFanout(i, n, k, rootK int) int
+func ChildrenWithRootFanout(i, n, k, rootK int) []int
+func DepthWithRootFanout(i, n, k, rootK int) int
 ```
 
+The uniform `Parent`/`Children`/`Depth` APIs retain their existing results.
+Their `WithRootFanout` variants use `rootK` at position 0 and `k` everywhere
+else. Both degrees must be positive (invalid input returns -1/nil); these pure
+helpers apply no configuration defaults. Equal degrees exactly reproduce the
+uniform tree. The engine supplies default rootK=1, k=2 (ADR-0011).
+
 - Tree layout: position 0 is the root; the remainder `(0, n-1]` is split into up
-  to k **contiguous, as-balanced-as-possible** segments (the first
-  `remaining mod k` segments get one extra), applied recursively.
-- `Parent` and `Children` share the internal `childSegments`, so they are
+  to rootK **contiguous, as-balanced-as-possible** segments; within each segment,
+  recursion uses k. At each split the first `remaining mod degree` segments
+  get one extra. Uniform APIs use rootK=k.
+- Parent and child navigation share the same partition rule, so they are
   **exact mutual inverses**.
-- **Complexity**: all O(depth) = O(log_k n). `Parent`/`Depth` are
-  zero-allocation (each level locates the containing child segment
-  arithmetically); `Children` allocates only its result slice.
+- **Complexity**: parent/depth navigation is O(depth) and zero-allocation:
+  each level locates its child segment arithmetically. Child enumeration is
+  O(depth + child count), with allocation bounded by the actual child count,
+  even with a very large degree. Depth is logarithmic for k>1 and can be linear
+  for k=1. These bounds also apply to the WithRootFanout variants.
 - **Boundary**: out-of-range index or `k < 1`: `Parent`/`Depth` return -1,
   `Children` returns nil.
-- **Degenerate cases**: `k=1` → linked list (`Parent(i)=i-1`); `k ≥ n-1` → star
-  at the first level below the root.
+- **Degenerate cases**: rootK=k=1 gives a linked list (`Parent(i)=i-1`);
+  rootK≥n-1 gives a star. With rootK>1 and k=1, each root child heads a chain.
 
 ```go
-L := hashring.Rank(chunkKey, readerSet) // rank the active reader set
-// after finding this node's index i in L:
-parentIdx := hashring.Parent(i, len(L), fanout)
+// L is the owner followed by eligible readers in HRW order.
+// After finding this node's index i in L (i > 0):
+parentIdx := hashring.ParentWithRootFanout(i, len(L), fanout, rootFanout)
 parent := L[parentIdx] // pull / relay from it
 ```
 
@@ -149,7 +162,8 @@ Callers may rely on the following (each is guarded by a test, see §7):
    - `Children` over all nodes is exactly a **partition** of `[1, n)` (each
      non-root position has exactly one parent);
    - acyclic — following `Parent` from any node always reaches the root;
-   - each node has at most k children.
+   - the root has at most rootK children and descendants at most k
+     (the uniform API has rootK=k).
 
 ## 5. Concurrency & Call Permissions
 
@@ -165,13 +179,22 @@ Callers may rely on the following (each is guarded by a test, see §7):
 - **Caller contract**:
   - the placement layer calls `Rank`/`Top` with **root-eligible Ready nodes**;
   - the engine appends ranked eligible active readers after the preferred owner,
-    deduplicates that owner and calls `Parent`/`Children` on this sequence's
-    **indices**. Tracking disabled uses all eligible Ready readers; a missing
+    deduplicates that owner and calls the WithRootFanout navigation APIs on
+    this sequence's **indices**. Tracking disabled uses all eligible Ready readers; a missing
     tracked snapshot routes directly to the owner;
   - `Parent`/`Children`'s `n` must equal the length of the sequence in use, and
     `i` must be a valid index within it, otherwise you get -1/nil.
 
 ## 6. Determinism / Stability Contract
+
+- ADR-0011 defines independent root degree over the existing ordered sequence.
+  Uniform APIs and equal-degree results remain unchanged. Hash64, HRW ranking,
+  placement, chunk keys, epoch framing and peer wire fields are unchanged.
+  Different positive degrees can change paths but cannot reverse any ordinary
+  dependency under a common order; no hop-based flight isolation is needed.
+- Asymmetric golden trees come from `contrib/golden/root_fanout_reference.py`,
+  an independent materialized-tree implementation. CI cross-checks the committed
+  fixture when `DART_GOLDEN_REF=1`.
 
 <!-- CANONICAL id="hash64-wire" -->
 - The construction of `Hash64` (FNV-1a byte order + fmix64 constants) and the
@@ -239,6 +262,9 @@ go test ./internal/hashring/ -cover -count=1
 | `TestWeightedDistribution` | ownership share ∝ weight (1:1:2:4, rel dev ≤8%) |
 | `TestMinimalDisruption` | adding 1 node migrates only ~1/(m+1) of keys, and only onto the new node |
 | `TestTopAndEdgeCases` | `Top` boundaries (n≤0/oversize), `Rank(nil)`, zero-weight==1 |
+| `TestRootFanoutGolden` | independent Python parent/children/depth goldens for asymmetric, uniform, singleton, chain, uneven and wide-root trees |
+| `TestRootFanoutProperties` | parent/children inverses, strict earlier edges, degree/depth bounds and equal-degree compatibility across 128 sizes |
+| `TestRootFanoutBoundsAndAllocations` | invalid inputs, huge degrees bounded by node count, allocation-free parent/depth navigation |
 | `TestTreeGolden` | hand-verified tree shape for n=7,k=2 (Parent/Children/Depth) |
 | `TestChainWhenK1` | k=1 degenerates to a linked list |
 | `TestParentChildrenInverse` | Parent/Children are inverses over a broad (n,k) matrix |

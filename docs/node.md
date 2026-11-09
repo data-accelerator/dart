@@ -26,6 +26,12 @@ work:
   prefix, a module at `github.com/data-accelerator/dart/providers/k8s` may
   import `internal/node` — no public API surface had to be exported.
 
+`-root-fanout` defaults to 1 and `-fanout` to 2. Shared flag parsing and
+assembly forward both to engine options for both command variants (ADR-0011).
+Root fanout must be positive on the CLI; the engine API zero value selects 1.
+All workloads in a cluster use the same pair; role discovery does not carry
+node-specific branching factors.
+
 Flags, origin-resolution modes, the registry mirror dispatch and P2P wiring
 behave exactly as documented in [dart.md](./dart.md); this document covers only
 what is new: the assembly API and the scheme mechanism.
@@ -232,6 +238,7 @@ the extraction:
 | `TestSelfIDRejectsControlBytes` / `TestParsePeersRejectsControlByteIDs` | control-byte member IDs rejected at `-self-id` and `-peers` (epoch-framing safety) |
 | `TestWildcardAdvertiseRejected` | explicit wildcard `-peer-advertise` values are rejected (incl. IPv6 long/zoned forms); loopback stays valid |
 | `TestSingleClassCacheConfiguration` | explicit zero/one shares allow one-block memory/disk/Hybrid caches without disabled-class spillover |
+| `TestRootFanoutFlagsAndRouting` | root default/override/rejection and actual node HTTP routing, including terminal fallback after a reader miss |
 | `TestOwnedFractionFlagValidation` | an explicit out-of-range or non-finite `-owned-fraction` fails startup |
 | `TestParseByteSizeExact` | plain byte counts are exact above 2^53; overflow errors |
 | `TestDiscoveryErrorsRoutedAndThrottled` | discovery errors go to `out`, one line/minute with a suppression count |

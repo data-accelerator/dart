@@ -51,7 +51,8 @@ dart [flags]
 | `-peer-advertise` | `""` | `host:port` peers should dial; wildcard values are rejected. Defaults to `-peer-listen`, resolving a wildcard host in order: `DART_ADVERTISE_HOST` → `POD_IP` → hostname |
 | `-discover-interval` | `5s` | how often to re-resolve seeds and re-exchange rosters |
 | `-forget-after` | `60s` | how long a member must be unseen **and** unreachable before removal |
-| `-fanout` | `2` | distribution-tree branching factor (children per node) |
+| `-fanout` | `2` | distribution-tree branching factor below the preferred root |
+| `-root-fanout` | `1` | preferred root normal branching factor (≥1); not a limit on hedge/fallback transfers |
 | `-admin` | `:9100` | admin/metrics listen address; empty disables |
 | `-reader-tree` | `true` | build the distribution tree over the active reader set (per-file tracker) |
 | `-tracker-tick` | `3s` | how often a tracker republishes a reader set |
@@ -216,6 +217,15 @@ under a live handler (docs/node.md §3.1, ADR-0003). The binary's version is
 stamped at build time (`-ldflags "-X main.version=..."`) and reported by
 `-version` and on startup.
 
+`-root-fanout=1 -fanout=4` gives the preferred chunk owner one normal child,
+which distributes through a four-way reader tree. These are common settings on
+**every** cluster node, not settings applied only to root-only workloads. A
+root-eligible ordinary peer below the owner uses `-fanout`. Both `dart` and
+`dart-k8s` accept the flags; Helm deployments can pass them through `extraArgs`
+with the same values across role workloads. Set `-root-fanout` equal to `-fanout`
+to retain a uniform tree. See ADR-0011 and docs/engine.md §3.1.1 for the distinction
+between normal topology and actual transfers under churn, hedging and fallback.
+
 ### 3.8 Stability contract
 
 - The flag set, defaults, and their validation rules are the operator-facing
@@ -266,6 +276,7 @@ go test ./cmd/dart/ ./internal/node/ -race -count=1
 | `TestNewHandlerValidation` | invalid chunk config / cache < block rejected |
 | `TestEndToEndPrefix` | client → dart → origin range fetch, 206, exact bytes, non-chunked |
 | `TestParseFlagsDefaults` | flag defaults and parsing |
+| `TestRootFanoutFlagsAndRouting` | root=1 default, explicit root degree, invalid CLI values, real peer selection through node assembly and parent-miss fallback to terminal root |
 | `TestNewHandlerBuildsForTmpDir` | handler builds and creates the cache dir |
 | `TestRunErrors` | flag/config errors propagate from run |
 | `TestParsePeers` | member-list parsing (`id@host:port`) and rejects |

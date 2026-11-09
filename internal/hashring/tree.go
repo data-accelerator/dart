@@ -8,6 +8,9 @@ package hashring
 //     into up to k contiguous, as-balanced-as-possible segments, applied
 //     recursively.
 //
+// The WithRootFanout variants use a separate degree only at position 0;
+// descendant segments retain the same k-ary recursion.
+//
 // Two properties follow and are relied upon by the distribution layer:
 //
 //  1. Any prefix [0..m] is a connected subtree containing the root — so the
@@ -32,7 +35,7 @@ func childSegments(lo, hi, k int) [][2]int {
 	remaining := hi - childLo + 1
 	base := remaining / k
 	extra := remaining % k
-	segs := make([][2]int, 0, k)
+	segs := make([][2]int, 0, min(k, remaining))
 	s := childLo
 	for c := 0; c < k && s <= hi; c++ {
 		size := base
@@ -78,12 +81,13 @@ func childSegment(lo, hi, k, i int) (int, int, bool) {
 
 // descend walks from the whole range [0, n-1] down to the subtree whose root
 // is position i. It calls visit(root) at every ancestor root encountered,
-// including i's own position last, and returns i's subtree range [lo, hi]. For
-// an out-of-range i (or k < 1) it returns (-1, -1) and does not call visit.
+// including i's own position last, and returns i's subtree range [lo, hi].
+// Position 0 uses rootK children; every other position uses k. Invalid indices
+// or either branching factor below 1 return (-1, -1) without calling visit.
 // Zero-allocation: each level locates the containing child segment
 // arithmetically (childSegment).
-func descend(i, n, k int, visit func(root int)) (int, int) {
-	if i < 0 || i >= n || k < 1 {
+func descend(i, n, k, rootK int, visit func(root int)) (int, int) {
+	if i < 0 || i >= n || k < 1 || rootK < 1 {
 		return -1, -1
 	}
 	lo, hi := 0, n-1
@@ -94,7 +98,11 @@ func descend(i, n, k int, visit func(root int)) (int, int) {
 		if i == lo {
 			return lo, hi
 		}
-		nlo, nhi, ok := childSegment(lo, hi, k, i)
+		degree := k
+		if lo == 0 {
+			degree = rootK
+		}
+		nlo, nhi, ok := childSegment(lo, hi, degree, i)
 		if !ok {
 			// Unreachable for a valid i in [0,n): every descendant lands in
 			// exactly one child segment.
@@ -106,13 +114,20 @@ func descend(i, n, k int, visit func(root int)) (int, int) {
 
 // Parent returns the preorder-tree parent of position i over n positions with
 // fanout k. The root (i == 0) returns -1; out-of-range i (or k < 1) returns -1.
-// Runs in O(depth * k) with no allocation beyond childSegments.
+// Runs in O(depth) without allocation.
 func Parent(i, n, k int) int {
-	if i <= 0 || i >= n || k < 1 {
+	return ParentWithRootFanout(i, n, k, k)
+}
+
+// ParentWithRootFanout is Parent with rootK children at position 0 and k at
+// every descendant. Both factors must be positive; invalid inputs return -1.
+// Like Parent, it runs in O(depth) without allocation.
+func ParentWithRootFanout(i, n, k, rootK int) int {
+	if i <= 0 || i >= n || k < 1 || rootK < 1 {
 		return -1
 	}
 	prev := -1
-	descend(i, n, k, func(root int) {
+	descend(i, n, k, rootK, func(root int) {
 		if root != i {
 			prev = root
 		}
@@ -124,11 +139,21 @@ func Parent(i, n, k int) int {
 // in ascending (preorder) order. A leaf returns nil. Out-of-range i (or k < 1)
 // returns nil.
 func Children(i, n, k int) []int {
-	lo, hi := descend(i, n, k, nil)
+	return ChildrenWithRootFanout(i, n, k, k)
+}
+
+// ChildrenWithRootFanout is Children with rootK children at position 0 and k
+// at every descendant. Invalid inputs return nil; leaves also return nil.
+func ChildrenWithRootFanout(i, n, k, rootK int) []int {
+	lo, hi := descend(i, n, k, rootK, nil)
 	if lo < 0 {
 		return nil
 	}
-	segs := childSegments(lo, hi, k)
+	degree := k
+	if i == 0 {
+		degree = rootK
+	}
+	segs := childSegments(lo, hi, degree)
 	if len(segs) == 0 {
 		return nil
 	}
@@ -142,10 +167,16 @@ func Children(i, n, k int) []int {
 // Depth returns the number of edges from the root to position i (root = 0).
 // Out-of-range i (or k < 1) returns -1.
 func Depth(i, n, k int) int {
-	if i < 0 || i >= n || k < 1 {
+	return DepthWithRootFanout(i, n, k, k)
+}
+
+// DepthWithRootFanout is Depth with rootK children at position 0 and k at
+// every descendant. Both factors must be positive; invalid inputs return -1.
+func DepthWithRootFanout(i, n, k, rootK int) int {
+	if i < 0 || i >= n || k < 1 || rootK < 1 {
 		return -1
 	}
 	d := -1
-	descend(i, n, k, func(int) { d++ })
+	descend(i, n, k, rootK, func(int) { d++ })
 	return d
 }

@@ -86,7 +86,8 @@ resources:
   requests: {cpu: 200m, memory: 1Gi}
   limits: {memory: 2Gi}
 
-# Extra CLI flags appended verbatim (e.g. ["-fanout=4", "-hedge=false"]).
+# Extra CLI flags appended verbatim (e.g. ["-root-fanout=1", "-fanout=4"]).
+# Use the same root-fanout/fanout pair in every role workload.
 # See docs/dart.md for the full flag list; the chart only templates the
 # operational subset above.
 extraArgs: []

@@ -20,7 +20,7 @@ order.
 
 Peer pulls are wired in (optional): when a `Cluster`, `Peer` client, and
 `SelfID` are all configured, a cache miss is routed to this node's **parent in
-the preorder distribution tree** (branching factor `Fanout`); the parent
+the preorder distribution tree** (`RootFanout` at the owner, `Fanout` below it); the parent
 **relays** (fetching from its own parent/origin as needed, via `PeerSource`),
 so it usually holds the block. The tree root (owner) fetches origin. This offloads
 the owner under a thundering herd.
@@ -65,7 +65,8 @@ type Options struct {
     Peer     *peer.Client     // peer block client
     SelfID   string           // this node's cluster ID
     Role     cluster.Role     // Ordinary (zero), RootOnly, NonRoot
-    Fanout   int              // distribution-tree branching factor (default 2)
+    Fanout   int              // branching factor below the preferred root (default 2)
+    RootFanout int            // preferred root branching factor (zero defaults to 1)
     Replicas int              // HRW candidates that authoritatively hold a chunk (default 1)
     Hedge      bool           // hedge a slow peer fetch (default off)
     HedgeRatio float64        // max share of fetches allowed to hedge (default 0.05)
@@ -97,6 +98,20 @@ unchanged. An unavailable snapshot yields owner plus eligible self; tracking
 disabled uses all Ready reader-eligible members. Every ordinary parent/ancestor
 precedes self in the common HRW reader order. Reader-set changes preserve that
 relative order and cannot create a forwarding cycle (ADR-0010).
+
+`Options.RootFanout` (zero defaults to 1; negative values are rejected) sets
+only the preferred owner's normal child count. `Options.Fanout` (default 2)
+sets the degree at every descendant, regardless of that member's root eligibility.
+The first partition uses RootFanout and all remaining partitions use Fanout
+(ADR-0011). Both values are common cluster configuration; setting them equal
+produces a uniform tree. For root=1, fanout=2 and order R,A,B,C,D,E,F,G, edges
+are R→A; A→B,E; B→C,D; E→F,G.
+
+This is a topology bound, not a transfer quota: ancestor failover, hedging,
+terminal supply, reader snapshot disagreement and reader churn can all increase
+actual root sends. In particular, readers with disjoint snapshots can each be
+the root's direct child. No admission semaphore or send-count enforcement is
+added. Parent and hedge-ancestor navigation use the same two-degree tree.
 
 A root supply request terminates at cache/origin. A non-root never falls through
 to local origin; failed ancestors can be bypassed toward root candidates, with
@@ -564,6 +579,10 @@ block sources. A supply root records its proxied response bytes as `origin_in`.
 
 ## 6. Determinism / Stability Contract
 
+- ADR-0011 defaults the preferred root to one child and descendants to two.
+  Explicit equal degrees preserve the uniform tree. Changing degrees preserves
+  the strict HRW dependency order; no flight key or membership epoch change is
+  introduced. Consistent configuration is required for a consistent tree.
 - ADR-0010 specifies complete validated blocks before peer success responses and
   bounded in-range prefetch. The removed streaming internal APIs are not retained.
   ADR-0009 introduces v2 paths and roles; ADR-0010 carries the ordering epoch
@@ -593,7 +612,9 @@ Managed-memory regression coverage:
 | `TestRootFallbackAfterHedgeAdmissionDeclines` | arm the hedge only after the parent holds the sole receive buffer; after rejected hedge admission and parent 404/source failure, fallback contacts the healthy root exactly once |
 | `TestRootHedgeCanWinBeforeParentAdmission` | hold the parent before receive admission; the root hedge wins the sole buffer, returns correct bytes, and cancels the parent without any rejected admission or leaked capacity |
 | `TestCrossHopReadersShareOnePeerTransfer` | R-hot/A-B-cold real HTTP overlap: one 4 MiB R-to-A payload across hops, with cache refusal, canceled waiter and last-lease release |
-| `TestReaderSnapshotChurnPreservesStrictOrder` | missing self, duplicate IDs, changing reader/member subsets and fanout preserve strict normal parent/backup order |
+| `TestReaderSnapshotChurnPreservesStrictOrder` | missing self, duplicate IDs, changing reader/member subsets and both fanout values preserve strict normal parent/backup order |
+| `TestRootFanoutOptions` | root=1 and descendant=2 defaults, explicit degrees and negative root rejection |
+| `TestRootFanoutHTTPDistribution` | concurrent cold readers below a hot root; actual HTTP payload counts match asymmetric degrees with root defaults and explicit 1/2/3, correct bytes and no origin reads |
 | `TestNormalFlightCanReceiveFallbackSupply` | A waits on B while B falls back to supply from A; cache decline does not create a wait cycle |
 | `TestRoutingEpochSkewKeepsCacheAndSupplyUsable` | mismatched cold relay declines before metadata/flight, while terminal supply and warm bytes remain available |
 | `TestRoleWeightSkewDeclinesBeforeFlight` | opposing membership weights decline cold relay before admission, recover through terminal supply and release buffers |
