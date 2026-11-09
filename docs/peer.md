@@ -535,8 +535,10 @@ conflicting self-identification and duplicate responder entries.
 
 ADR-0009's block endpoint uses v2. `BlockRequest.Supply` is encoded as
 `HeaderSupply` (`X-DART-Supply: 1`); other nonempty values are rejected before
-source invocation. The engine enforces terminal cache/origin service and root
-eligibility. This flag is part of routing, not an authorization boundary.
+source invocation. The engine serves validated warm bytes independently of
+current role or ownership. On a miss, supply requires root eligibility and
+terminates at origin without reader forwarding. This flag is part of routing,
+not an authorization boundary.
 
 `MetadataPath` (`/peer/v2/metadata`) accepts GET with `HeaderOrigin`.
 `MetadataServer.Probe` returns `Metadata` (Size and RangeUnsupported); the callback
