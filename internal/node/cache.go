@@ -19,10 +19,10 @@ func openCache(cfg config) (store.ClassStore, closers, error) {
 	if cfg.cacheSize < cfg.blockSize {
 		return nil, nil, fmt.Errorf("cache-size %d must be >= block-size %d", cfg.cacheSize, cfg.blockSize)
 	}
-	if cfg.cacheSize/cfg.blockSize < 2 {
+	if cfg.cacheSize/cfg.blockSize < 2 && !(cfg.ownedFraction == 1 || (cfg.ownedFractionSet && cfg.ownedFraction == 0)) {
 		return nil, nil, fmt.Errorf("cache-size %d must contain at least two blocks of %d bytes", cfg.cacheSize, cfg.blockSize)
 	}
-	opt := store.TieredOptions{SlotSize: cfg.blockSize, Slots: int(cfg.cacheSize / cfg.blockSize), OwnedFraction: cfg.ownedFraction, Memory: mode == "memory"}
+	opt := store.TieredOptions{SlotSize: cfg.blockSize, Slots: int(cfg.cacheSize / cfg.blockSize), OwnedFraction: cfg.ownedFraction, OwnedFractionSet: cfg.ownedFractionSet, Memory: mode == "memory"}
 	if mode == "memory" {
 		st, err := store.OpenTiered(opt)
 		if err != nil {

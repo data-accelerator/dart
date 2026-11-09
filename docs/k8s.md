@@ -40,6 +40,58 @@ API) and
 `-peer-advertise` (peers dial this; `DART_ADVERTISE_HOST`/`POD_IP` resolve a
 wildcard listen host, in that order).
 
+### Heterogeneous node groups
+
+Under [ADR-0009](./adr/0009-root-eligible-peer-roles.md), DNS and EndpointSlice
+discovery remain **address-only**: neither Kubernetes labels, endpoint readiness,
+cache size nor successful origin access determines a role. The peer's configured
+`-role` travels in bidirectional v2 roster exchange and participates in the epoch.
+Direct self-reports replace roles; stale third-party reports cannot undo them.
+Discovery remains active on root-only peers despite their disabled client listener.
+
+Supply and compute workloads must share a discovery domain. Use a headless
+Service selecting **all** participating workloads on their peer port, not a
+role-specific selector or the client port. Keep `publishNotReadyAddresses: true`
+and admin health probes independent of root discovery to avoid bootstrap cycles.
+An empty seed result retains known membership; a newly started non-root peer
+without any roots stays non-root and fails required cold reads until discovery
+converges. A missing role is not an implicit origin capability.
+
+The Helm chart supports separate groups with `role`, distinct `fullnameOverride`
+values and a common `discovery.serviceName`. Exactly one release sets
+`discovery.createService=true`; the others set it to `false`. Pods carry a shared
+`dart.data-accelerator.io/cluster` label and the shared Service selects that label.
+DaemonSet selectors retain their distinct `app` labels. Both DNS and k8s modes
+use the common Service name. Root-only groups omit the client container/host port.
+
+For example, supply values can contain:
+
+```yaml
+fullnameOverride: dart-supply
+role: root-only
+extraArgs: ["-owned-fraction=1"]
+discovery:
+  mode: k8s
+  serviceName: dart-peers
+  createService: true
+nodeSelector:
+  dart-pool: supply
+```
+
+Compute values use `fullnameOverride: dart-compute`, `role: non-root`, the same
+Service name and mode, `createService: false`, `extraArgs: ["-owned-fraction=0"]`,
+and `nodeSelector: {dart-pool: compute}`. Roles and budgets are independent;
+these shares devote capacity to the class each group normally stores. Add
+`-cache-mode=memory` through extraArgs for RAM-only operation, sizing cache.size,
+gomemlimit and container resources together. `-receive-bytes` and `-receive-loads`
+can also be set there to bound temporary uncached delivery.
+Install both in the same namespace using binaries that implement ADR-0009;
+v0.3.0 binaries do not support these roles. Keep geometry/placement settings and
+peer ports compatible across groups. The chart derives stable identity from the
+Kubernetes node name, so these node pools must be disjoint: two DART instances on
+one node need distinct stable identities and a separately configured deployment.
+Do not attach legacy v1 nodes to the role-aware cluster during upgrade.
+
 ## 2. Concepts
 
 | Term | Meaning |
@@ -112,6 +164,7 @@ go test ./... -race -cover -count=1
 | `TestSeedsBeforeSyncIsEmpty` | no stale/empty claim before the first informer sync |
 | `TestReadyEndpointsOnly` | `ready:false` excluded, `nil` ready included, addressless excluded, output sorted |
 | `TestEndpointChurn` | endpoint add (scale-out) and slice delete (scale-in) reflected live |
+| `TestMixedRoleWorkloadSeeds` | all workloads selected by a shared Service supply seeds; unrelated Services remain separate |
 | `TestPortSelection` | default/explicit named and numeric port selection; missing port skips the slice |
 | `TestSchemeShape` | the scheme registers as `k8s` with a constructor and usage text |
 | `TestSchemes` (`cmd/dart-k8s`) | the variant wires exactly dns + static + k8s |

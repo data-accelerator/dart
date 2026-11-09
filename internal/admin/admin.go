@@ -33,6 +33,8 @@ type Options struct {
 	Cluster cluster.Provider
 	// SelfID is reported in /admin/members to identify this node.
 	SelfID string
+	// Role is the configured local capability, including before discovery converges.
+	Role cluster.Role
 }
 
 // Handler returns an http.ServeMux with the admin endpoints registered. A
@@ -65,6 +67,7 @@ func Handler(opt Options) *http.ServeMux {
 		writeJSON(w, map[string]any{
 			"self_id":       opt.SelfID,
 			"cached_blocks": opt.Store.Len(),
+			"role":          opt.Role.String(),
 		})
 	})
 
@@ -78,13 +81,15 @@ func Handler(opt Options) *http.ServeMux {
 		out := make([]map[string]any, 0, len(ms))
 		for _, m := range ms {
 			out = append(out, map[string]any{
-				"id": m.ID, "addr": m.Addr, "weight": m.Weight, "state": m.State.String(),
+				"id": m.ID, "addr": m.Addr, "weight": m.Weight, "state": m.State.String(), "role": m.Role.String(),
 			})
 		}
 		writeJSON(w, map[string]any{
-			"self_id": opt.SelfID,
-			"epoch":   strconv.FormatUint(view.Epoch(), 10),
-			"members": out,
+			"self_id":          opt.SelfID,
+			"epoch":            strconv.FormatUint(view.Epoch(), 10),
+			"members":          out,
+			"eligible_roots":   len(view.Roots()),
+			"eligible_readers": len(view.Readers()),
 		})
 	})
 
@@ -105,7 +110,7 @@ func Handler(opt Options) *http.ServeMux {
 				n = v
 			}
 		}
-		ranked := hashring.Rank(key, view.Ready())
+		ranked := hashring.Rank(key, view.Roots())
 		if n < len(ranked) {
 			ranked = ranked[:n]
 		}
@@ -113,7 +118,7 @@ func Handler(opt Options) *http.ServeMux {
 		for i, nd := range ranked {
 			m, _ := view.Get(nd.ID)
 			out = append(out, map[string]any{
-				"rank": i, "id": nd.ID, "addr": m.Addr, "weight": nd.Weight,
+				"rank": i, "id": nd.ID, "addr": m.Addr, "weight": nd.Weight, "role": m.Role.String(),
 			})
 		}
 		writeJSON(w, map[string]any{

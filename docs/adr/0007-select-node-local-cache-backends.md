@@ -1,7 +1,7 @@
 # ADR-0007: Select node-local cache backends without weakening class isolation
 
-- Status: accepted
-- Date: 2026-11-05
+- Status: superseded by ADR-0009
+- Date: 2026-11-09
 - Supersedes: none
 - Binds: docs/design-assumptions.md A3; docs/dart.md cache modes; docs/node.md cache assembly / Stability Contract; docs/store.md Tiered / Stability Contract; docs/observability.md occupancy
 

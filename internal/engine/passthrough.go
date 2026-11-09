@@ -9,7 +9,7 @@ import (
 
 // ServePassthrough proxies a client request for url to origin verbatim:
 // status, entity headers and body are forwarded as they arrive, and nothing
-// is cached or routed through P2P. It is the fallback for an origin that does
+// is cached. A non-root node delegates the operation to a supply root. It is the fallback for an origin that does
 // not honor Range (see RangeUnsupported): such an origin would answer every
 // per-block fetch with the whole object, so the block layer is bypassed
 // entirely.
@@ -20,8 +20,8 @@ import (
 // upstream, since a presigned URL is signed for GET alone (see fetch.Fetcher).
 //
 // An error is returned only before the response is committed; once headers
-// are sent, a mid-stream failure can only truncate the body (the caller
-// detects it via Content-Length), so it is not reported.
+// are sent, a mid-stream failure aborts the HTTP response so a missing final
+// chunk is detectable even when Content-Length is unknown.
 func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r *http.Request, url string) error {
 	if e.opener == nil {
 		return errors.New("engine: passthrough unavailable: fetcher cannot stream")
@@ -49,9 +49,13 @@ func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r 
 	w.WriteHeader(resp.StatusCode)
 
 	var n int64
+	var copyErr error
 	if r.Method != http.MethodHead {
-		n, _ = io.Copy(w, resp.Body) // a failure here can only truncate
+		n, copyErr = io.Copy(w, resp.Body)
 	}
-	e.mx.recordPassthrough(n)
+	e.mx.recordPassthrough(n, !e.role.CanRoot())
+	if copyErr != nil {
+		panic(http.ErrAbortHandler)
+	}
 	return nil
 }

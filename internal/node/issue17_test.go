@@ -34,9 +34,9 @@ func TestWildcardAdvertiseRejected(t *testing.T) {
 // TestOwnedFractionFlagValidation pins N4: an explicit out-of-range
 // -owned-fraction used to be silently replaced with 0.8 by the store —
 // "disable the owned budget" (0) silently became "reserve 80% for it".
-// Flag parsing must fail startup; the store rejects < 0 / >= 1 too.
+// Out-of-range shares fail startup; explicit 0/1 now select a single class.
 func TestOwnedFractionFlagValidation(t *testing.T) {
-	for _, v := range []string{"0", "1", "1.5", "-0.5", "NaN", "+Inf"} {
+	for _, v := range []string{"1.5", "-0.5", "NaN", "+Inf"} {
 		if _, err := parseFlags([]string{"-owned-fraction", v}, io.Discard, nil); err == nil {
 			t.Errorf("-owned-fraction %s accepted, want a startup error", v)
 		}

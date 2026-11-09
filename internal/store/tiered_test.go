@@ -136,8 +136,8 @@ func TestTieredSplitsCapacity(t *testing.T) {
 	}
 	// An out-of-range fraction is rejected, never silently substituted (issue
 	// #17 N4): 1.5/-0.5 must error; 0 is the zero value (unset) → 0.8 default;
-	// node flag parsing rejects an explicitly-set 0 (see issue17_test.go).
-	for _, f := range []float64{1, 1.5, -0.5} {
+	// OwnedFractionSet distinguishes an explicit zero (ADR-0009).
+	for _, f := range []float64{1.5, -0.5} {
 		if _, err := OpenTiered(TieredOptions{
 			Path: filepath.Join(t.TempDir(), "b"), SlotSize: 64 << 10, Slots: 10,
 			OwnedFraction: f,

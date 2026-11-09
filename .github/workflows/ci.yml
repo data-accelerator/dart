@@ -68,6 +68,9 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
+      - name: independent golden references
+        run: DART_GOLDEN_REF=1 go test ./internal/chunk ./internal/hashring ./internal/cluster ./internal/engine -count=1
+
       - name: test -race
         run: go test ./... -race -count=1
 

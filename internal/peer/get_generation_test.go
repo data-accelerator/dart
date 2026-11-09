@@ -40,6 +40,7 @@ func TestClientLateSuccessCannotClearProtocolQuarantine(t *testing.T) {
 						return
 					}
 					if r.URL.Path == RosterPath {
+						w.Header().Set(HeaderPeerRole, "0")
 						_, _ = io.WriteString(w, `{"epoch":"1","members":[]}`)
 					} else {
 						_, _ = io.WriteString(w, "abc")

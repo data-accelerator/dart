@@ -5,7 +5,7 @@
 // The wire form is a plaintext HTTP/1.1 GET (peer-plane encryption is left to
 // the CNI layer, per the design):
 //
-//	GET /peer/v1/block/<chunkKey-hex>/<blockIndex>
+//	GET /peer/v2/block/<chunkKey-hex>/<blockIndex>
 //	X-DART-Origin: <upstream url>   (optional; enables relay fetch-on-behalf)
 //	X-DART-Hop:    <n>              (relay depth, for loop safety)
 //
@@ -31,7 +31,7 @@ import (
 )
 
 // blockPath is the URL prefix for block requests.
-const blockPath = "/peer/v1/block/"
+const blockPath = "/peer/v2/block/"
 
 // Header names on the peer plane.
 const (
@@ -39,6 +39,10 @@ const (
 	HeaderEpoch  = "X-DART-Epoch"
 	HeaderOrigin = "X-DART-Origin"
 	HeaderHop    = "X-DART-Hop"
+	// HeaderSupply requests terminal root service: cache or origin, never relay.
+	HeaderSupply = "X-DART-Supply"
+	// HeaderSourceFailure reports an upstream/path failure from a healthy relay.
+	HeaderSourceFailure = "X-DART-Source-Failure"
 	// HeaderUpstreamStatus lets a relay report that the *origin* refused the
 	// fetch-on-behalf, as opposed to the relay itself failing.
 	//
@@ -55,6 +59,15 @@ const (
 // URL). The peer itself is healthy.
 var ErrUpstreamRefused = errors.New("peer: upstream refused the supplied credential")
 
+// ErrSourceUnavailable means a healthy peer could not obtain upstream data.
+var ErrSourceUnavailable = errors.New("peer: upstream source unavailable")
+
+// SourceFailureError identifies a source/path failure rather than bad peer bytes.
+type SourceFailureError interface {
+	error
+	SourceFailure()
+}
+
 // BlockRequest is a decoded peer block request.
 type BlockRequest struct {
 	// Key identifies the block.
@@ -66,6 +79,12 @@ type BlockRequest struct {
 	// recursion and detect loops. Always non-negative on the wire: the servers
 	// reject a malformed or negative header with 400 before calling the Source.
 	Hop int
+	// Supply selects terminal root service.
+	Supply bool
+	// Epoch pins the sender's membership ordering basis. HasEpoch distinguishes
+	// a valid zero epoch from direct callers that adopt the receiver's view.
+	Epoch    uint64
+	HasEpoch bool
 }
 
 // Source returns the bytes of a block for a peer request. held is false if this
@@ -110,7 +129,7 @@ type Server struct {
 
 var _ http.Handler = (*Server)(nil)
 
-// ServeHTTP implements http.Handler for GET /peer/v1/block/<hex>/<index>.
+// ServeHTTP implements http.Handler for GET /peer/v2/block/<hex>/<index>.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -127,7 +146,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad "+HeaderHop+" header", http.StatusBadRequest)
 		return
 	}
-	req := BlockRequest{Key: key, URL: r.Header.Get(HeaderOrigin), Hop: hop}
+	supply := r.Header.Get(HeaderSupply)
+	if supply != "" && supply != "1" {
+		http.Error(w, "bad supply header", http.StatusBadRequest)
+		return
+	}
+	req := BlockRequest{Key: key, URL: r.Header.Get(HeaderOrigin), Hop: hop, Supply: supply == "1"}
+
+	if raw := r.Header.Get(HeaderEpoch); raw != "" {
+		epoch, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "bad epoch header", http.StatusBadRequest)
+			return
+		}
+		req.Epoch, req.HasEpoch = epoch, true
+	}
 
 	var l store.Lease
 	var held bool
@@ -148,6 +181,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if code := upstreamStatusOf(err); code != 0 {
 			w.Header().Set(HeaderUpstreamStatus, strconv.Itoa(code))
 			http.Error(w, "upstream refused the supplied credential", http.StatusBadGateway)
+			return
+		}
+		var failure SourceFailureError
+		if errors.As(err, &failure) {
+			w.Header().Set(HeaderSourceFailure, "1")
+			http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		http.Error(w, "source error", http.StatusInternalServerError)
@@ -183,7 +222,7 @@ func parseHop(h string) (int, bool) {
 	return hop, true
 }
 
-// parseBlockPath parses "/peer/v1/block/<chunkHex>/<blockIndex>".
+// parseBlockPath parses "/peer/v2/block/<chunkHex>/<blockIndex>".
 func parseBlockPath(p string) (store.BlockKey, bool) {
 	rest, ok := strings.CutPrefix(p, blockPath)
 	if !ok {
@@ -330,11 +369,18 @@ func classify(err error) outcome {
 // upstreamRefusal returns a non-nil error when resp carries a relay's report that
 // the origin refused our credential.
 func upstreamRefusal(addr string, resp *http.Response) error {
+	if resp.Header.Get(HeaderSourceFailure) == "1" {
+		return fmt.Errorf("peer %s: %w", addr, ErrSourceUnavailable)
+	}
 	code := resp.Header.Get(HeaderUpstreamStatus)
 	if code == "" {
 		return nil
 	}
-	return fmt.Errorf("peer %s: origin returned %s: %w", addr, code, ErrUpstreamRefused)
+	n, err := strconv.Atoi(code)
+	if err != nil || n < 400 || n > 599 {
+		return fmt.Errorf("peer %s: invalid upstream status", addr)
+	}
+	return fmt.Errorf("peer %s: %w: %w", addr, ErrUpstreamRefused, &fetch.StatusError{Code: n, URL: "delegated origin", Status: http.StatusText(n)})
 }
 
 // http returns the HTTP client to use, defaulting to http.DefaultClient.
@@ -400,6 +446,12 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 		hreq.Header.Set(HeaderOrigin, req.URL)
 	}
 	hreq.Header.Set(HeaderHop, strconv.Itoa(req.Hop))
+	if req.HasEpoch {
+		hreq.Header.Set(HeaderEpoch, strconv.FormatUint(req.Epoch, 10))
+	}
+	if req.Supply {
+		hreq.Header.Set(HeaderSupply, "1")
+	}
 
 	client := c.HTTP
 	if client == nil {

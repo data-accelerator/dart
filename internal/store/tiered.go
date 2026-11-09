@@ -84,11 +84,12 @@ type TieredOptions struct {
 	SlotSize int64
 	Slots    int
 	// OwnedFraction is the share of Slots reserved for owned blocks
-	// (0 < f < 1); 0 (the zero value) means "unset" and defaults to 0.8.
-	// Negative, >= 1, or non-finite values are rejected with
-	// ErrBadTieredOptions — never silently substituted. Each budget always
-	// gets at least one slot.
+	// (0 <= f <= 1). Zero defaults to 0.8 unless OwnedFractionSet is true.
+	// The endpoints disable one class; intermediate shares keep at least
+	// one slot in each class and therefore require Slots >= 2.
 	OwnedFraction float64
+	// OwnedFractionSet distinguishes an explicit zero from the API zero value.
+	OwnedFractionSet bool
 }
 
 // budgetStore keeps each backend's admission check atomic with its eviction.
@@ -104,6 +105,7 @@ type Tiered struct {
 	owned    budgetStore
 	borrowed budgetStore
 	memory   bool
+	slotSize int64
 
 	sk *sketch
 
@@ -114,36 +116,42 @@ type Tiered struct {
 var _ ClassStore = (*Tiered)(nil)
 
 // ErrBadTieredOptions is returned by OpenTiered for malformed options.
-var ErrBadTieredOptions = errors.New("store: SlotSize and Slots must be > 0 and Slots >= 2")
+var ErrBadTieredOptions = errors.New("store: positive slot size/capacity and a finite share in [0,1] required; split budgets need at least two slots")
 
-// OpenTiered creates the two backing files (Path+".owned", Path+".borrowed")
-// and returns an empty Tiered store. With Memory set, it opens only RAM stores.
+// OpenTiered creates a backing file for each enabled class (Path+".owned",
+// Path+".borrowed") and returns an empty Tiered store. With Memory set, it opens
+// only RAM stores. A disabled class allocates no file, slots or admission sketch.
 func OpenTiered(opt TieredOptions) (*Tiered, error) {
-	if opt.SlotSize <= 0 || opt.Slots < 2 {
+	if opt.SlotSize <= 0 || opt.Slots < 1 {
 		return nil, ErrBadTieredOptions
 	}
 	f := opt.OwnedFraction
-	if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f >= 1 {
+	if math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f > 1 {
 		// Fail loudly: silently substituting 0.8 would turn "disable the owned
 		// budget" into "reserve 80% of the cache for it" — the opposite.
 		return nil, ErrBadTieredOptions
 	}
-	if f == 0 {
-		f = 0.8 // zero value = unset; the node validates an explicitly-set 0
+	if f == 0 && !opt.OwnedFractionSet {
+		f = 0.8
 	}
 	ownedSlots := int(float64(opt.Slots) * f)
-	if ownedSlots < 1 {
-		ownedSlots = 1
-	}
-	borrowedSlots := opt.Slots - ownedSlots
-	if borrowedSlots < 1 {
-		borrowedSlots = 1
-		if ownedSlots > 1 {
-			ownedSlots--
+	if f > 0 && f < 1 {
+		if opt.Slots < 2 {
+			return nil, ErrBadTieredOptions
+		}
+		if ownedSlots < 1 {
+			ownedSlots = 1
+		}
+		if ownedSlots >= opt.Slots {
+			ownedSlots = opt.Slots - 1
 		}
 	}
+	borrowedSlots := opt.Slots - ownedSlots
 
 	openBudget := func(suffix string, slots int) (budgetStore, error) {
+		if slots == 0 {
+			return disabledBudget{}, nil
+		}
 		if opt.Memory {
 			return OpenMem(MemOptions{SlotSize: opt.SlotSize, Slots: slots})
 		}
@@ -158,7 +166,26 @@ func OpenTiered(opt TieredOptions) (*Tiered, error) {
 		o.Close()
 		return nil, fmt.Errorf("store: borrowed budget: %w", err)
 	}
-	return &Tiered{owned: o, borrowed: b, memory: opt.Memory, sk: newSketch(borrowedSlots)}, nil
+	t := &Tiered{owned: o, borrowed: b, memory: opt.Memory, slotSize: opt.SlotSize}
+	if borrowedSlots > 0 {
+		t.sk = newSketch(borrowedSlots)
+	}
+	return t, nil
+}
+
+// ClassEnabled reports whether a class has persistent cache capacity.
+// Capacities are fixed at construction; the method is concurrent-safe and O(1).
+func (t *Tiered) ClassEnabled(c Class) bool {
+	if c == Owned {
+		return t.owned.Slots() > 0
+	}
+	return t.borrowed.Slots() > 0
+}
+
+func (t *Tiered) touchBorrowed(k BlockKey) {
+	if t.sk != nil {
+		t.sk.Increment(keyHash(k))
+	}
 }
 
 // keyHash derives the sketch hash for a block key.
@@ -174,7 +201,7 @@ func (t *Tiered) Get(k BlockKey) ([]byte, bool, error) {
 	if data, ok, err := t.owned.Get(k); err != nil || ok {
 		return data, ok, err
 	}
-	t.sk.Increment(keyHash(k))
+	t.touchBorrowed(k)
 	return t.borrowed.Get(k)
 }
 
@@ -183,21 +210,34 @@ func (t *Tiered) Acquire(k BlockKey) (Lease, bool, error) {
 	if l, ok, err := Acquire(t.owned, k); err != nil || ok {
 		return l, ok, err
 	}
-	t.sk.Increment(keyHash(k))
+	t.touchBorrowed(k)
 	return Acquire(t.borrowed, k)
 }
 
 // Reserve obtains a private slot in the selected memory budget. Disk-backed
-// budgets return ErrNoSlot so callers use the ordinary buffered write path.
+// budgets return ErrNoReservation for the buffered write path. Disabled classes
+// return ErrNoSlot immediately so callers deliver without cache publication.
 func (t *Tiered) Reserve(ctx context.Context, k BlockKey, n int64, c Class) (Reservation, error) {
+	if err := ctx.Err(); err != nil {
+		return Reservation{}, err
+	}
+	if n <= 0 {
+		return Reservation{}, ErrEmptyBlock
+	}
+	if n > t.slotSize {
+		return Reservation{}, ErrBlockTooLarge
+	}
+	if !t.ClassEnabled(c) {
+		return Reservation{}, ErrNoSlot
+	}
 	if !t.memory {
 		return Reservation{}, ErrNoReservation
 	}
-	m := t.owned.(*MemStore)
+	budget := t.owned
 	var admit func(BlockKey) bool
 	rejected := false
 	if c != Owned {
-		m = t.borrowed.(*MemStore)
+		budget = t.borrowed
 		t.sk.Increment(keyHash(k))
 		admit = func(victim BlockKey) bool {
 			ok := t.sk.Admit(keyHash(k), keyHash(victim))
@@ -205,7 +245,7 @@ func (t *Tiered) Reserve(ctx context.Context, k BlockKey, n int64, c Class) (Res
 			return ok
 		}
 	}
-	r, err := m.reserve(ctx, k, n, admit)
+	r, err := budget.(*MemStore).reserve(ctx, k, n, admit)
 	if rejected {
 		t.mu.Lock()
 		t.rejected++
@@ -239,7 +279,7 @@ func (t *Tiered) GetReader(k BlockKey) (io.Reader, int64, bool, error) {
 	if r, n, ok, err := t.owned.GetReader(k); err != nil || ok {
 		return r, n, ok, err
 	}
-	t.sk.Increment(keyHash(k))
+	t.touchBorrowed(k)
 	return t.borrowed.GetReader(k)
 }
 
@@ -251,7 +291,7 @@ func (t *Tiered) Touch(k BlockKey) {
 	if t.owned.Has(k) {
 		return
 	}
-	t.sk.Increment(keyHash(k))
+	t.touchBorrowed(k)
 }
 
 // Put inserts the block into the borrowed budget (the conservative default for
@@ -269,13 +309,16 @@ func (t *Tiered) Put(k BlockKey, data []byte) error {
 // go through TinyLFU admission once the budget is full, so a one-shot block
 // cannot evict a warm one.
 func (t *Tiered) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
+	if len(data) == 0 {
+		return false, ErrEmptyBlock
+	}
+	if int64(len(data)) > t.slotSize {
+		return false, ErrBlockTooLarge
+	}
+	if !t.ClassEnabled(c) {
+		return false, nil
+	}
 	if t.memory {
-		if len(data) == 0 {
-			return false, ErrEmptyBlock
-		}
-		if int64(len(data)) > t.owned.(*MemStore).slotSize {
-			return false, ErrBlockTooLarge
-		}
 		// Serialize the existing-entry check with class promotion. Borrowing keeps
 		// the entry stable without copying or holding the lock across payload work.
 		t.mu.Lock()
@@ -376,9 +419,11 @@ func (t *Tiered) Stats() TieredStats {
 	if t.memory {
 		st.MemBlocks = st.OwnedBlocks + st.BorrowedBlocks
 		st.MemSlots = st.OwnedSlots + st.BorrowedSlots
-		for _, s := range []*MemStore{t.owned.(*MemStore), t.borrowed.(*MemStore)} {
-			st.SlotWaits += s.waits.Load()
-			st.WriteBypasses += s.bypasses.Load()
+		for _, budget := range []budgetStore{t.owned, t.borrowed} {
+			if s, ok := budget.(*MemStore); ok {
+				st.SlotWaits += s.waits.Load()
+				st.WriteBypasses += s.bypasses.Load()
+			}
 		}
 	}
 	return st

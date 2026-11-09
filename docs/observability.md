@@ -20,7 +20,7 @@ The engine's instrumentation lives in `internal/engine/metrics.go`
 `*Metrics` disables instrumentation, so tests and embedders need not wire a
 registry.
 
-Bounded Range prefetch (ADR-0008) uses the same block-source and wire accounting
+Bounded Range prefetch (ADR-0010) uses the same block-source and wire accounting
 as demand. Completed prefetched loads count even if the client later stops before
 consuming them; client bytes count only writes actually accepted by its writer.
 The block latency histogram measures loads, not client-perceived Range latency.
@@ -73,12 +73,12 @@ and safe for concurrent use, since it runs on the scrape path.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `dart_block_source_total` | counter | `source=cache\|peer\|origin` | blocks served, by where they came from |
-| `dart_bytes_total` | counter | `direction=client\|peer_in\|origin_in` | bytes written to clients / fully received and validated peer payloads / fully received and validated origin blocks, plus verbatim passthrough bytes |
+| `dart_bytes_total` | counter | `direction=client\|peer_in\|origin_in` | bytes written to clients / fully received and validated peer payloads / fully received and validated origin blocks, plus streamed passthrough bytes; non-root passthrough counts peer ingress and the supplying root counts origin proxy response ingress |
 | `dart_relay_total` | counter | `result=served\|declined` | relay requests handled for peers |
 | `dart_block_fetch_seconds` | histogram | `source=peer\|origin` | block-path fetch latency: cache fills and peer reads only — Size probes and the uncached passthrough path are **not** observed here (`dart_passthrough_total` counts the latter). A coalesced fetch still observes its latency (the caller genuinely waited) even though its bytes are not double-counted in `dart_bytes_total` |
 | `dart_hedge_total` | counter | `event=fired\|primary_won\|backup_won` | tail-latency hedges: duplicates launched, and which contender served the block |
 | `dart_peer_failover_total` | counter | — | definite peer failures escalated to the next ancestor (not rate limited, unlike hedges) |
-| `dart_passthrough_total` | counter | `reason=range_unsupported` | requests proxied verbatim to origin, bypassing cache and P2P (Range-ignoring origin; see docs/engine.md §3.9) |
+| `dart_passthrough_total` | counter | `reason=range_unsupported` | requests proxied without block caching (direct for root-capable nodes, delegated for non-root nodes; see docs/engine.md §3.9) |
 | `dart_peer_circuits_open` | gauge | — | peers whose circuit is currently open |
 | `dart_store_blocks` | gauge | `class=owned\|borrowed\|mem` | cached blocks per cache class |
 | `dart_store_slots` | gauge | `class=owned\|borrowed\|mem` | capacity in blocks per cache class |
@@ -115,13 +115,13 @@ and `engine.RegisterPeerMetrics(reg, breaker)`; `cmd/dart` calls both.
 |---|---|---|
 | GET | `/healthz` | `ok` (text) |
 | GET | `/metrics` | Prometheus text format (`text/plain; version=0.0.4`) |
-| GET | `/admin/stats` | JSON: `self_id`, `cached_blocks` |
-| GET | `/admin/members` | JSON: `self_id`, `epoch`, `members[]{id,addr,weight,state}` |
-| GET | `/admin/ring?key=<uint64>&n=<topN>` | JSON: HRW placement order for a chunk key (`n` default 8) |
+| GET | `/admin/stats` | JSON: `self_id`, `role`, `cached_blocks` |
+| GET | `/admin/members` | JSON: `self_id`, `epoch`, `eligible_roots`, `eligible_readers`, `members[]{id,addr,weight,state,role}` |
+| GET | `/admin/ring?key=<uint64>&n=<topN>` | JSON: root-eligible HRW placement order, including role per entry (`n` default 8) |
 
 ```go
 h := admin.Handler(admin.Options{
-    Registry: reg, Store: st, Cluster: prov, SelfID: "A",
+    Registry: reg, Store: st, Cluster: prov, SelfID: "A", Role: cluster.Ordinary,
 })
 ```
 
@@ -130,7 +130,13 @@ Behavior notes:
 - Every dependency is optional: an endpoint whose dependency is nil returns
   `503` rather than preventing startup.
 - `/admin/ring` requires a decimal `uint64` key; anything else is `400`. It ranks
-  only **Ready** members (matching placement) and reports each node's address.
+  only root-eligible **Ready** members (matching placement) and reports each
+  node's address and role. Rank 0 is the preferred owner/root; readers do not
+  change this order. A valid view with no roots returns an empty order.
+- `Options.Role` reports the configured local capability in stats, even before
+  discovery converges (zero means Ordinary). Membership reports each discovered
+  role and Ready root/reader counts. These distinguish an empty supply set from
+  transport/source errors; `/healthz` remains live while no roots are available.
 - `epoch` and `key` are rendered as JSON **strings** to avoid float64 precision
   loss for large uint64 values.
 - The admin handler uses `http.ServeMux`: safe here because no admin path carries
@@ -153,7 +159,7 @@ Behavior notes:
 - Admin JSON shapes are debugging aids, not a stable API, but avoid gratuitous
   changes.
 
-Managed-memory pressure follows ADR-0008. `TieredStats.SlotWaits` and
+Managed-memory pressure follows ADR-0010. `TieredStats.SlotWaits` and
 `TieredStats.WriteBypasses` feed two cumulative counters:
 
 | Metric | Type | Meaning |
@@ -162,6 +168,9 @@ Managed-memory pressure follows ADR-0008. `TieredStats.SlotWaits` and
 | `dart_store_write_bypass_total` | counter | memory reservations declined by pressure or TinyLFU admission |
 | `dart_temporary_buffers_total` | counter | temporary block receive buffers allocated outside cache arenas |
 | `dart_temporary_buffer_bytes_total` | counter | cumulative requested bytes in those temporary buffers |
+| `dart_receive_buffers` | gauge | live temporary receive buffers, including shared results held after download |
+| `dart_receive_bytes` | gauge | payload bytes held by those live temporary buffers |
+| `dart_receive_budget_rejected_total` | counter | temporary admission declines, including skipped speculation |
 
 Temporary-buffer counters include compatible disk/Hybrid ingress and unsupported
 reserving stores; they are cumulative allocation volume, not live RSS. Memory
@@ -205,6 +214,7 @@ go test ./internal/metrics/ ./internal/admin/ -race -count=1
 | `admin.TestStats` | `cached_blocks` reflects the store |
 | `admin.TestMembers` | epoch, members, state names |
 | `admin.TestRing` | Ready-only ranking, ranks, `n` limit, determinism |
+| `admin.TestRoleDiagnostics` | mixed roles in members/stats; placement excludes non-roots; zero-root views remain live |
 | `admin.TestRingBadKey` | missing/non-numeric/negative key → 400 |
 | `admin.Test*Unconfigured` | nil dependency → 503 |
 

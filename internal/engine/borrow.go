@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/data-accelerator/dart/internal/chunk"
+	"github.com/data-accelerator/dart/internal/cluster"
 	"github.com/data-accelerator/dart/internal/fetch"
+	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/peer"
 	"github.com/data-accelerator/dart/internal/store"
 )
@@ -25,6 +27,18 @@ func (e *Engine) borrowBlock(ctx context.Context, url, objectID string, size, in
 }
 
 func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, size, index int64, hop int) (leasedRead, error) {
+	for {
+		r, err := e.loadBorrowedBlock(ctx, url, objectID, size, index, hop)
+		if !errors.Is(err, errSpeculativeReceive) || isSpeculative(ctx) {
+			return r, err
+		}
+		// Both borrowed and owned-copy demand can join speculative work that
+		// skips admission. Retry with demand headroom; another speculative
+		// leader winning admission in between must not turn a skip into failure.
+	}
+}
+
+func (e *Engine) loadBorrowedBlock(ctx context.Context, url, objectID string, size, index int64, hop int) (leasedRead, error) {
 	if index < 0 || index > e.cfg.MaxBlockIndex() || size <= 0 || e.cfg.BlockStart(index) >= size {
 		return leasedRead{}, ErrRangeNotSatisfiable
 	}
@@ -35,55 +49,48 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 	} else if ok {
 		return leasedRead{lease: l, source: blockFromCache}, nil
 	}
-	r, err := e.borrowed.do(ctx, blockLoadKey{block: key, hop: hop}, url, false, func(ctx context.Context) (leasedRead, error) {
+	ctx, flightKey := e.pinRouting(ctx, key)
+	r, err := e.borrowed.do(ctx, flightKey, url, false, func(ctx context.Context) (leasedRead, error) {
 		if l, ok, err := store.Acquire(e.store, key); err != nil {
 			return leasedRead{}, err
 		} else if ok {
 			return leasedRead{lease: l, source: blockFromCache}, nil
 		}
 		want := e.blockLen(size, index)
-		if e.p2p && hop < maxHop {
-			view := e.cluster.Current()
-			if view != nil {
-				ranked, _ := e.treeNodes(ctx, view, objectID, e.fileKey(objectID), key.Chunk)
-				primary, backup := e.hedgeTargets(ranked, view)
-				if primary != "" {
-					req := peer.BlockRequest{Key: key, URL: url, Hop: hop + 1}
-					result, ok := e.fetchHedgedResult(ctx, primary, backup, func(ctx context.Context, addr string) peerResult {
-						r, dst, cache, err := e.receiveBuffer(ctx, key, want)
-						if err != nil {
-							return peerResult{err: err}
-						}
-						defer r.Abort()
-						data, held, err := e.peer.GetInto(ctx, addr, req, dst, nil)
-						if err != nil || !held {
-							return peerResult{held: held, err: err}
-						}
-						e.mx.recordIngress(blockFromPeer, len(data))
-						l, err := e.finishBuffer(&r, key, data, cache)
-						return peerResult{lease: l, held: err == nil, err: err}
-					})
-					if ok {
-						return leasedRead{lease: result.lease, source: blockFromPeer}, nil
-					}
-				}
+		if isSupply(ctx) {
+			if !e.role.CanRoot() {
+				return leasedRead{}, errNoRoot
 			}
+		} else if e.p2p {
+			view, _ := ctx.Value(routingViewKey{}).(*cluster.View)
+			if view == nil {
+				return leasedRead{}, errNoRoot
+			}
+			roots := hashring.Rank(key.Chunk, view.Roots())
+			if len(roots) == 0 {
+				return leasedRead{}, errNoRoot
+			}
+			if roots[0].ID != e.selfID || !e.role.CanRoot() {
+				return e.loadRouted(ctx, url, objectID, size, index, hop, key, want, view, roots)
+			}
+		} else if !e.role.CanRoot() {
+			return leasedRead{}, errNoRoot
 		}
-		// Origin results can be shared across relay depths; peer flights cannot,
-		// because a skewed forwarding loop must continue toward the hop bound.
+		// Terminal origin work can be shared across normal/supply modes and epochs.
+		isSpeculativeOuter := isSpeculative(ctx)
 		return e.origins.do(ctx, blockLoadKey{block: key}, url, true, func(ctx context.Context) (leasedRead, error) {
 			if l, ok, err := store.Acquire(e.store, key); err != nil {
 				return leasedRead{}, err
 			} else if ok {
 				return leasedRead{lease: l, source: blockFromCache}, nil
 			}
-			r, dst, cache, err := e.receiveBuffer(ctx, key, want)
+			b, err := e.receiveBuffer(ctx, key, want, isSpeculativeOuter)
 			if err != nil {
 				return leasedRead{}, err
 			}
-			defer r.Abort()
+			defer b.abort()
 			start := e.cfg.BlockStart(index)
-			result, err := fetch.FetchInto(ctx, e.fetcher, url, start, start+want-1, dst)
+			result, err := fetch.FetchInto(ctx, e.fetcher, url, start, start+want-1, b.bytes())
 			if err != nil {
 				return leasedRead{}, err
 			}
@@ -93,47 +100,13 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 			if !result.Coalesced {
 				e.mx.recordIngress(blockFromOrigin, len(result.Data))
 			}
-			var l store.Lease
-			if result.RangeIgnored {
-				// A range-blind endpoint is passthrough-only. Keep these response bytes
-				// without publishing the reserved slot into the block cache.
-				l = store.HeapLease(append([]byte(nil), result.Data...))
-			} else {
-				l, err = e.finishBuffer(&r, key, result.Data, cache)
-			}
+			// Range-ignored responses retain their unpublished slot/temporary lease
+			// without a second payload allocation or a cache entry.
+			l, err := e.finishBuffer(&b, key, !result.RangeIgnored)
 			return leasedRead{lease: l, source: blockFromOrigin}, err
 		})
 	})
 	return r, err
-}
-
-func (e *Engine) receiveBuffer(ctx context.Context, key store.BlockKey, n int64) (store.Reservation, []byte, bool, error) {
-	cache := true
-	if s, ok := e.store.(store.Reserver); ok {
-		r, err := s.Reserve(ctx, key, n, e.classOf(key.Chunk))
-		if err == nil {
-			return r, r.Bytes(), false, nil
-		}
-		if errors.Is(err, store.ErrNoSlot) || errors.Is(err, store.ErrBlockTooLarge) {
-			cache = false
-		} else if !errors.Is(err, store.ErrNoReservation) {
-			return store.Reservation{}, nil, false, err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return store.Reservation{}, nil, false, err
-	}
-	e.mx.recordTemporary(n)
-	return store.Reservation{}, make([]byte, n), cache, nil
-}
-func (e *Engine) finishBuffer(r *store.Reservation, key store.BlockKey, data []byte, cache bool) (store.Lease, error) {
-	if r.Bytes() != nil {
-		return r.Commit()
-	}
-	if cache {
-		e.putBlock(key, data, key.Chunk)
-	}
-	return store.HeapLease(data), nil
 }
 
 // PeerLeaseSource serves validated whole blocks pinned through HTTP completion.
@@ -167,6 +140,35 @@ func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool
 		return l, true, nil
 	}
 	if req.URL == "" || req.Hop >= maxHop {
+		e.mx.recordRelay(false)
+		return store.Lease{}, false, nil
+	}
+	// Roles restrict cold work; validated immutable cache hits do not depend
+	// on current placement or origin capability.
+	if req.Supply {
+		if !e.role.CanRoot() {
+			return store.Lease{}, false, nil
+		}
+		ctx = supplyContext(ctx)
+	} else if !e.role.CanRead() {
+		if e.cluster == nil {
+			return store.Lease{}, false, nil
+		}
+		view := e.cluster.Current()
+		if view == nil {
+			return store.Lease{}, false, nil
+		}
+		roots := hashring.Rank(req.Key.Chunk, view.Roots())
+		if len(roots) == 0 || roots[0].ID != e.selfID {
+			return store.Lease{}, false, nil
+		}
+		ctx = supplyContext(ctx)
+	}
+	ctx, flightKey := e.pinRouting(ctx, req.Key)
+	if !isSupply(ctx) && req.HasEpoch && flightKey.epoch != req.Epoch {
+		// A changed weight/role/membership basis may reverse reader order.
+		// Decline a cold relay before joining a flight; terminal supply and
+		// already-cached bytes remain usable during convergence.
 		e.mx.recordRelay(false)
 		return store.Lease{}, false, nil
 	}

@@ -60,7 +60,7 @@ func TestLeaseServerReleasesOnWriteError(t *testing.T) {
 	key := store.BlockKey{}
 	mem.Put(key, []byte("data"))
 	srv := &Server{Borrow: func(context.Context, BlockRequest) (store.Lease, bool, error) { return mem.Acquire(key) }}
-	request := httptest.NewRequest("GET", "/peer/v1/block/0/0", nil)
+	request := httptest.NewRequest("GET", "/peer/v2/block/0/0", nil)
 	srv.ServeHTTP(&failedLeaseWriter{header: make(http.Header)}, request)
 	mem.Delete(key)
 	r, err := mem.Reserve(context.Background(), store.BlockKey{Chunk: 1}, 16, store.Owned)

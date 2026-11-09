@@ -40,10 +40,13 @@ dart [flags]
 | `-prefetch-window` | `2` | covering blocks in flight per client range, including demand; 1 disables, maximum 64 |
 | `-prefetch-bytes` | `64 MiB` | node-wide reserved speculative payload, including completed queued results |
 | `-prefetch-loads` | `16` | node-wide outstanding speculative loads/results; exhaustion preserves demand progress |
+| `-receive-bytes` | `0` (auto) | live temporary block receive payload; auto selects max(256 MiB, block-size); explicit limit must fit one block |
+| `-receive-loads` | `64` | live temporary block receive buffers, including retained shared results; separate from cache/prefetch capacity |
 | `-namespace` | `dart` | chunk-key namespace |
+| `-role` | `ordinary` | `ordinary`, `root-only` (no client listener), or `non-root` (delegate all origin access); restricted roles require P2P |
 | `-self-id` | `""` | this node's cluster ID (required with `-peers`) |
 | `-peer-listen` | `:9000` | peer block-server listen address (P2P mode) |
-| `-peers` | `""` | fixed membership: comma-separated `id@host:port` (incl. self). Mutually exclusive with `-discover` |
+| `-peers` | `""` | fixed membership: comma-separated `id@host:port#role` (incl. self; role defaults to ordinary). Mutually exclusive with `-discover` |
 | `-discover` | `""` | **maintain** membership by discovery: `<scheme>:<spec>` — `dns:<name>:<port>` (a headless Service), `static:<a>,<b>,...`, or a bare address list; the `dart-k8s` variant adds `k8s:<namespace>/<service>[/<port>]` |
 | `-peer-advertise` | `""` | `host:port` peers should dial; wildcard values are rejected. Defaults to `-peer-listen`, resolving a wildcard host in order: `DART_ADVERTISE_HOST` → `POD_IP` → hostname |
 | `-discover-interval` | `5s` | how often to re-resolve seeds and re-exchange rosters |
@@ -53,7 +56,7 @@ dart [flags]
 | `-reader-tree` | `true` | build the distribution tree over the active reader set (per-file tracker) |
 | `-tracker-tick` | `3s` | how often a tracker republishes a reader set |
 | `-replicas` | `1` | HRW candidates that authoritatively hold a chunk (the owned budget) |
-| `-owned-fraction` | `0.8` | share of the cache reserved for owned blocks (0<f<1); an explicitly-set out-of-range value fails startup |
+| `-owned-fraction` | `0.8` | owned share in [0,1]; 0 is borrowed-only, 1 owned-only; invalid/non-finite values fail startup |
 | `-mem-size` | `256 MiB` | Hybrid hot-set size; ignored in memory/disk modes; below one block disables the Hybrid front tier |
 
 | `-hedge` | `true` | hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99 |
@@ -65,7 +68,7 @@ dart [flags]
 | `-registry-auth` | `""` | JSON file mapping registry host to `{username,password}` for private upstreams |
 | `-oci-digest-only` | `false` | only treat `<algo>:<hex>` paths as content-addressed (disables the Distribution object-store layout) |
 
-**Size units.** `-cache-size`, `-chunk-size`, `-block-size`, `-prefetch-bytes` and `-mem-size` accept
+**Size units.** `-cache-size`, `-chunk-size`, `-block-size`, `-prefetch-bytes`, `-receive-bytes` and `-mem-size` accept
 either a plain byte count or a suffix, following the Kubernetes convention so these
 values can sit beside container resource limits without a second convention: an `i`
 selects a power of two (`8GiB`, `512MiB`, also `Gi`/`Mi`) and its absence a power of
@@ -83,12 +86,24 @@ selects the disk backend, ignoring `-mem-size`.
 It never creates or opens a cache directory, arena or directory lock; `-cache-dir`
 and `-mem-size` are unused. The existing `-owned-fraction` split and borrowed
 TinyLFU admission remain, so single-node owned traffic can fill only its reserved
-share. Capacity rounds down to whole blocks and must contain at least two blocks
-(one per class); invalid modes, capacities and fractions fail clearly. RAM payloads
+share. Capacity rounds down to whole blocks. Split budgets require at least two
+blocks; `-owned-fraction=0` (borrowed-only) or `=1` (owned-only) requires only one.
+Disabled-class writes are skipped in all modes, including Hybrid's RAM hot set,
+without taking capacity from the other class. Cache bypass does not fail a read.
+Roles do not set budgets automatically: a dedicated root-only peer commonly uses
+`-owned-fraction=1`, and a non-root peer uses `-owned-fraction=0` (ADR-0009).
+Invalid modes, capacities and fractions fail clearly. RAM payloads
 are managed in lazy arena segments; cache capacity excludes metadata, temporary buffers and
 in-flight reads/prefetch, so it is not a process RSS limit. Restart starts cold.
+Temporary receives are bounded separately by `-receive-bytes` and
+`-receive-loads` until the last reader releases each result. Exhaustion waits up
+to 2 ms before failing the load; speculative temporary fills skip immediately,
+leaving headroom for one demand block. Cached hits and arena-backed fills do not
+consume this temporary allowance. Defaults are capacity guardrails, not measured
+optimal concurrency; zero-cache-class workloads may need larger receive limits.
+
 Backend choice is node-local and can mix within a uniform-geometry cluster
-(ADR-0007); paths, keys and placement are unchanged.
+(ADR-0009); backend choice itself does not change paths, keys or placement.
 
 ```bash
 dart -cache-mode=memory -cache-size=2GiB -origin https://example.com/blob
@@ -147,7 +162,7 @@ dart -listen :8080 -peer-listen :9000 -self-id B \
 
 ## 3. Behavior & guarantees
 
-Long ranges use bounded ordered in-range prefetch (ADR-0008). The byte/load
+Long ranges use bounded ordered in-range prefetch (ADR-0010). The byte/load
 limits cover speculative payload/results, not cache memory, foreground reads or
 transient copies. Prefetch workers are canceled and joined before handler exit.
 `-prefetch-window=1` selects serial block reads; no peer handler expands its range.
@@ -215,7 +230,7 @@ stamped at build time (`-ldflags "-X main.version=..."`) and reported by
   `node.Run`'s scheme registration.
 
 Memory reads borrow pinned blocks and supported refills receive directly into
-unpublished slots (ADR-0008). A pin delays slot reuse after eviction. Slot pressure
+unpublished slots (ADR-0010). A pin delays slot reuse after eviction. Slot pressure
 waits at most 2 ms with cancellation and then serves through temporary buffers
 without cache insertion. This exceptional path may allocate/copy. Existing cache
 flags and owned/borrowed policy remain; no persistent shared memory is provided.
@@ -260,7 +275,7 @@ go test ./cmd/dart/ ./internal/node/ -race -count=1
 
 - **P2P tree**: a miss routes to the parent in the preorder tree; relay nodes
   receive and validate whole blocks before forwarding, and cache best-effort. With `-reader-tree`
-  (default) the tree spans only the nodes reading the object, via a per-file
+  (default) the owner anchors the tree, with eligible readers below it via a per-file
   tracker served on the peer listener (see docs/tracker.md). `-hedge` bounds tail
   latency by racing a slow parent against its grandparent, and `-peer-timeout`
   bounds every peer request. A per-peer circuit breaker

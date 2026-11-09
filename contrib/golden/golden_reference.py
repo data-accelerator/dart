@@ -80,15 +80,17 @@ def chunk_key(namespace, object_id, chunk_index):
     return fmix64(f.h)
 
 
-def epoch(members):
-    """cluster epoch: FNV-1a over (ID, 0x1F, BE float64 weight bits, 0x1E) per
-    canonical member, then fmix64. `members` is a list of (id, weight) already
-    in canonical order."""
+def epoch(members, roles=None):
+    """Role protocol epoch: FNV-1a over dart-roles-v1 plus NUL, followed by
+    (ID, 0x1F, BE float64 weight bits, role byte, 0x1E) per canonical member,
+    then fmix64. Members are canonical (id, weight) pairs; absent roles are 0."""
     f = Fnv()
+    f.mix_bytes(b"dart-roles-v1\x00")
     for mid, w in members:
         f.mix_bytes(mid.encode())
         f.mix(UNIT_SEP)
         f.mix_bytes(struct.pack(">Q", struct.unpack(">Q", struct.pack(">d", w))[0]))
+        f.mix((roles or {}).get(mid, 0))
         f.mix(EPOCH_SEP)
     return fmix64(f.h)
 

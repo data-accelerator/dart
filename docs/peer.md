@@ -14,17 +14,18 @@ already holds it instead of hitting origin. This package is the wire transport
 for that pull. It is plaintext HTTP/1.1 (peer-plane encryption is delegated to
 the CNI layer, per the design), which keeps `sendfile`/`splice` viable later.
 
-This first cut is transport only: a peer serves whatever its local `Source`
-holds and returns `404` otherwise. **Routing** — which peer to ask (placement
-via `internal/hashring`) and the distribution tree — is wired in a later step;
-this package does not decide who to contact.
+A peer invokes its configured source and returns `404` when it declines. The
+engine supplies role-aware routing and terminal supply sources; this transport
+does not select owners or readers.
 
 ## 2. Wire form
 
 ```
-GET /peer/v1/block/<chunkKey-hex>/<blockIndex>
+GET /peer/v2/block/<chunkKey-hex>/<blockIndex>
 X-DART-Origin: <upstream url>   (optional; enables relay fetch-on-behalf)
 X-DART-Hop:    <n>              (relay depth, for loop safety)
+X-DART-Supply: 1                (optional; root must terminate at cache/origin)
+X-DART-Epoch: <decimal uint64>   (ordering basis; engine forwarding includes it)
 ```
 
 - `<chunkKey-hex>` is `store.BlockKey.Chunk` in base-16; `<blockIndex>` is
@@ -50,9 +51,16 @@ X-DART-Hop:    <n>              (relay depth, for loop safety)
   effectively forever. The bound itself (`maxHop`) is enforced by the engine,
   not here, so any non-negative value — including one at or past the bound —
   is a valid wire value at this layer.
+- `X-DART-Epoch` carries the normal sender's pinned membership epoch as a
+  decimal uint64. Malformed values return `400`. `BlockRequest.HasEpoch`
+  distinguishes a valid zero from absence; omitted values adopt the receiver's
+  view for direct callers. Engines always include the epoch when forwarding.
+  On a cache miss, a different epoch declines with `404` before joining normal
+  work. Terminal supply and cache hits do not require matching epochs (ADR-0010).
 - Responses: `200` + complete block bytes (`X-DART-Node`, explicit `Content-Length`), `404` if the peer cannot provide the block, `400`
   for a malformed path or an invalid `X-DART-Hop`, `405` for non-GET, `500`
-  on a source error, and `502` +
+  on an unclassified source error, `503` + `X-DART-Source-Failure` for a
+  reported source/path failure, and `502` +
   `X-DART-Upstream-Status: <origin code>` when a relay's origin fetch was
   refused (§3.6 — the peer is fine; the caller's credential is not).
 - The path has no embedded URLs, so it is parsed from `URL.Path` (no `//` trap).
@@ -66,6 +74,9 @@ type BlockRequest struct {
     Key store.BlockKey // the block
     URL string         // X-DART-Origin: origin for relay; "" = transport-only
     Hop int            // X-DART-Hop: relay depth
+    Supply bool        // X-DART-Supply: terminal root request
+    Epoch uint64       // pinned membership ordering epoch
+    HasEpoch bool      // whether Epoch is explicitly supplied
 }
 type Source func(ctx context.Context, req BlockRequest) ([]byte, bool, error)
 ```
@@ -85,7 +96,7 @@ type Server struct {
 ```
 
 An `http.Handler` for the wire form above: `ServeHTTP` dispatches
-`/peer/v1/block` (and rejects invalid `X-DART-Hop` values, §2); unknown paths
+`/peer/v2/block` (and rejects invalid `X-DART-Hop` values, §2); unknown paths
 get 404. Safe for concurrent use, as any handler must be.
 
 ### 3.3 `type Client` / `func NewClient() *Client`
@@ -150,7 +161,7 @@ aliasing dst only on successful complete validation. No caller buffer is retaine
 after return. On error dst may contain partial bytes and must not be published.
 It reads at most len(dst)+1 bytes, without a growing payload allocation. The
 known-length GetValidated compatibility API allocates one expected-size payload
-buffer. Read-only sharing and cache publication belong to the engine (ADR-0008).
+buffer. Read-only sharing and cache publication belong to the engine (ADR-0010).
 
 ### 3.4 Validated whole-block reads: `Client.GetValidated`
 
@@ -178,7 +189,7 @@ geometry.
 byte. Failed loads produce a clean `500`, credential refusals a `502` with
 `HeaderUpstreamStatus`, and declines a `404`. A failure writing an already valid
 block still truncates its Content-Length response. See
-[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md) for the cross-package rule.
+[ADR-0010](./adr/0010-coalesce-directed-block-loads.md) for the cross-package rule.
 
 `UpstreamRefusedError` is the source error interface with `UpstreamStatus() int`;
 `Server` uses it to preserve the origin refusal code without blaming the relay.
@@ -304,17 +315,25 @@ Genuine relay faults (a `500` with no such header) still spend failure budget, s
 the breaker keeps working; a control test asserts that.
 
 
-### 3.7 Membership exchange: `GET /peer/v1/roster`
+### 3.7 Membership exchange: `GET /peer/v2/roster`
 
 ```go
-const RosterPath = "/peer/v1/roster"
+const RosterPath = "/peer/v2/roster"
 const HeaderPeerAddr = "X-DART-Peer-Addr"
 type Roster struct { Epoch string; Members []RosterMember }
-type RosterMember struct { ID, Addr string; Weight float64 }
-type RosterServer struct { NodeID string; Src func() Roster; Learn func(id, addr string) }
+type RosterMember struct { ID, Addr string; Weight float64; Role cluster.Role }
+type RosterServer struct {
+    NodeID string
+    Role cluster.Role
+    Src func() Roster
+    Learn func(id, addr string)
+    LearnMember func(RosterMember)
+}
 // RosterServer.ServeHTTP answers GET RosterPath with Src() as JSON, and feeds
-// the fetcher's self-identification headers to Learn (hearsay).
+// the fetcher's self-identification headers to LearnMember (direct contact),
+// falling back to the legacy identity-only Learn callback when unset.
 func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, string, error)
+func (c *Client) FetchRosterMember(ctx context.Context, addr string, self RosterMember) (Roster, string, error)
 ```
 
 Membership rides the peer listener. Five properties are deliberate:
@@ -350,6 +369,13 @@ their pending outcomes, so discovery also restores reachability without hiding a
 data-probe failure.
 
 
+Caller cancellation/deadlines while awaiting delegated origin headers release the
+breaker permit without charging a root failure. The client's own header timeout
+still records a failure. `TestOriginCallerCancellationDoesNotQuarantineRoot`
+checks repeated cancellations followed by a healthy request;
+`TestOriginDelegationBoundsHeaderWait` checks the internal-timeout distinction.
+`TestBlockRoutingEpochWire` pins absent, zero, maximum and malformed epoch values.
+
 ## 4. Invariants & Guarantees
 
 1. **Faithful transport**: a `200` returns exactly the block bytes the source
@@ -375,12 +401,13 @@ data-probe failure.
 
 ## 6. Determinism / Stability Contract
 
-- The wire path (`/peer/v1/block/<hex>/<dec>`) is part of the peer protocol.
+- The wire path (`/peer/v2/block/<hex>/<dec>`) is part of the peer protocol.
   Changing it is a peer-protocol version bump.
 - Peer-plane traffic is plaintext by design; encryption is a CNI concern.
-- ADR-0008 requires full validated engine blocks before peer success is committed.
+- ADR-0010 requires full validated engine blocks before peer success is committed.
   Server responses use Content-Length; clients also accept older chunked peers.
-  Whole-block forwarding preserves paths, keys and epoch framing. The removed
+  Whole-block forwarding uses the ADR-0009 v2 paths and epoch framing;
+  ADR-0010 carries membership epochs on block requests without changing keys. The removed
   streaming APIs are internal and have no compatibility shim.
 
 ## 7. Testing
@@ -464,17 +491,102 @@ go test ./internal/peer/ -race -count=1
 ## 8. Limitations & TODO
 
 - **Routing lives in the engine**: this package is the transport; the engine
-  decides who to ask (parent in the preorder tree over `cluster.Ready()`) and
-  provides the relay `Source` (`engine.PeerSource`). Membership skew is bounded
-  by `X-DART-Hop`; full epoch convergence is future work.
+  decides who to ask in the owner-rooted reader tree and supplies the relay
+  source. Ordinary edges follow strict reader order; membership epoch mismatch
+  declines cold relays. Hop remains a forwarding cap.
 - **Whole-block only**: a complete validated block is transferred as one
   Content-Length body. Cold multi-hop startup waits for each whole-block load;
-  concurrent covering-block requests supply steady-state pipelining (ADR-0008).
-- **Epoch convergence**: `X-DART-Epoch` is defined but not yet exchanged/acted
-  on; membership-skew convergence is a later addition.
-- **Zero-copy**: the server currently `Write`s a buffer; serving via
-  `sendfile`/`splice` from the store slot is future optimization.
+  concurrent covering-block requests supply steady-state pipelining (ADR-0010).
+- **Epoch convergence**: block epochs detect incompatible ordering views; they
+  do not synchronize discovery. Transient skew may bypass reader relays through
+  terminal supply until roster membership converges.
+- **Transport copies**: memory leases avoid owned block copies, but HTTP/TCP
+  writes still use the operating system transport path; no kernel zero-copy
+  guarantee is made.
 
 Half-open regression tests: `TestHalfOpenProbesWaitForSiblingOutcome` covers
 concurrent recovery and a sibling hard-failure veto;
 `TestHalfOpenRosterSuccessCannotConsumeDataProbe` covers roster slot ownership.
+
+### Role-aware roster exchange
+
+As specified by ADR-0009, `RosterMember.Role` carries the numeric cluster role.
+`HeaderPeerRole` (`X-DART-Peer-Role`) and `HeaderPeerWeight`
+(`X-DART-Peer-Weight`) carry the caller's self-report; the response role header
+also preserves self-role information when the body omits the responder entry.
+`RosterServer.Role` supplies that fallback. `RosterServer.LearnMember` receives
+validated direct reports and takes precedence over the identity-only `Learn`
+adapter. `Client.FetchRosterMember` sends the complete report, preserving the
+existing timeout and discovery breaker-admission bypass. `FetchRoster` remains
+an ordinary-role convenience wrapper. Unknown numeric roles and invalid caller
+weights are rejected before learning. Identified callers must explicitly send
+their role; every response member must carry a non-null role, and the response
+role header must be present and consistent with the responder's unique entry.
+Anonymous diagnostic GETs may omit caller headers but do not teach membership.
+The v2 roster path is a coordinated-upgrade
+boundary, not implicit compatibility with the old v1 discovery protocol.
+
+`TestRosterRolesBothDirections` verifies caller roles and reconstructed responder
+roles over real HTTP; `TestRosterRejectsUnknownRoles` verifies both ingress paths.
+`TestRosterRequiresExplicitConsistentRoles` rejects missing/null capabilities,
+conflicting self-identification and duplicate responder entries.
+
+### Terminal supply and metadata
+
+ADR-0009's block endpoint uses v2. `BlockRequest.Supply` is encoded as
+`HeaderSupply` (`X-DART-Supply: 1`); other nonempty values are rejected before
+source invocation. The engine serves validated warm bytes independently of
+current role or ownership. On a miss, supply requires root eligibility and
+terminates at origin without reader forwarding. This flag is part of routing,
+not an authorization boundary.
+
+`MetadataPath` (`/peer/v2/metadata`) accepts GET with `HeaderOrigin`.
+`MetadataServer.Probe` returns `Metadata` (Size and RangeUnsupported); the callback
+must be terminal and root-eligible. `Client.Probe` applies its timeout, bounds the
+JSON response to 4096 bytes and rejects missing or inconsistent fields. Metadata
+is endpoint-specific even when block bytes share a digest identity.
+
+`SourceFailureError` marks a healthy source reporting an upstream/path failure.
+`HeaderSourceFailure` carries it as `X-DART-Source-Failure: 1`; clients return
+`ErrSourceUnavailable` while preserving the relay's breaker health. HTTP origin
+statuses retain `HeaderUpstreamStatus`, including a typed fetch.StatusError for
+credential retry logic. `TestSourceFailureDoesNotQuarantineRelay` verifies this
+boundary over a real HTTP connection.
+
+### Terminal origin proxy
+
+`OriginPath` is `/peer/v2/origin`. `OriginServer{Transport http.RoundTripper}`
+implements `ServeHTTP` for bodyless GET/HEAD with `HeaderOrigin`; HTTP/HTTPS
+origins only. Upgrade requests are refused. A nil transport answers 503, as on a
+non-root node. The transport must be local origin access, never another peer
+delegate. The proxy consumes its routing envelope and applies standard HTTP
+hop-by-hop header handling.
+Escaped path/query, method, entity headers and origin statuses are preserved.
+Streaming uses bounded buffers rather than buffering a whole object; requests
+are independent and the handler is concurrent-safe when its transport is.
+
+`func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response, error)`
+forwards one operation to that root. `HeaderOriginResponse`
+(`X-DART-Origin-Response: 1`) distinguishes an actual origin response, including
+refusal, from a root unable to supply the request. The marker is consumed before
+returning to the caller. Redirects are returned without following their Location
+on the peer transport. Higher frontend layers may follow them only by submitting
+another delegated request. The body belongs to the caller and must be closed.
+
+`Client.Timeout` bounds header acquisition and each blocked body read (default
+30 seconds, negative disables these bounds). It does not bound total streaming
+duration or time a downstream consumer spends between reads. Existing HTTP
+transport/caller-context bounds also apply. Close cancels the operation and
+releases the breaker admission. A source-body failure remains detectable as a
+truncated response without quarantining the honest supplying root. The trusted
+domain assumption A2 applies: this endpoint adds no peer authentication or
+credential-isolation boundary.
+
+Tests: `TestOriginDelegationPreservesResponseAndDoesNotFollowRedirect` checks the
+wire boundary and escaped identities; `TestOriginDelegationRejectsUnsupportedOperations`
+checks methods, schemes and role refusal; `TestOriginDelegationPreservesOriginRefusal`
+checks status/body propagation; `TestOriginDelegationTruncationDoesNotQuarantineRoot`
+checks unknown-length truncation; `TestOriginDelegationUsesIdleInsteadOfWholeStreamDeadline`
+and `TestOriginDelegationCancelsStalledBody` check stream lifetime and cancellation.
+`TestOriginDelegationBoundsHeaderWait` distinguishes the internal timeout from
+caller cancellation and checks request cleanup and breaker accounting.

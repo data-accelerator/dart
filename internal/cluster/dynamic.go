@@ -102,6 +102,8 @@ type DynamicProvider struct {
 // tracked is a known peer plus the bookkeeping that decides when to forget it.
 type tracked struct {
 	member Member
+	// directRole prevents third-party hearsay from reverting a self-reported role.
+	directRole bool
 	// lastContact is when we last had *direct* evidence this member exists: a
 	// successful roster fetch from it, or a request it made to us.
 	//
@@ -222,6 +224,12 @@ func (d *DynamicProvider) gather(ctx context.Context, targets map[string]struct{
 			// the rest of the roster is hearsay.
 			d.Learn(r.members...)
 			d.confirm(r.responder)
+			for _, m := range r.members {
+				if m.ID == r.responder {
+					d.LearnMember(m)
+					break
+				}
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -260,6 +268,7 @@ func (d *DynamicProvider) Learn(members ...Member) {
 	}
 	now := d.cfg.Now()
 	var rejected []string
+	var invalidRoles []Member
 	d.mu.Lock()
 	for _, m := range members {
 		if m.ID == d.cfg.Self.ID {
@@ -272,6 +281,10 @@ func (d *DynamicProvider) Learn(members ...Member) {
 			// mysteriously missing member — report it (collected and delivered
 			// after the lock: the callback is user code).
 			rejected = append(rejected, m.ID)
+			continue
+		}
+		if !m.Role.Valid() {
+			invalidRoles = append(invalidRoles, m)
 			continue
 		}
 		// NaN cannot arrive here (JSON cannot represent it; A4).
@@ -293,10 +306,16 @@ func (d *DynamicProvider) Learn(members ...Member) {
 		// does not touch lastContact (§3.9 of docs/cluster.md). Otherwise two
 		// survivors flip-flopping conflicting address reports about a dead node
 		// would refresh each other's memory of it forever.
+		if t.directRole {
+			m.Role = t.member.Role
+		}
 		t.member = m
 	}
 	d.mu.Unlock()
 	if d.cfg.OnError != nil {
+		for _, m := range invalidRoles {
+			d.cfg.OnError(fmt.Errorf("cluster: member %q has invalid role %d", m.ID, m.Role))
+		}
 		for _, id := range rejected {
 			d.cfg.OnError(fmt.Errorf("cluster: roster member with invalid ID %q dropped (epoch-framing safety)", id))
 		}
@@ -311,15 +330,40 @@ func (d *DynamicProvider) Learn(members ...Member) {
 // covers asymmetric reachability: a peer we cannot dial but that can dial us stays
 // in membership.
 func (d *DynamicProvider) LearnPeer(id, addr string) {
-	if id == "" || id == d.cfg.Self.ID {
+	// This adapter has no role information; preserve known capabilities.
+	if !ValidMemberID(id) || id == d.cfg.Self.ID {
 		return
 	}
-	d.Learn(Member{ID: id, Addr: addr, Weight: 1})
 	now := d.cfg.Now()
 	d.mu.Lock()
 	if t, ok := d.known[id]; ok {
+		t.member.Addr = addr
 		t.lastContact = now
+	} else {
+		d.known[id] = &tracked{member: Member{ID: id, Addr: addr, Weight: 1, State: Ready}, lastContact: now}
 	}
+	d.mu.Unlock()
+}
+
+// LearnMember records a peer's direct self-report, including its role.
+// Only direct reports can replace a previously self-reported role. Hearsay
+// still updates routing addresses but cannot change this placement capability.
+// The trusted-network identity contract applies; this is not authentication.
+func (d *DynamicProvider) LearnMember(m Member) {
+	if m.ID == d.cfg.Self.ID {
+		return
+	}
+	if !ValidMemberID(m.ID) || !m.Role.Valid() {
+		d.reportError(fmt.Errorf("cluster: invalid direct member %q role %d", m.ID, m.Role))
+		return
+	}
+	if m.Weight <= 0 {
+		m.Weight = 1
+	}
+	m.State = Ready
+	now := d.cfg.Now()
+	d.mu.Lock()
+	d.known[m.ID] = &tracked{member: m, directRole: true, lastContact: now}
 	d.mu.Unlock()
 }
 

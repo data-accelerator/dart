@@ -13,6 +13,8 @@ import (
 // become no-ops), so tests and embedders need not wire a registry.
 type Metrics struct {
 	temporaryBuffers, temporaryBytes *metrics.Counter
+	receiveLoads, receiveBytes       *metrics.Gauge
+	receiveRejected                  *metrics.Counter
 	// Where a served block came from.
 	cacheHits *metrics.Counter
 	peerHits  *metrics.Counter
@@ -53,6 +55,9 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 	return &Metrics{
 		temporaryBuffers: r.NewCounter("dart_temporary_buffers_total", "temporary block receive buffers"),
 		temporaryBytes:   r.NewCounter("dart_temporary_buffer_bytes_total", "bytes allocated for temporary block receive buffers"),
+		receiveLoads:     r.NewGauge("dart_receive_buffers", "live temporary block receive buffers including retained results"),
+		receiveBytes:     r.NewGauge("dart_receive_bytes", "live temporary block receive payload bytes including retained results"),
+		receiveRejected:  r.NewCounter("dart_receive_budget_rejected_total", "temporary receive admissions declined, including skipped speculation"),
 		cacheHits: r.NewCounter("dart_block_source_total",
 			"blocks served, by source", metrics.LabelPair{Name: "source", Value: "cache"}),
 		peerHits: r.NewCounter("dart_block_source_total",
@@ -83,7 +88,7 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 			"definite peer failures escalated to the next ancestor"),
 
 		passthrough: r.NewCounter("dart_passthrough_total",
-			"requests proxied verbatim, bypassing cache and P2P",
+			"requests proxied verbatim without block caching",
 			metrics.LabelPair{Name: "reason", Value: "range_unsupported"}),
 
 		peerLatency: r.NewHistogram("dart_block_fetch_seconds",
@@ -165,16 +170,19 @@ func (m *Metrics) recordClientBytes(n int) {
 }
 
 // recordPassthrough counts a verbatim-proxied request and its bytes. The
-// bytes count as both client-served and origin-pulled — they crossed both
-// wires and none of them came from (or landed in) the cache — but not as any
-// block source: no block was fetched.
-func (m *Metrics) recordPassthrough(n int64) {
+// bytes count as client-served and either origin-pulled or peer-pulled for
+// non-root delegation. They do not count as block sources: no block was fetched.
+func (m *Metrics) recordPassthrough(n int64, delegated bool) {
 	if m == nil {
 		return
 	}
 	m.passthrough.Inc()
 	m.clientBytes.Add(n)
-	m.originBytes.Add(n)
+	if delegated {
+		m.peerBytes.Add(n)
+	} else {
+		m.originBytes.Add(n)
+	}
 }
 
 func (m *Metrics) recordRelay(served bool) {

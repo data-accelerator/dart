@@ -30,10 +30,11 @@ and reader-set maintenance belong to higher layers (`internal/cluster`, etc.).
 | Placement order `L` | The return of `Rank(key, nodes)`: a total order by descending HRW score. `L[0]` = owner, `L[0..R-1]` = replica candidates. |
 | Preorder tree | An ordered node sequence (the placement order, or the active-reader-set order) interpreted as the preorder traversal of a full k-ary tree; `Parent`/`Children` operate on **index positions**. |
 
-> Placement HRW runs over **all Ready nodes**; the distribution tree runs over
-> the **active reader set S** (two scopes). This package does not
-> distinguish them — it just ranks "the nodes you gave it"; the scope is the
-> caller's choice.
+> Placement HRW runs over **root-eligible Ready nodes** (ADR-0009). The engine
+> anchors the tree at the preferred owner and appends HRW-ranked eligible active
+> readers, excluding a duplicate owner. This package ranks the supplied nodes
+> and computes tree structure over the supplied sequence; it does not discover
+> roles or choose membership scope.
 
 ## 3. Public API
 
@@ -131,6 +132,10 @@ Callers may rely on the following (each is guarded by a test, see §7):
    output, independent of input order, platform, or build.
 2. **Total order**: `Rank` is a strict total order (score desc + ID asc
    tie-break), no ambiguity from ties.
+   Fixed per-member weights preserve the relative order of common nodes under
+   set additions/removals. The engine's owner-rooted tree locally inserts eligible
+   self before ranking readers (ADR-0010); normal ancestors must precede self.
+   Changing weights can change relative order and requires the epoch boundary.
 3. **Weight proportionality**: the probability a node becomes owner equals
    `weight_i / Σweight` (weighted HRW / straw2).
 4. **Minimal disruption**: adding/removing one node reassigns only ~`1/(m±1)` of
@@ -158,9 +163,11 @@ Callers may rely on the following (each is guarded by a test, see §7):
 - No I/O, no global initialization, no `init()`, no external dependencies (only
   stdlib `encoding/binary`, `math`, `sort`).
 - **Caller contract**:
-  - the placement layer calls `Rank`/`Top` with **all Ready nodes**;
-  - the distribution layer calls `Rank` with the **active reader set S**, then
-    calls `Parent`/`Children` on the **indices** of the returned sequence;
+  - the placement layer calls `Rank`/`Top` with **root-eligible Ready nodes**;
+  - the engine appends ranked eligible active readers after the preferred owner,
+    deduplicates that owner and calls `Parent`/`Children` on this sequence's
+    **indices**. Tracking disabled uses all eligible Ready readers; a missing
+    tracked snapshot routes directly to the owner;
   - `Parent`/`Children`'s `n` must equal the length of the sequence in use, and
     `i` must be a valid index within it, otherwise you get -1/nil.
 

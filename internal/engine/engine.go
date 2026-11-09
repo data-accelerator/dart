@@ -53,12 +53,14 @@ type Options struct {
 
 	// --- P2P (optional) ---
 	// When Cluster, Peer, and SelfID are all set, a cache miss first tries to
-	// pull the block from the owning peer(s) (HRW over Cluster.Ready()) before
-	// falling back to origin. Leaving any unset disables peer pulls (single-node
-	// behavior: every miss goes to origin).
+	// route via eligible readers to the root-eligible owner. Non-root nodes
+	// never fall back to origin. Leaving any unset disables peer pulls; only
+	// root-capable standalone nodes can fill a miss.
 	Cluster cluster.Provider
 	Peer    *peer.Client
 	SelfID  string
+	// Role is the local node capability, independent of transient membership.
+	Role cluster.Role
 	// Fanout is the distribution-tree branching factor (children per node) used
 	// when routing a miss to the parent; default 2. Larger fanout = shallower
 	// tree (owner has more direct children).
@@ -90,16 +92,25 @@ type Options struct {
 	// Zero selects 16. Exhaustion falls back to demand without waiting for a slot.
 	PrefetchLoads int
 
+	// ReceiveBytes bounds live temporary block receive buffers, including results
+	// awaiting their last lease release. Zero selects max(256 MiB, BlockSize).
+	// Explicit values must fit a full block. Cache slots/copies are separate.
+	ReceiveBytes int64
+	// ReceiveLoads bounds the number of those buffers. Zero selects 64.
+	// Admission waits at most 2 ms; speculative fills do not wait and leave
+	// capacity for one demand block. Exhaustion returns ErrReceiveBudget.
+	ReceiveLoads int
+
 	// Metrics, if non-nil, instruments block sources, bytes, and latencies.
 	// Build it with NewMetrics(registry); nil disables instrumentation.
 	Metrics *Metrics
 
 	// TrackerClient and TrackerRegistry enable the active-reader-set tree: the
 	// distribution tree is built over the nodes currently reading the object
-	// (so a parent is always another reader) instead of over all Ready members.
+	// below the preferred owner, instead of using all eligible Ready readers.
 	// TrackerRegistry is this node's local tracker (used when this node is the
 	// HRW tracker for a file); TrackerClient reaches remote trackers. Leaving
-	// both nil keeps all-member routing.
+	// both nil uses all eligible Ready readers below the owner.
 	TrackerClient   *tracker.Client
 	TrackerRegistry *tracker.Registry
 }
@@ -108,6 +119,7 @@ type Options struct {
 type Engine struct {
 	borrowed leaseLoads
 	origins  leaseLoads
+	metadata *fetch.Coalescing
 	cfg      chunk.Config
 	store    store.Store
 	fetcher  fetch.Fetcher
@@ -117,6 +129,7 @@ type Engine struct {
 	cluster  cluster.Provider
 	peer     *peer.Client
 	selfID   string
+	role     cluster.Role
 	fanout   int
 	replicas int
 	p2p      bool
@@ -138,6 +151,7 @@ type Engine struct {
 	loads          blockLoads
 	prefetchWindow int
 	prefetch       prefetchBudget
+	receive        receiveBudget
 
 	// opener streams verbatim origin responses for the passthrough fallback
 	// (Range-ignoring origins); nil when the fetcher cannot stream.
@@ -157,6 +171,9 @@ func New(opt Options) (*Engine, error) {
 	if err := opt.Chunk.Validate(); err != nil {
 		return nil, err
 	}
+	if !opt.Role.Valid() {
+		return nil, errors.New("engine: invalid node role")
+	}
 	if opt.Store == nil || opt.Fetcher == nil {
 		return nil, errors.New("engine: Store and Fetcher are required")
 	}
@@ -171,6 +188,18 @@ func New(opt Options) (*Engine, error) {
 	}
 	if opt.PrefetchLoads == 0 {
 		opt.PrefetchLoads = 16
+	}
+	if opt.ReceiveBytes < 0 || opt.ReceiveLoads < 0 {
+		return nil, errors.New("engine: invalid receive limits")
+	}
+	if opt.ReceiveBytes == 0 {
+		opt.ReceiveBytes = max(256*chunk.MiB, opt.Chunk.BlockSize)
+	}
+	if opt.ReceiveBytes < opt.Chunk.BlockSize {
+		return nil, errors.New("engine: receive byte limit must fit a full block")
+	}
+	if opt.ReceiveLoads == 0 {
+		opt.ReceiveLoads = 64
 	}
 	ns := opt.Namespace
 	if ns == "" {
@@ -189,11 +218,13 @@ func New(opt Options) (*Engine, error) {
 		cluster:        opt.Cluster,
 		peer:           opt.Peer,
 		selfID:         opt.SelfID,
+		role:           opt.Role,
 		fanout:         opt.Fanout,
 		mx:             opt.Metrics,
 		sizes:          make(map[string]sizeMeta),
 		prefetchWindow: opt.PrefetchWindow,
 		prefetch:       prefetchBudget{maxBytes: opt.PrefetchBytes, maxLoads: opt.PrefetchLoads},
+		receive:        receiveBudget{maxBytes: opt.ReceiveBytes, maxLoads: opt.ReceiveLoads, blockSize: opt.Chunk.BlockSize, mx: opt.Metrics},
 
 		replicas:      opt.Replicas,
 		hedgeEnabled:  opt.Hedge,
@@ -204,10 +235,14 @@ func New(opt Options) (*Engine, error) {
 		rs:            make(map[string]*readerSet),
 	}
 	limit := fetch.FlightLimit(opt.Fetcher)
+	e.metadata = &fetch.Coalescing{F: metadataFetcher{e: e}, MaxFlight: limit}
 	e.borrowed.maxFlight = limit
 	e.origins.maxFlight = limit
 	e.loads.leaseLoads.maxFlight = limit
 	e.opener, _ = opt.Fetcher.(fetch.Opener)
+	if !e.role.CanRoot() {
+		e.opener = &fetch.HTTPFetcher{Client: &http.Client{Transport: e.OriginTransport()}}
+	}
 	if e.fanout < 1 {
 		e.fanout = 2
 	}
@@ -244,7 +279,9 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	// is inside the signature), so HEAD would return 403. See fetch.Fetcher.
 	var r fetch.Range
 	var err error
-	if p, ok := e.fetcher.(fetch.Prober); ok {
+	if !e.role.CanRoot() {
+		r, err = e.metadata.Probe(ctx, url)
+	} else if p, ok := e.fetcher.(fetch.Prober); ok {
 		// Content-keyed singleflight must not merge endpoint capabilities.
 		r, err = p.Probe(ctx, url)
 	} else {
@@ -363,7 +400,8 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		return data, nil
 	}
 	start := time.Now()
-	r, _, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
+	ctx, flightKey := e.pinRouting(ctx, key)
+	r, _, err := e.loads.do(ctx, flightKey, url, func() (blockRead, error) {
 		// A previous leader can publish between our first miss and flight
 		// admission. Recheck after becoming leader, without holding the map lock.
 		if data, ok, err := e.store.Get(key); err != nil {
@@ -395,34 +433,9 @@ func (e *Engine) blockLen(size, blockIndex int64) int64 {
 	return e.cfg.BlockSize
 }
 
-// fromPeer routes a miss to this node's parent in the preorder distribution
-// tree. The tree is built over the active reader set when available (so the
-// parent is another reader) and otherwise over all Ready members. The parent
-// relays (fetching from its own parent/origin as needed), so it usually holds
-// the block. If this node is the tree root it returns ok=false and the caller
-// fetches origin. hop guards against loops under membership skew.
-func (e *Engine) fromPeer(ctx context.Context, url, objectID string, chunkKey uint64, key store.BlockKey, hop int, want int64) ([]byte, bool) {
-	if hop >= maxHop {
-		return nil, false
-	}
-	view := e.cluster.Current()
-	if view == nil {
-		return nil, false
-	}
-	ranked, _ := e.treeNodes(ctx, view, objectID, e.fileKey(objectID), chunkKey)
-	if len(ranked) == 0 {
-		return nil, false
-	}
-	primary, backup := e.hedgeTargets(ranked, view)
-	if primary == "" {
-		return nil, false // we are the tree root: fetch origin
-	}
-	return e.fetchHedged(ctx, primary, backup, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1}, want)
-}
-
 // putBlock stores a block, classifying it as owned or borrowed so the two
 // budgets stay isolated (see store's tiered layer). A node owns a block when it
-// is in the HRW top-Replicas for the chunk over all Ready members — that is the
+// is in the HRW top-Replicas for the chunk over root-eligible Ready members — that is the
 // authoritative placement, independent of who happens to be reading. Everything
 // else (a copy fetched for a local client, or relayed for a peer) is borrowed.
 //
@@ -448,7 +461,7 @@ func (e *Engine) classOf(chunkKey uint64) store.Class {
 	if view == nil {
 		return store.Borrowed
 	}
-	ranked := hashring.Rank(chunkKey, view.Ready())
+	ranked := hashring.Rank(chunkKey, view.Roots())
 	for i, n := range ranked {
 		if i >= e.replicas {
 			break

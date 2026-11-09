@@ -355,6 +355,13 @@ In `cmd/dart`:
   Caching those safely (and invalidating tag→digest mappings) is future work.
 - **No upstream failover**: a single upstream per mirror; containerd's own
   fallback to `server` covers the outage case.
+  ADR-0009's supply-peer failover keeps the same configured upstream. On a
+  non-root node, node assembly delegates uncached control traffic and follows
+  redirects through supply roots; the local client does not need origin access.
+  Operator credentials/token exchange belong to the supply root. Blob requests
+  retain the engine's role-aware cache/tree path. See
+  `TestNonRootRegistryAndPassthroughUseSupplyRoot` in the node package for the
+  integrated origin-isolated frontend contract.
 - **No response-header pass-through on the cached path**: only
   `Docker-Content-Digest` and `Content-Type` are set. Registry-specific headers
   from the upstream blob response are not relayed.

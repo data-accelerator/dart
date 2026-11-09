@@ -233,6 +233,12 @@ helm install dart deploy/helm/dart --set discovery.mode=k8s   # EndpointSlice wa
 `deploy/helm/dart/values.yaml` documents the tunables (cache sizing, ports,
 resources, registry upstream).
 
+For heterogeneous supply/compute groups, the chart also supports `role` and a
+shared `discovery.serviceName`, with exactly one release creating that Service.
+Use compatible source builds for this role-aware protocol; v0.3.0 does not
+implement roles. See [the discovery/deployment contract](./docs/k8s.md#heterogeneous-node-groups)
+for group selectors, stable identities and coordinated-upgrade requirements.
+
 The default `dart` image needs **no RBAC and never contacts the Kubernetes API** —
 discovery is DNS plus roster exchange, so it runs where Kubernetes specifics are
 unavailable. Operators who want immediate, readiness-aware discovery can instead

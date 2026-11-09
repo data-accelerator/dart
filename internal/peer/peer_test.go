@@ -86,9 +86,9 @@ func TestServerBadPathAndMethod(t *testing.T) {
 	base := srv.URL
 
 	bad := []string{
-		base + "/peer/v1/block/",            // no chunk/index
-		base + "/peer/v1/block/xyz/1",       // bad hex
-		base + "/peer/v1/block/ab/notanint", // bad index
+		base + "/peer/v2/block/",            // no chunk/index
+		base + "/peer/v2/block/xyz/1",       // bad hex
+		base + "/peer/v2/block/ab/notanint", // bad index
 		base + "/wrong/path",                // wrong prefix
 	}
 	for _, u := range bad {
@@ -103,7 +103,7 @@ func TestServerBadPathAndMethod(t *testing.T) {
 	}
 
 	// Non-GET method.
-	resp, err := http.Post(base+"/peer/v1/block/ab/1", "text/plain", nil)
+	resp, err := http.Post(base+"/peer/v2/block/ab/1", "text/plain", nil)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -138,16 +138,16 @@ func TestClientConnError(t *testing.T) {
 
 func TestParseBlockPath(t *testing.T) {
 	ok := map[string]store.BlockKey{
-		"/peer/v1/block/0/0":                                   {Chunk: 0, Block: 0},
-		"/peer/v1/block/abcdef/7":                              {Chunk: 0xABCDEF, Block: 7},
-		"/peer/v1/block/ffffffffffffffff/18446744073709551615": {Chunk: ^uint64(0), Block: ^uint64(0)},
+		"/peer/v2/block/0/0":                                   {Chunk: 0, Block: 0},
+		"/peer/v2/block/abcdef/7":                              {Chunk: 0xABCDEF, Block: 7},
+		"/peer/v2/block/ffffffffffffffff/18446744073709551615": {Chunk: ^uint64(0), Block: ^uint64(0)},
 	}
 	for p, want := range ok {
 		if got, o := parseBlockPath(p); !o || got != want {
 			t.Errorf("parseBlockPath(%q) = (%+v, %v), want %+v", p, got, o, want)
 		}
 	}
-	bad := []string{"/peer/v1/block/", "/peer/v1/block/ab", "/peer/v1/block//1", "/x/ab/1", "/peer/v1/block/ab/1/2"}
+	bad := []string{"/peer/v2/block/", "/peer/v2/block/ab", "/peer/v2/block//1", "/x/ab/1", "/peer/v2/block/ab/1/2"}
 	for _, p := range bad {
 		if _, o := parseBlockPath(p); o {
 			t.Errorf("parseBlockPath(%q) = ok, want !ok", p)

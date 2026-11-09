@@ -1,10 +1,14 @@
 {{/*
-Resource name prefix. Deliberately the chart name (not release-qualified): a
-cluster runs exactly one DART DaemonSet, and the headless Service name is
-what peers dial, so it must be predictable rather than release-specific.
+Resource name prefix. Defaults preserve the single-DaemonSet deployment.
+Heterogeneous groups use different fullnameOverride values and one shared
+discovery.serviceName, owned by exactly one release.
 */}}
 {{- define "dart.fullname" -}}
 {{- default .Chart.Name .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "dart.discoveryService" -}}
+{{- default (include "dart.fullname" .) .Values.discovery.serviceName -}}
 {{- end -}}
 
 {{- define "dart.labels" -}}
@@ -48,8 +52,8 @@ repository with a "-k8s" suffix (the Dockerfile's dart-k8s target) for k8s.
 {{/* The -discover argument for the selected mode. */}}
 {{- define "dart.discoverArg" -}}
 {{- if eq .Values.discovery.mode "k8s" -}}
-{{- printf "-discover=k8s:$(POD_NAMESPACE)/%s" (include "dart.fullname" .) -}}
+{{- printf "-discover=k8s:$(POD_NAMESPACE)/%s" (include "dart.discoveryService" .) -}}
 {{- else -}}
-{{- printf "-discover=dns:%s.$(POD_NAMESPACE).svc.cluster.local:%v" (include "dart.fullname" .) .Values.ports.peer -}}
+{{- printf "-discover=dns:%s.$(POD_NAMESPACE).svc.cluster.local:%v" (include "dart.discoveryService" .) .Values.ports.peer -}}
 {{- end -}}
 {{- end -}}

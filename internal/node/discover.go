@@ -26,10 +26,11 @@ type rosterFetcher struct {
 	c        *peer.Client
 	selfID   string
 	selfAddr string
+	selfRole cluster.Role
 }
 
 func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster.Member, string, error) {
-	r, responder, err := f.c.FetchRoster(ctx, addr, f.selfID, f.selfAddr)
+	r, responder, err := f.c.FetchRosterMember(ctx, addr, peer.RosterMember{ID: f.selfID, Addr: f.selfAddr, Weight: 1, Role: f.selfRole})
 	if err != nil {
 		return nil, "", err
 	}
@@ -45,7 +46,7 @@ func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster
 		}
 		// State is deliberately not set from the wire; the provider treats a learned
 		// member as Ready and derives liveness locally.
-		out = append(out, cluster.Member{ID: m.ID, Addr: m.Addr, Weight: w})
+		out = append(out, cluster.Member{ID: m.ID, Addr: m.Addr, Weight: w, Role: m.Role})
 	}
 	return out, responder, nil
 }
@@ -62,7 +63,7 @@ func rosterOf(d *cluster.DynamicProvider) peer.Roster {
 			continue // nothing a caller could do with it
 		}
 		out.Members = append(out.Members, peer.RosterMember{
-			ID: m.ID, Addr: m.Addr, Weight: m.Weight,
+			ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: m.Role,
 		})
 	}
 	return out

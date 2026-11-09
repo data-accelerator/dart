@@ -7,25 +7,24 @@ import (
 )
 
 // TestEpochGolden pins the epoch serialization against the independent Python
-// reference contrib/golden/golden_reference.py (FNV-1a over ID,0x1F,
-// big-endian float64 weight bits,0x1E, then fmix64; CI diffs it against the
+// reference contrib/golden/golden_reference.py (version prefix then
+// ID,0x1F,big-endian weight,role,0x1E, followed by fmix64; CI diffs it against the
 // live Go code under DART_GOLDEN_REF=1). The epoch is part of the wire protocol (X-DART-Epoch); if this
 // breaks, epoch computation drifted and must be treated as a protocol change.
 //
-// These values changed once, in 2026-08, when State was removed from the hash
-// (see TestEpochExcludesState for why).
+// Role framing changes every epoch; State remains excluded.
 func TestEpochGolden(t *testing.T) {
 	v := NewView([]Member{
 		{ID: "node-a", Weight: 1.0, State: Ready},
 		{ID: "node-b", Weight: 2.0, State: Suspect},
 		{ID: "node-c", Weight: 1.0, State: Ready},
 	})
-	const want = uint64(448884658194799021)
+	const want = uint64(2266180522882167846)
 	if v.Epoch() != want {
 		t.Errorf("epoch = %d (%#016x), want %d (%#016x)", v.Epoch(), v.Epoch(), want, want)
 	}
-	if e := NewView(nil).Epoch(); e != 17280346270528514342 {
-		t.Errorf("empty epoch = %d (%#016x), want 17280346270528514342", e, e)
+	if e := NewView(nil).Epoch(); e != 5662658244628052672 {
+		t.Errorf("empty epoch = %d (%#016x), want 5662658244628052672", e, e)
 	}
 }
 

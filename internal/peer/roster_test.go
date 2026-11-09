@@ -67,8 +67,8 @@ func TestRosterCarriesNoState(t *testing.T) {
 		}
 	}
 	// And an unknown field on the wire is ignored rather than breaking decoding.
-	var r Roster
-	if err := json.Unmarshal([]byte(`{"epoch":"7","members":[{"id":"y","addr":"h:1","state":3}]}`), &r); err != nil {
+	r, err := decodeRoster([]byte(`{"epoch":"7","members":[{"id":"y","addr":"h:1","role":0,"state":3}]}`))
+	if err != nil {
 		t.Fatalf("decoding a roster with an extra field failed: %v", err)
 	}
 	if len(r.Members) != 1 || r.Members[0].ID != "y" {

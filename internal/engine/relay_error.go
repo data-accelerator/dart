@@ -20,8 +20,14 @@ var _ peer.UpstreamRefusedError = (*upstreamRefused)(nil)
 
 func asRelayError(err error) error {
 	var se *fetch.StatusError
-	if errors.As(err, &se) && se.Refused() {
+	if errors.As(err, &se) && se.Code >= 400 && se.Code <= 599 {
 		return &upstreamRefused{err: err, code: se.Code}
 	}
-	return err
+	return &sourceFailure{err: err}
 }
+
+type sourceFailure struct{ err error }
+
+func (e *sourceFailure) Error() string  { return e.err.Error() }
+func (e *sourceFailure) Unwrap() error  { return e.err }
+func (e *sourceFailure) SourceFailure() {}

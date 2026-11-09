@@ -116,20 +116,35 @@ type ClassStore interface {
     PutClass(k BlockKey, data []byte, c Class) (admitted bool, err error)
     Stats() TieredStats
 }
-func OpenTiered(TieredOptions) (*Tiered, error) // {Path, SlotSize, Slots, OwnedFraction, Memory}
-var ErrBadTieredOptions error  // SlotSize <= 0, Slots < 2, or OwnedFraction < 0 or >= 1 (0 = unset, defaults to 0.8)
+func OpenTiered(TieredOptions) (*Tiered, error) // {Path, SlotSize, Slots, OwnedFraction, OwnedFractionSet, Memory}
+var ErrBadTieredOptions error  // invalid capacity/share, or fewer than two slots for a split budget
+func (t *Tiered) ClassEnabled(c Class) bool
+func (h *Hybrid) ClassEnabled(c Class) bool
 func (t *Tiered) Touch(k BlockKey) // record an access in the estimator without reading (used by Hybrid)
 ```
 
-`Slots >= 2` is required so both budgets get at least one slot.
+`OwnedFraction` accepts finite values in `[0,1]`. The API zero value defaults to
+0.8 unless `OwnedFractionSet=true`; explicit zero disables owned storage, while
+one disables borrowed storage. `Slots >= 1` is required for a single class;
+intermediate fractions require `Slots >= 2` and retain at least one slot in each
+class. This extends ADR-0007's mandatory split under ADR-0009.
 
-`Tiered` uses two independent budgets. `TieredOptions.Memory=false` opens two
-`DiskStore` files. With `Memory=true`, it opens two `MemStore` instances and
+`ClassEnabled` reports the fixed class capacity in O(1) time/space and is safe
+concurrently. A disabled class allocates no file, arena slots or borrowed sketch.
+Its validated `PutClass` returns `(false, nil)` and `Reserve` returns `ErrNoSlot`
+without waiting. Reads still search both classes: placement changes do not make
+an existing immutable hit invalid. Disabled writes never evict the enabled class
+or spill into Hybrid's RAM hot set. Hybrid delegates `ClassEnabled` when its back
+store exposes it; other backends preserve their existing hot-set policy.
+
+`Tiered` uses independent budgets. `TieredOptions.Memory=false` opens a
+`DiskStore` file for each enabled class. With `Memory=true`, it opens a `MemStore`
+for each enabled class and
 ignores `Path`, creating no files or locks. Both share the class split and
 TinyLFU policy (ADR-0007); RAM admission compares and evicts under the same
 backend lock. Memory capacity is allocated lazily in arena segments, with compatible copied
 reads and immutable existing keys as in §3.5. Closing/reopening starts empty.
-`Slots >= 2` and the existing fraction validation apply to both backends.
+The same capacity and fraction validation applies to both backends.
 Memory-only `Stats().MemBlocks/MemSlots` sum both budgets; in a Hybrid those
 fields describe its front hot set. Capacity bounds slots, excluding metadata,
 caller copies and engine in-flight buffers.
@@ -161,7 +176,8 @@ comparison and the evicting `Put` run inside the borrowed store's own lock
 concurrent Get/Delete/Put can reorder the LRU in between. `Put` (the plain
 `Store` method) defaults to `Borrowed`.
 
-**Class migration:** a block lives in exactly one budget. `PutClass(k, Owned)`
+**Class migration:** a block lives in exactly one budget. Disabled-class writes
+are declined before migration; existing copies remain readable. For enabled classes, `PutClass(k, Owned)`
 drops any borrowed copy (promotion); `PutClass(k, Borrowed)` on an owned key
 keeps the owned copy and refreshes its recency (never shadows it). Re-putting an
 existing key refreshes recency in whichever budget holds it.
@@ -180,7 +196,7 @@ st := ts.Stats() // OwnedBlocks/Slots, BorrowedBlocks/Slots, AdmitRejected
 ```
 
 The engine classifies automatically: a block is `Owned` when this node is in the
-HRW top-`Replicas` for its chunk over all Ready members, else `Borrowed` (see
+HRW top-`Replicas` for its chunk over root-eligible Ready members, else `Borrowed` (see
 docs/engine.md).
 
 ### 3.5 Memory tier and `Hybrid`
@@ -205,7 +221,7 @@ owned-copy APIs; copying happens outside the metadata lock. `Reserve` fills a
 private slot, and `Reservation.Commit` publishes only after caller validation.
 The arena and cache metadata perform zero steady-state allocations after the
 needed payload segments exist; this does not claim zero allocations in HTTP,
-request scheduling, flights, compatibility copies or pressure fallback (ADR-0008).
+request scheduling, flights, compatibility copies or pressure fallback (ADR-0010).
 
 `Hybrid` is a `ClassStore` that puts a `MemStore` hot set in front of a backing
 `ClassStore` (normally a `Tiered`):
@@ -234,6 +250,7 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
 ```go
 type Lease struct { /* private data, owner, slot and generation */ }
 func HeapLease(data []byte) Lease
+func HeapLeaseWithRelease(data []byte, release func()) Lease
 func (l Lease) Bytes() []byte
 func (l Lease) Clone() Lease
 func (l *Lease) Release()
@@ -251,6 +268,7 @@ type Reservation struct { /* private exclusive slot ownership */ }
 func (r Reservation) Bytes() []byte
 func (r *Reservation) Commit() (Lease, error)
 func (r *Reservation) Abort()
+func (r *Reservation) Detach() Lease
 ```
 
 A `Lease` owns one reference. Move it by assignment, or call `Clone` to create
@@ -259,7 +277,16 @@ release, with capacity restricted to valid bytes. Do not mutate it or concurrent
 operate on the same lease variable. Different owners can read/release concurrently.
 The zero value and repeated release of the same variable are safe. `HeapLease`
 takes an existing buffer as immutable owned storage; the caller relinquishes
-mutation. The generic `Acquire` wraps a legacy store's copy when needed.
+mutation. `HeapLeaseWithRelease` additionally invokes a non-panicking callback
+once, after the final clone releases its bytes. It allocates one O(1) shared
+reference record when the callback is non-nil; cloning/releasing is O(1) with no
+payload copy. The callback must not access the released data. A nil callback
+retains `HeapLease` behavior. This lets receive admission cover slow writers and
+shared results after the backend fetch exits. `Reservation.Detach` freezes a
+validated fill without publishing a cache entry, transferring its existing pin
+in O(1) time/space. Stop writing before Detach, as before Commit. Each reservation
+ends with exactly one Commit, Detach or Abort.
+The generic `Acquire` wraps a legacy store's copy when needed.
 
 Memory Acquire/Clone/Release use O(1) space and expected O(1) metadata work.
 `Tiered` prefers owned and feeds only borrowed accesses to TinyLFU. Disk Acquire
@@ -368,7 +395,7 @@ if ok {
   **not** persisted across restarts (§7), so it is free to change.
 
 The additive managed-memory contract follows
-[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md). Existing owned-copy APIs
+[ADR-0010](./adr/0010-coalesce-directed-block-loads.md). Existing owned-copy APIs
 and wire keys retain their contract. Memory reservation can decline under pins;
 callers treat caching as best effort. These rules also apply to Hybrid's RAM tier.
 
@@ -386,6 +413,8 @@ Managed-memory regression coverage:
 | `TestFixedIndexChurnMatchesMap` | 50,000 deterministic random operations cross-checked against an independent map |
 | `TestHybridAdmissionFalseWhenBothTiersDecline` | backing admission rejection plus pinned RAM returns false; memory-only admission still returns true |
 | `TestReservationCloseBeforePublication` | closing an unfinished fill rejects publication and frees its arena |
+| `TestHeapLeaseFinalRelease` | concurrent clones return temporary capacity exactly once, after the final owner releases |
+| `TestReservationDetachRetainsUnpublishedSlot` | uncached immutable fill keeps its slot pinned without publication or copying |
 | `TestTieredBorrowedLeaseSurvivesPromotion` | promotion preserves old readers, isolation and pressure counters |
 | `TestLeaseConcurrentReuse` | concurrent borrowed-slot churn under race detector |
 
@@ -429,7 +458,9 @@ go test ./internal/store/ -cover -count=1
 | `TestSketchAdmitFavorsPopular` | hot candidate beats cold victim; unseen candidate loses to hot victim |
 | `TestSketchDecay` | halving makes stale popularity fade |
 | `TestSketchConcurrent` / `TestNextPow2` | concurrency (`-race`); size rounding |
-| `TestTieredBadOptions` / `TestTieredSplitsCapacity` | option validation; 80/20 split, out-of-range fraction rejected (0 = unset → 0.8), ≥1 slot each |
+| `TestTieredBadOptions` / `TestTieredSplitsCapacity` | option validation; default 80/20 split; intermediate shares retain ≥1 slot each |
+| `TestSingleClassBudgetsAcrossBackends` | memory/disk/Hybrid owned-only and borrowed-only budgets; no disabled files, spillover, waits or cross-class eviction |
+| `TestOwnedFractionUnsetAndExplicitZero` | zero-value API defaults to 80/20; explicit zero disables owned storage |
 | `TestTieredRoundtripBothClasses` | both budgets store and serve; per-class stats |
 | **`TestTieredBudgetIsolation`** | **200 borrowed inserts never evict any owned block** |
 | **`TestTieredAdmissionRejectsOneShots`** | **one-shot candidates are refused; warm borrowed entries survive** |

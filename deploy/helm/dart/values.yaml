@@ -29,6 +29,16 @@ discovery:
   #        automatically) and EndpointSlice get/list/watch permission, which
   #        the chart creates automatically in this mode.
   mode: dns
+  # Optional shared headless Service for heterogeneous node groups. Every
+  # group uses the same name; exactly one release creates it. The Service
+  # selects the shared cluster label, not a role or a DaemonSet's app label.
+  serviceName: ""
+  createService: true
+
+# ordinary, root-only (no client listener/hostPort), or non-root (no origin
+# egress). Restricted roles require a source build containing ADR-0009;
+# v0.3.0 binaries do not support them. All groups must use compatible binaries.
+role: ordinary
 
 rbac:
   # Create the ServiceAccount + Role (EndpointSlice get/list/watch) +

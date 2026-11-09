@@ -7,6 +7,51 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+### Added
+
+- Support ordinary, root-only and non-root peers (#95, ADR-0009). Chunk owners
+  anchor distribution; root-only peers have no local client listener, while
+  non-root peers obtain blocks, Size/Range metadata, Registry control responses
+  and Range-unsupported passthrough through supply roots. Owner misses fetch
+  origin directly; replica/reader cache probes are not introduced.
+- Allow owned-only (`-owned-fraction=1`) and borrowed-only (`=0`) budgets in
+  memory, disk and Hybrid modes. Disabled-class writes are skipped without
+  taking capacity from another class or the Hybrid hot set.
+- Bound live temporary block buffers with `-receive-bytes` and `-receive-loads`,
+  retaining admission until the last reader releases shared results. Add live
+  receive/pressure metrics and role-aware admin membership/placement output.
+- Support heterogeneous Helm workloads sharing one discovery Service; existing
+  seed-plus-roster discovery carries roles in both directions.
+
+### Fixed
+
+- Coalesce normal block misses across relay hops (#97, ADR-0010). Include eligible
+  self in local reader trees and preserve strictly earlier parent/ancestor edges.
+  Terminal supply remains independent of waiting relays; cold requests crossing
+  membership ordering epochs fall back to supply while warm bytes remain usable.
+- Keep caller cancellation of delegated origin requests from opening a healthy
+  supply root's circuit; internally imposed header timeouts still count as failures.
+
+- Serve valid cached blocks independently of current root-only ownership; retain
+  key/URL validation and cold role restrictions. Owned-copy demand retries skipped
+  speculative fills. Root hedges rejected before buffer admission remain eligible
+  for fallback after the active contender releases capacity.
+
+### Upgrade notes
+
+- Coordinated upgrade required: peer block/roster paths use v2, roles participate
+  in a new membership epoch, and owner-rooted trees change routing even for
+  all-ordinary clusters. Drain traffic and replace all participating binaries
+  before resuming it. Old role-less peers do not join the new roster protocol.
+- Hash64, HRW scores, ChunkKey and digest identities are unchanged. Cache backend
+  and capacity remain node-local; root-eligible peers must reach all configured
+  origins in the namespace. Existing trusted-cluster assumptions remain.
+- Temporary receive defaults are 64 buffers and max(256 MiB, block size).
+  Exhaustion waits at most 2 ms before failing a load; speculative fills skip
+  instead and retry on demand. These are capacity guardrails, not benchmark
+  tuning; configure them for the required uncached concurrency. They are not
+  a process RSS limit.
+
 ## [v0.3.0] — 2026-11-06
 
 ### Highlights

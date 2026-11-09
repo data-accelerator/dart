@@ -92,7 +92,7 @@ Node assembly mounts `peer.Server.Borrow` with `Engine.PeerLeaseSource`: peer su
 only after a complete validated block is available. `-prefetch-window`,
 `-prefetch-bytes` and `-prefetch-loads` configure the shared engine budgets;
 client and registry front-ends therefore share speculative admission. Request-owned
-workers join inside Serve before the handler admission gate is released (ADR-0008).
+workers join inside Serve before the handler admission gate is released (ADR-0010).
 
 Cache assembly selects `memory`, `disk` or default `hybrid` (ADR-0007).
 `cache-size` sizes each backend; only Hybrid consumes `mem-size`. Memory mode
@@ -185,8 +185,17 @@ The exact path the roster server is mounted on (no trailing slash, so a
 Node peer serving uses `Engine.PeerLeaseSource` and `Server.Borrow`. Client and
 peer writes retain immutable memory blocks until completion; direct peer/origin
 fills publish only after validation. All request-owned workers and shared origin
-backends are joined before their last serving owner exits (ADR-0008), retaining
-ADR-0003's store-close ordering. No new flag, wire setting or epoch is required.
+backends are joined before their last serving owner exits (ADR-0010), retaining
+ADR-0003's store-close ordering. Lease ownership itself adds no flag, wire setting or epoch; the role and
+ordering-epoch protocol changes follow ADR-0009 and ADR-0010.
+
+Admin assembly forwards the configured local role independently of discovery
+state; `/admin/members` and `/admin/ring` expose the role-filtered supply set.
+
+Temporary block receive capacity is forwarded from `-receive-bytes` and
+`-receive-loads` into `engine.Options.ReceiveBytes/ReceiveLoads`, independently
+of cache and speculative prefetch budgets. Engine construction validates these
+limits; the detailed admission/lifetime contract is in docs/engine.md §3.5.1.
 
 ## 7. Testing
 
@@ -203,6 +212,13 @@ go test ./internal/node/ -race -count=1
 
 ### Test list (property each guards)
 
+Discovery regression coverage for ADR-0009 includes
+`TestDiscoveryMixedRolesConvergeAndChange`: real HTTP roster exchange, DNS/static
+seeds, inbound-only discovery, restart role changes and epoch convergence.
+`TestDiscoveryRejectsLegacyRoster` proves that a v1-only peer is not silently
+admitted as an ordinary v2 member. See [k8s.md](./k8s.md) for shared-Service
+configuration across role-specific workloads.
+
 The pre-extraction tests are listed in [dart.md §4](./dart.md); they now live in
 this package (`node_test.go`, `discover_test.go`, `size_test.go`). Added with
 the extraction:
@@ -215,6 +231,7 @@ the extraction:
 | `TestRunPrintsVersion` | `-version` prints the version passed to `Run` |
 | `TestSelfIDRejectsControlBytes` / `TestParsePeersRejectsControlByteIDs` | control-byte member IDs rejected at `-self-id` and `-peers` (epoch-framing safety) |
 | `TestWildcardAdvertiseRejected` | explicit wildcard `-peer-advertise` values are rejected (incl. IPv6 long/zoned forms); loopback stays valid |
+| `TestSingleClassCacheConfiguration` | explicit zero/one shares allow one-block memory/disk/Hybrid caches without disabled-class spillover |
 | `TestOwnedFractionFlagValidation` | an explicit out-of-range or non-finite `-owned-fraction` fails startup |
 | `TestParseByteSizeExact` | plain byte counts are exact above 2^53; overflow errors |
 | `TestDiscoveryErrorsRoutedAndThrottled` | discovery errors go to `out`, one line/minute with a suppression count |
@@ -241,3 +258,33 @@ fallback produces a complete Content-Length response.
   run / `deploy/verify.sh`), as before the extraction.
 - Scheme dispatch cuts at the first `:`; a spec therefore cannot itself start
   with something that looks like a scheme prefix (no current scheme needs one).
+
+### Tree-role assembly
+
+ADR-0009 defines `-role ordinary|root-only|non-root` (default `ordinary`).
+Restricted roles require P2P configuration. Discovery advertises the configured
+role in both directions. Static lists use `id@host:port#role`, with an omitted
+suffix meaning ordinary; every node must configure the same membership roles,
+and the local entry must agree with `-role`. Root-only assembly does not create
+a client listener; peer and operational handlers remain available.
+`TestRoleConfiguration` covers flag/static-role parsing and IPv6 addresses;
+`TestRootOnlyHasNoClientHandler` checks root-only assembly and inconsistent or
+standalone role rejection. These assembly rules accompany the engine routing
+contract; a role must not be used as a substitute for source-access enforcement.
+
+Non-root nodes have no local origin backend. Their
+Registry control requests use `Engine.OriginTransport`; redirect following also
+uses this transport, so a local client is not sent to an origin/CDN URL to finish
+the pull. Blob data retains the block/cache/tree path. Range-unsupported requests
+use the engine's delegated opener. Root-capable nodes expose terminal origin and
+metadata services on the peer listener; root-only nodes need no client listener
+to provide them. Registry operator credentials and token exchanges are used on
+the supply root. Non-root operator credentials do not replace root configuration.
+Registry authentication uses the existing transport semantics. Roles express
+operational capabilities within the trusted cluster (A2), not security identities.
+
+`TestNonRootRegistryAndPassthroughUseSupplyRoot` builds real nodes and HTTP
+listeners, with credentials only on the root, and exercises manifest GET/HEAD,
+manifest redirects, token exchange, blob reads, Range-unsupported GET/HEAD,
+cross-endpoint redirects and root outage. Warm blob
+reads survive the outage; uncached control requests fail without direct fallback.

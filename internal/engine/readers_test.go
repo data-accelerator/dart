@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -73,19 +74,20 @@ func TestTreeNodesPrefersReaderSet(t *testing.T) {
 		t.Fatalf("tree was not built from the reader set: %v", nodeIDsOf(nodes))
 	}
 	got := nodeIDsOf(nodes)
-	if len(got) != 2 {
-		t.Fatalf("tree candidates = %v, want exactly the 2 readers (%s, %s)", got, self, other)
+	root := hashring.Rank(12345, view.Roots())[0].ID
+	expected := map[string]bool{root: true, self: true, other: true}
+	if len(got) != len(expected) || got[0] != root {
+		t.Fatalf("tree %v, want owner %s plus readers", got, root)
 	}
 	for _, id := range got {
-		if id != self && id != other {
-			t.Errorf("non-reader %q in tree candidates %v", id, got)
+		if !expected[id] {
+			t.Fatalf("unrelated member %s included", id)
 		}
 	}
 }
 
-// TestTreeNodesFallsBackToAllMembers: without a tracker, or with too few
-// readers to form a tree, routing falls back to all Ready members.
-func TestTreeNodesFallsBackToAllMembers(t *testing.T) {
+// Tracking disabled uses all Ready readers; missing snapshots use owner+self.
+func TestTreeNodesWithoutReaderSnapshot(t *testing.T) {
 	members := []cluster.Member{
 		{ID: "A", Addr: "a:1", Weight: 1, State: cluster.Ready},
 		{ID: "B", Addr: "b:1", Weight: 1, State: cluster.Ready},
@@ -109,7 +111,7 @@ func TestTreeNodesFallsBackToAllMembers(t *testing.T) {
 		t.Errorf("candidates = %v, want all 3 Ready members", nodeIDsOf(nodes))
 	}
 
-	// Tracker present but only one reader: too small for a tree, so fall back.
+	// Tracker present but unavailable: retain the owner and the local reader.
 	reg := tracker.NewRegistry(tracker.Options{Tick: time.Millisecond, LeaseTTL: time.Minute})
 	e2, err := New(Options{
 		Chunk: testCfg(), Store: openStoreAt(t), Fetcher: newFetcher(),
@@ -121,11 +123,15 @@ func TestTreeNodesFallsBackToAllMembers(t *testing.T) {
 	}
 	reg.Join("solo", "A", 0)
 	nodes2, fromReaders2 := e2.treeNodes(context.Background(), prov.Current(), "solo", e2.fileKey("solo"), 3)
-	if fromReaders2 {
-		t.Error("a single reader should not form a reader-set tree")
+	if !fromReaders2 {
+		t.Error("tracker mode must retain the owner even with a single reader")
 	}
-	if len(nodes2) != 3 {
-		t.Errorf("candidates = %v, want all 3 Ready members", nodeIDsOf(nodes2))
+	want := []string{hashring.Rank(3, prov.Current().Roots())[0].ID}
+	if want[0] != "A" {
+		want = append(want, "A")
+	}
+	if !reflect.DeepEqual(nodeIDsOf(nodes2), want) {
+		t.Errorf("candidates = %v, want direct owner when reader snapshot is unavailable", nodeIDsOf(nodes2))
 	}
 }
 
@@ -185,6 +191,85 @@ func TestReaderSetTreeEndToEnd(t *testing.T) {
 		}
 		if !bytes.Equal(buf.Bytes(), content) {
 			t.Errorf("%s bytes mismatch", id)
+		}
+	}
+}
+
+// Every edge from every snapshot is descending in one common strict order.
+// Their union is therefore acyclic even when no two nodes share a snapshot.
+func TestReaderSnapshotChurnPreservesStrictOrder(t *testing.T) {
+	members := []cluster.Member{{ID: "R", Addr: "root:1", Weight: 1, State: cluster.Ready, Role: cluster.RootOnly}}
+	for i, id := range []string{"A", "B", "C", "D", "E", "F"} {
+		members = append(members, cluster.Member{ID: id, Addr: id + ":1", Weight: float64(i + 1), State: cluster.Ready, Role: cluster.NonRoot})
+	}
+	for _, key := range []uint64{0, 42, 0xdeadbeef} {
+		positions := map[string]int{"R": -1}
+		full := cluster.NewStaticProvider(members...).Current()
+		for i, n := range hashring.Rank(key, full.Readers()) {
+			positions[n.ID] = i
+		}
+		// Also vary membership eligibility while preserving common weights.
+		for _, absent := range []string{"", "B", "E"} {
+			viewMembers := append([]cluster.Member(nil), members...)
+			for i := range viewMembers {
+				if viewMembers[i].ID == absent {
+					viewMembers[i].State = cluster.Suspect
+				}
+			}
+			view := cluster.NewStaticProvider(viewMembers...).Current()
+			for _, self := range members[1:] {
+				if self.ID == absent {
+					continue
+				}
+				e := &Engine{selfID: self.ID, role: cluster.NonRoot, trackerReg: &tracker.Registry{}, rs: make(map[string]*readerSet)}
+				for mask := 0; mask < 64; mask++ {
+					ids := []string{"R", "unknown"}
+					for i, m := range members[1:] {
+						if mask&(1<<i) != 0 {
+							ids = append(ids, m.ID, m.ID)
+						}
+					}
+					before := append([]string(nil), ids...)
+					e.rs["object"] = &readerSet{nodes: ids, expiresAt: time.Now().Add(time.Hour)}
+					order, _ := e.treeNodes(context.Background(), view, "object", 1, key)
+					seen, selfIndex := make(map[string]bool), -1
+					for i, n := range order {
+						if seen[n.ID] || n.ID == absent {
+							t.Fatal("duplicate or ineligible reader", order)
+						}
+						seen[n.ID] = true
+						if n.ID == self.ID {
+							selfIndex = i
+						}
+						if i > 0 && positions[order[i-1].ID] >= positions[n.ID] {
+							t.Fatal("relative order changed", order)
+						}
+					}
+					if selfIndex < 1 || order[0].ID != "R" || !reflect.DeepEqual(ids, before) {
+						t.Fatal("self missing or tracker snapshot mutated")
+					}
+					for _, fanout := range []int{1, 2, 4, 8} {
+						e.fanout = fanout
+						for i := 1; i < len(order); i++ {
+							parent := hashring.Parent(i, len(order), fanout)
+							if parent < 0 || positions[order[parent].ID] >= positions[order[i].ID] {
+								t.Fatal("non-descending parent edge")
+							}
+						}
+						primary, backup := e.hedgeTargets(order, view)
+						for _, addr := range []string{primary, backup} {
+							if addr == "" {
+								continue
+							}
+							for _, m := range members {
+								if m.Addr == addr && positions[m.ID] >= positions[self.ID] {
+									t.Fatal("fallback points to later reader")
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 }

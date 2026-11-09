@@ -119,7 +119,7 @@ func TestRelayRefusalPropagatesStatus(t *testing.T) {
 
 	oid, _ := chunk.ObjectID(origin.URL + "/b")
 	key := store.BlockKey{Chunk: chunk.ChunkKey("dart", oid, 0), Block: 0}
-	url := srv.URL + "/peer/v1/block/" +
+	url := srv.URL + "/peer/v2/block/" +
 		strings.TrimPrefix(hexOf(key.Chunk), "0x") + "/0"
 
 	hreq, _ := http.NewRequest(http.MethodGet, url, nil)

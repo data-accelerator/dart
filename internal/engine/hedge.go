@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -153,31 +154,9 @@ func (e *Engine) hedgeDelay() (time.Duration, bool) {
 // peerResult is one contender's outcome in a hedged fetch.
 type peerResult struct {
 	lease store.Lease
-	data  []byte
 	held  bool
 	err   error
 	from  string
-}
-
-// fetchHedged asks primary for the block, with two distinct escalations to
-// backup:
-//
-//   - **failover** — primary definitively failed (error, or it does not hold the
-//     block). Try backup immediately. This is *not* rate limited: it is a reaction
-//     to a known-bad peer, not speculation, and throttling it would only push the
-//     read to origin while a peer that almost certainly has the block sits idle.
-//   - **hedge** — primary is merely slow (past the estimated p99). Race a
-//     duplicate. This *is* rate limited, because when a whole cluster is slow,
-//     unthrottled duplicates double its load and amplify the congestion.
-//
-// The first answer with held=true wins and the loser is cancelled. If neither
-// contender can serve the block, ok is false and the caller falls back to origin.
-func (e *Engine) fetchHedged(ctx context.Context, primary, backup string, req peer.BlockRequest, want int64) ([]byte, bool) {
-	r, ok := e.fetchHedgedResult(ctx, primary, backup, func(ctx context.Context, addr string) peerResult {
-		data, held, err := e.peer.GetValidated(ctx, addr, req, want, nil)
-		return peerResult{data: data, held: held, err: err}
-	})
-	return r.data, ok
 }
 
 func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, get func(context.Context, string) peerResult) (peerResult, bool) {
@@ -232,6 +211,7 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 		}
 	}
 
+	var lastError error
 	for contenders > 0 {
 		select {
 		case <-timerC:
@@ -257,6 +237,16 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 				return r, true
 			}
 			r.lease.Release()
+			lastError = r.err
+			if errors.Is(r.err, peer.ErrUpstreamRefused) {
+				return peerResult{err: r.err}, false
+			}
+			if errors.Is(r.err, ErrReceiveBudget) {
+				// Another already-running contender may own a usable buffer. Wait
+				// for it, but changing sources cannot fix local admission pressure.
+				timerC = nil
+				continue
+			}
 			// Definite failure: fail over now, regardless of the hedge budget.
 			if backupUsable && !backupLaunched {
 				timerC = nil
@@ -266,10 +256,10 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 				e.mx.recordFailover()
 			}
 		case <-ctx.Done():
-			return peerResult{}, false
+			return peerResult{err: ctx.Err()}, false
 		}
 	}
-	return peerResult{}, false
+	return peerResult{err: lastError}, false
 }
 
 // hedgeTargets picks the primary (tree parent) and a backup for a chunk. The
@@ -308,8 +298,9 @@ func (e *Engine) hedgeTargets(ranked []hashring.Node, view *cluster.View) (prima
 	}
 
 	if selfIdx < 0 {
-		// Not a member of this tree: the owner is our upstream, no backup above it.
-		return addrOf(0), ""
+		// No ordered reader position: only loadRouted may select a terminal
+		// supply root. Never guess an ordinary parent from a snapshot.
+		return "", ""
 	}
 
 	// Walk up the ancestor chain collecting the first two usable addresses, so an

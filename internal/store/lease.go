@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 )
 
 // Lease pins immutable bytes until Release. Move by assignment; call Clone to
@@ -13,6 +14,12 @@ type Lease struct {
 	mem        *MemStore
 	slot       int
 	generation uint64
+	heap       *heapLease
+}
+
+type heapLease struct {
+	refs    atomic.Int64
+	release func()
 }
 
 // Bytes returns a read-only view valid until this owner releases its lease.
@@ -22,20 +29,39 @@ func (l Lease) Bytes() []byte { return l.data }
 // pressure fallback. Release drops its reference for the Go collector.
 func HeapLease(data []byte) Lease { return Lease{data: data} }
 
+// HeapLeaseWithRelease takes immutable ownership of data and calls release once
+// after the last clone is released. The callback must not panic or use the data.
+// A nil callback is equivalent to HeapLease, with no reference-count allocation.
+func HeapLeaseWithRelease(data []byte, release func()) Lease {
+	if release == nil {
+		return HeapLease(data)
+	}
+	h := &heapLease{release: release}
+	h.refs.Store(1)
+	return Lease{data: data, heap: h}
+}
+
 // Clone creates an independent owner without copying the payload.
 func (l Lease) Clone() Lease {
 	if l.mem != nil {
 		l.mem.retain(l.slot, l.generation)
+	}
+	if l.heap != nil {
+		l.heap.refs.Add(1)
 	}
 	return l
 }
 
 // Release ends ownership. Releasing the same variable again is safe.
 func (l *Lease) Release() {
+	h := l.heap
 	if l.mem != nil {
 		l.mem.release(l.slot, l.generation)
 	}
 	*l = Lease{}
+	if h != nil && h.refs.Add(-1) == 0 {
+		h.release()
+	}
 }
 
 // LeaseStore optionally exposes immutable cache hits without copying.
@@ -69,7 +95,7 @@ type Reserver interface {
 
 // Reservation exclusively owns an unpublished slot. Bytes is writable until
 // Commit or Abort. Move by assignment; do not copy/share. Each reservation must
-// have exactly one Commit or Abort.
+// have exactly one Commit, Detach or Abort.
 type Reservation struct {
 	lease Lease
 	key   BlockKey
@@ -82,6 +108,15 @@ func (r Reservation) Bytes() []byte { return r.lease.data }
 
 // Abort discards an unpublished fill and releases its slot.
 func (r *Reservation) Abort() { r.lease.Release(); *r = Reservation{} }
+
+// Detach ends the fill and transfers an immutable lease without publishing a
+// cache entry. Stop writing first. The slot remains pinned until the last owner
+// releases it, just like an uncached result of a concurrent Commit.
+func (r *Reservation) Detach() Lease {
+	l := r.lease
+	*r = Reservation{}
+	return l
+}
 
 // Commit publishes a fully validated block and transfers ownership to a lease.
 // Stop writing before Commit. A concurrent publication keeps the original

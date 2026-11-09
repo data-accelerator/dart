@@ -102,12 +102,26 @@ func (h *Hybrid) Put(k BlockKey, data []byte) error {
 // may decline a borrowed block by admission policy while memory still keeps it
 // as part of the hot set, which is a legitimate outcome rather than a failure.
 func (h *Hybrid) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
+	if !h.ClassEnabled(c) {
+		// Preserve the backing store's input validation without using the hot
+		// set as an implicit replacement for a disabled persistent class.
+		return h.back.PutClass(k, data, c)
+	}
 	admitted, err := h.back.PutClass(k, data, c)
 	if err != nil {
 		return false, err
 	}
 	memAdmitted, _ := h.mem.putIfAdmitted(k, data, nil)
 	return admitted || memAdmitted, nil
+}
+
+// ClassEnabled preserves a backing store's disabled classes across both tiers.
+// Backends without a class policy retain the normal hot-set admission behavior.
+func (h *Hybrid) ClassEnabled(c Class) bool {
+	if s, ok := h.back.(interface{ ClassEnabled(Class) bool }); ok {
+		return s.ClassEnabled(c)
+	}
+	return true
 }
 
 // Has reports whether either tier holds the block.

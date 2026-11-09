@@ -12,9 +12,9 @@ package hashring
 //
 //  1. Any prefix [0..m] is a connected subtree containing the root — so the
 //     set of nodes that have joined so far always forms a valid tree.
-//  2. Every node's parent ranks strictly earlier than it, i.e. the parent's
-//     HRW score is higher, so the parent entered the stream earlier and is
-//     more likely to already hold the data (good for whole-block relay).
+//  2. Every node's parent occurs strictly earlier in the supplied sequence.
+//     The engine anchors position 0 at the preferred role-eligible owner;
+//     eligible reader descendants retain their HRW order.
 //
 // Parent and Children are exact mutual inverses because both derive their
 // structure from the single childSegments helper.

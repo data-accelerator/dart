@@ -57,8 +57,11 @@ type config struct {
 	prefetchWindow   int
 	prefetchBytes    int64
 	prefetchLoads    int
+	receiveBytes     int64
+	receiveLoads     int
 	namespace        string
 	selfID           string
+	role             cluster.Role
 	peerListen       string
 	peers            string
 	fanout           int
@@ -67,6 +70,7 @@ type config struct {
 	trackerTick      time.Duration
 	replicas         int
 	ownedFraction    float64
+	ownedFractionSet bool
 	memSize          int64
 	hedge            bool
 	hedgeRatio       float64
@@ -209,7 +213,9 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	// contract). A deferred close would run even on the abandon path.
 
 	ss := newServerSet()
-	ss.add(cfg.listen, n.client)
+	if n.client != nil {
+		ss.add(cfg.listen, n.client)
+	}
 	if n.peer != nil {
 		ss.add(cfg.peerListen, n.peer)
 	}
@@ -416,6 +422,14 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs := flag.NewFlagSet("dart", flag.ContinueOnError)
 	fs.SetOutput(out)
 	var cfg config
+	fs.Func("role", "tree role: ordinary, root-only, or non-root", func(raw string) error {
+		role, err := cluster.ParseRole(raw)
+		if err != nil {
+			return err
+		}
+		cfg.role = role
+		return nil
+	})
 	fs.BoolVar(&cfg.showVersion, "version", false, "print the version and exit")
 	fs.StringVar(&cfg.listen, "listen", ":8080", "client listen address")
 	fs.StringVar(&cfg.origin, "origin", "", "fixed upstream origin URL; empty enables prefix passthrough")
@@ -448,12 +462,14 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.BoolVar(&cfg.readerTree, "reader-tree", true, "build the distribution tree over the active reader set (per-file tracker)")
 	fs.DurationVar(&cfg.trackerTick, "tracker-tick", tracker.DefaultTick, "how often a tracker republishes a reader set")
 	fs.IntVar(&cfg.replicas, "replicas", 1, "HRW candidates that authoritatively hold a chunk (the owned budget)")
-	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "share of the cache reserved for owned blocks (0<f<1)")
+	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "owned cache share in [0,1]; 0 borrowed-only, 1 owned-only")
 	sizeVar(fs, &cfg.memSize, "mem-size", 256*chunk.MiB, "in-memory hot-set size; below one block disables the memory tier")
 	fs.BoolVar(&cfg.hedge, "hedge", true, "hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99")
 	fs.IntVar(&cfg.prefetchWindow, "prefetch-window", 2, "covering blocks in flight per client Range; 1 disables prefetch (max 64)")
 	sizeVar(fs, &cfg.prefetchBytes, "prefetch-bytes", 64*chunk.MiB, "node-wide speculative payload budget, including queued results")
 	fs.IntVar(&cfg.prefetchLoads, "prefetch-loads", 16, "node-wide outstanding speculative loads/results")
+	sizeVar(fs, &cfg.receiveBytes, "receive-bytes", 0, "live temporary block receive byte limit; 0 selects max(256MiB, block-size)")
+	fs.IntVar(&cfg.receiveLoads, "receive-loads", 64, "live temporary block receive buffer limit")
 	fs.Float64Var(&cfg.hedgeRatio, "hedge-ratio", 0.05, "max share of peer fetches allowed to hedge")
 	fs.DurationVar(&cfg.peerTimeout, "peer-timeout", peer.DefaultRequestTimeout, "per-request timeout for peer block fetches")
 	fs.IntVar(&cfg.breakerFails, "breaker-failures", peer.DefaultFailureThreshold, "consecutive peer failures that open its circuit; 0 disables breaking")
@@ -465,19 +481,21 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
-	// An explicitly-set out-of-range share is an operator error, not a "0.8
-	// please": fail startup. (0 unset means default; here Visit sees only
-	// flags actually given, so 0 can only be explicit.)
+	// Preserve explicit zero for borrowed-only caches; the API zero value
+	// without a presence bit still selects the default split.
 	var badFraction bool
 	fs.Visit(func(f *flag.Flag) {
-		// NaN slips past <=/>= comparisons; reject non-finite explicitly.
+		if f.Name == "owned-fraction" {
+			cfg.ownedFractionSet = true
+		}
+		// NaN slips past range comparisons; reject non-finite explicitly.
 		if f.Name == "owned-fraction" && (math.IsNaN(cfg.ownedFraction) || math.IsInf(cfg.ownedFraction, 0) ||
-			cfg.ownedFraction <= 0 || cfg.ownedFraction >= 1) {
+			cfg.ownedFraction < 0 || cfg.ownedFraction > 1) {
 			badFraction = true
 		}
 	})
 	if badFraction {
-		return config{}, fmt.Errorf("-owned-fraction must satisfy 0 < f < 1, got %g", cfg.ownedFraction)
+		return config{}, fmt.Errorf("-owned-fraction must satisfy 0 <= f <= 1, got %g", cfg.ownedFraction)
 	}
 	// The mirror and the prefix API share a listener, so the prefix must not
 	// shadow the registry API path.
@@ -500,10 +518,22 @@ func parsePeers(s string) ([]cluster.Member, error) {
 		if !ok || id == "" || addr == "" {
 			return nil, fmt.Errorf("bad peer %q (want id@host:port)", tok)
 		}
+		role := cluster.Ordinary
+		if host, raw, hasRole := strings.Cut(addr, "#"); hasRole {
+			var err error
+			role, err = cluster.ParseRole(raw)
+			if err != nil {
+				return nil, err
+			}
+			addr = host
+			if addr == "" {
+				return nil, fmt.Errorf("peer %q has no address", tok)
+			}
+		}
 		if !cluster.ValidMemberID(id) {
 			return nil, fmt.Errorf("bad peer %q: id must be visible ASCII without spaces or control bytes (epoch-framing safety)", tok)
 		}
-		ms = append(ms, cluster.Member{ID: id, Addr: addr, Weight: 1, State: cluster.Ready})
+		ms = append(ms, cluster.Member{ID: id, Addr: addr, Weight: 1, State: cluster.Ready, Role: role})
 	}
 	if len(ms) == 0 {
 		return nil, fmt.Errorf("no peers parsed from %q", s)
@@ -513,7 +543,7 @@ func parsePeers(s string) ([]cluster.Member, error) {
 
 // node holds a built DART node's handlers and the resource closer.
 type node struct {
-	client   http.Handler // client data plane (required)
+	client   http.Handler // client data plane; nil for root-only
 	peer     http.Handler // peer block server; nil when P2P is off
 	admin    http.Handler // metrics/admin; nil when -admin is empty
 	closer   io.Closer    // releases the store and any disk-cache directory lock
@@ -536,6 +566,12 @@ func (cs closers) Close() error {
 
 // build constructs the store, engine, and handlers from cfg.
 func build(cfg config, out io.Writer) (*node, error) {
+	if !cfg.role.Valid() {
+		return nil, fmt.Errorf("invalid node role %d", cfg.role)
+	}
+	if cfg.role != cluster.Ordinary && cfg.peers == "" && cfg.discover == "" {
+		return nil, fmt.Errorf("role %s requires -peers or -discover", cfg.role)
+	}
 	cc := chunk.Config{ChunkSize: cfg.chunkSize, BlockSize: cfg.blockSize}
 	if err := cc.Validate(); err != nil {
 		return nil, err
@@ -557,13 +593,16 @@ func build(cfg config, out io.Writer) (*node, error) {
 	upstreamBase := http.DefaultTransport.(*http.Transport).Clone()
 	upstreamBase.ResponseHeaderTimeout = 30 * time.Second
 	var upstreamRT http.RoundTripper = upstreamBase
+	if !cfg.role.CanRoot() {
+		upstreamRT = deniedOriginTransport{}
+	}
 	if cfg.registryAuth != "" {
 		creds, err := registry.LoadCredentials(cfg.registryAuth)
 		if err != nil {
 			closer.Close()
 			return nil, err
 		}
-		upstreamRT = registry.NewAuthTransport(upstreamBase, creds)
+		upstreamRT = registry.NewAuthTransport(upstreamRT, creds)
 	}
 
 	// Object identity: how a digest is recovered from an upstream URL. It feeds
@@ -589,9 +628,10 @@ func build(cfg config, out io.Writer) (*node, error) {
 			F:   &fetch.HTTPFetcher{Client: &http.Client{Transport: upstreamRT}},
 			Key: objectID,
 		},
-		Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
+		Role: cfg.role, Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
 		Hedge: cfg.hedge, HedgeRatio: cfg.hedgeRatio,
 		PrefetchWindow: cfg.prefetchWindow, PrefetchBytes: cfg.prefetchBytes, PrefetchLoads: cfg.prefetchLoads,
+		ReceiveBytes: cfg.receiveBytes, ReceiveLoads: cfg.receiveLoads,
 		Metrics: engine.NewMetrics(reg),
 	}
 	// P2P is enabled by either a static peer list or a discovery spec.
@@ -637,9 +677,9 @@ func build(cfg config, out io.Writer) (*node, error) {
 				return nil, err
 			}
 			dyn = cluster.NewDynamicProvider(cluster.DynamicConfig{
-				Self:            cluster.Member{ID: cfg.selfID, Addr: selfAddr, Weight: 1},
+				Self:            cluster.Member{ID: cfg.selfID, Addr: selfAddr, Weight: 1, Role: cfg.role},
 				Seeder:          seeder,
-				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr},
+				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr, selfRole: cfg.role},
 				RefreshInterval: cfg.discoverInterval,
 				ForgetAfter:     cfg.forgetAfter,
 				OnError:         newThrottledLogger(out),
@@ -650,6 +690,12 @@ func build(cfg config, out io.Writer) (*node, error) {
 			if err != nil {
 				closer.Close()
 				return nil, err
+			}
+			for _, m := range members {
+				if m.ID == cfg.selfID && m.Role != cfg.role {
+					closer.Close()
+					return nil, fmt.Errorf("self role %s disagrees with static peer role %s", cfg.role, m.Role)
+				}
 			}
 			eopt.Cluster = cluster.NewStaticProvider(members...)
 		}
@@ -680,9 +726,13 @@ func build(cfg config, out io.Writer) (*node, error) {
 	// A blob pulled either way is stored once, because both key on its digest.
 	prefixH := &engine.Handler{E: e, Resolve: resolver(cfg.origin, cfg.prefix)}
 	var clientH http.Handler = prefixH
+	frontendRT := upstreamRT
+	if !cfg.role.CanRoot() {
+		frontendRT = delegatedFrontendTransport{base: e.OriginTransport()}
+	}
 	if cfg.registry != "" {
 		mirror, err := registry.New(registry.Options{
-			Upstream: cfg.registry, Engine: e, Transport: upstreamRT,
+			Upstream: cfg.registry, Engine: e, Transport: frontendRT,
 		})
 		if err != nil {
 			closer.Close()
@@ -694,6 +744,9 @@ func build(cfg config, out io.Writer) (*node, error) {
 	n := &node{
 		client: clientH,
 		closer: closer,
+	}
+	if cfg.role == cluster.RootOnly {
+		n.client = nil
 	}
 	if p2p {
 		// Serve only fully obtained, validated blocks. Client-range prefetch
@@ -707,14 +760,19 @@ func build(cfg config, out io.Writer) (*node, error) {
 			mux = http.NewServeMux()
 		}
 		mux.Handle("/peer/", blocks)
+		mux.Handle(peer.MetadataPath, &peer.MetadataServer{Probe: e.ProbeSource()})
+		mux.Handle(peer.OriginPath, &peer.OriginServer{Transport: e.OriginSource(upstreamRT)})
 		if dyn != nil {
 			// Membership exchange rides the peer listener. Learn makes it
 			// bidirectional: whoever asks us also tells us who they are, so a node
 			// with nothing to seed from still joins.
 			mux.Handle(RosterRoute, &peer.RosterServer{
 				NodeID: cfg.selfID,
+				Role:   cfg.role,
 				Src:    func() peer.Roster { return rosterOf(dyn) },
-				Learn:  dyn.LearnPeer,
+				LearnMember: func(m peer.RosterMember) {
+					dyn.LearnMember(cluster.Member{ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: m.Role})
+				},
 			})
 		}
 		n.peer = mux
@@ -723,7 +781,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 	}
 	if cfg.adminAddr != "" {
 		n.admin = admin.Handler(admin.Options{
-			Registry: reg, Store: st, Cluster: eopt.Cluster, SelfID: cfg.selfID,
+			Registry: reg, Store: st, Cluster: eopt.Cluster, SelfID: cfg.selfID, Role: cfg.role,
 		})
 	}
 	return n, nil
