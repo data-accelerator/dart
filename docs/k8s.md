@@ -85,12 +85,42 @@ these shares devote capacity to the class each group normally stores. Add
 `-cache-mode=memory` through extraArgs for RAM-only operation, sizing cache.size,
 gomemlimit and container resources together. `-receive-bytes` and `-receive-loads`
 can also be set there to bound temporary uncached delivery.
-Install both in the same namespace using binaries that implement ADR-0009;
-v0.3.0 binaries do not support these roles. Keep geometry/placement settings and
+Install both in the same namespace using v0.4.0 or compatible source builds
+implementing ADR-0009. Keep geometry/placement settings and
 peer ports compatible across groups. The chart derives stable identity from the
 Kubernetes node name, so these node pools must be disjoint: two DART instances on
 one node need distinct stable identities and a separately configured deployment.
 Do not attach legacy v1 nodes to the role-aware cluster during upgrade.
+
+### Upgrading from v0.3.0 to v0.4.0
+
+This is a coordinated upgrade, including all-ordinary clusters. Peer block and
+roster endpoints use v2; roles change membership epochs and owner-rooted routing
+(ADR-0009, ADR-0010). v0.3.0 and v0.4.0 must not share a serving cluster. The
+chart's default rolling update strategy is not an online compatibility guarantee.
+
+1. Drain client traffic and allow active reads to finish. Stop the old peer
+   workloads in every supply/compute group before starting the new binaries in
+   the shared discovery domain.
+2. Build both required image variants from the v0.4.0 tag with
+   `--build-arg VERSION=v0.4.0` (`--target dart-k8s` for EndpointSlice discovery).
+   Load them on the nodes or push them to your own registry. Set the chart's
+   `image.repository` and `image.tag=v0.4.0` accordingly; no public container
+   image is published by this release, and the source-build default stays `dev`.
+3. Deploy chart 0.4.0 and the new images to all groups with compatible geometry,
+   placement and discovery settings. Use the same `-root-fanout`/`-fanout` pair
+   everywhere. `-root-fanout` now defaults to 1; setting it equal to `-fanout`
+   selects a uniform branching factor within the new owner-rooted topology.
+4. Check `/healthz` and `/admin/members` for the intended members, roles and
+   eligible roots. Root-eligible peers must reach all configured origins in the
+   namespace. Caches restart cold in every mode; allow for warm-up before
+   restoring normal traffic.
+
+Roles do not change cache budgets automatically. Keep `-owned-fraction`, cache
+capacity, receive budgets and memory limits appropriate for each workload. A
+rollback to v0.3.0 needs the same traffic drain and full-group replacement;
+rolling a single old peer back into the new cluster is unsupported. These
+coordination requirements also apply outside Kubernetes.
 
 ## 2. Concepts
 
