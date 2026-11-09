@@ -142,6 +142,20 @@ func TestReadyEndpointsOnly(t *testing.T) {
 	waitSeeds(t, s, "10.0.0.1:9000", "10.0.0.2:9000") // sorted, not-ready excluded
 }
 
+// A shared Service can select several workloads with different roles. All
+// ready peer endpoints are seeds; role capabilities are learned over roster
+// exchange, never inferred from the workload name or origin connectivity.
+func TestMixedRoleWorkloadSeeds(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		slice("supply", "shared", "peer", 9000, endpoint("10.0.0.1", boolp(true))),
+		slice("compute", "shared", "peer", 9000, endpoint("10.0.0.2", boolp(true))),
+		slice("ordinary", "shared", "peer", 9000, endpoint("10.0.0.3", nil)),
+		slice("another-cluster", "separate", "peer", 9000, endpoint("10.0.0.4", boolp(true))),
+	)
+	s := startSeeder(t, client, "dart-system/shared")
+	waitSeeds(t, s, "10.0.0.1:9000", "10.0.0.2:9000", "10.0.0.3:9000")
+}
+
 func TestEndpointChurn(t *testing.T) {
 	client := fake.NewSimpleClientset(slice("dart-abc", "dart", "peer", 9000,
 		endpoint("10.0.0.1", boolp(true))))

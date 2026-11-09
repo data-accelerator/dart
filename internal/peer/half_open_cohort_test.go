@@ -98,6 +98,7 @@ func TestHalfOpenRosterSuccessCannotConsumeDataProbe(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == RosterPath {
+			w.Header().Set(HeaderPeerRole, "0")
 			_, _ = io.WriteString(w, `{"epoch":"1","members":[]}`)
 			return
 		}

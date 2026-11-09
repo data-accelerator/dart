@@ -42,7 +42,7 @@ func TestRosterRolesBothDirections(t *testing.T) {
 }
 
 func TestRosterRejectsUnknownRoles(t *testing.T) {
-	for _, raw := range []string{"3", "-1", "256", "non-root"} {
+	for _, raw := range []string{"", "3", "-1", "256", "non-root"} {
 		t.Run(raw, func(t *testing.T) {
 			learned := false
 			s := &RosterServer{Src: func() Roster { return Roster{} }, LearnMember: func(RosterMember) { learned = true }}
@@ -64,5 +64,29 @@ func TestRosterRejectsUnknownRoles(t *testing.T) {
 	defer srv.Close()
 	if _, _, err := NewClient().FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "", ""); err == nil {
 		t.Fatal("unknown response role accepted")
+	}
+}
+
+func TestRosterRequiresExplicitConsistentRoles(t *testing.T) {
+	for _, c := range []struct {
+		name, header, body string
+	}{
+		{"missing header", "", `{"members":[{"id":"root","addr":"r:1","role":1}]}`},
+		{"missing member role", "1", `{"members":[{"id":"root","addr":"r:1"}]}`},
+		{"null role", "1", `{"members":[{"id":"root","addr":"r:1","role":null}]}`},
+		{"conflicting self role", "1", `{"members":[{"id":"root","addr":"r:1","role":2}]}`},
+		{"duplicate self", "1", `{"members":[{"id":"root","addr":"r:1","role":1},{"id":"root","addr":"r:2","role":1}]}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(HeaderNode, "root")
+				w.Header().Set(HeaderPeerRole, c.header)
+				_, _ = w.Write([]byte(c.body))
+			}))
+			defer srv.Close()
+			if _, _, err := NewClient().FetchRoster(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "", ""); err == nil {
+				t.Fatal("ambiguous capabilities accepted")
+			}
+		})
 	}
 }

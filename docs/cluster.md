@@ -155,7 +155,7 @@ Discovery is split in two, and the split is the design:
 | Half | Question | Where it runs |
 |---|---|---|
 | **Seeder** | "what addresses might be peers?" | environment-specific, pluggable — DNS, a static list, anything |
-| **Roster exchange** | "what are their stable identities, and who else do they know?" | over DART's own peer connections, identical everywhere |
+| **Roster exchange** | "what are their stable identities, declared roles, and who else do they know?" | over DART's own peer connections, identical everywhere |
 
 The reason not to push the second half into the environment too: a seed answer
 carries **addresses**, and a `Member.ID` must be a *stable* identity (never an

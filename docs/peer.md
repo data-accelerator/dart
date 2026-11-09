@@ -310,11 +310,19 @@ the breaker keeps working; a control test asserts that.
 const RosterPath = "/peer/v2/roster"
 const HeaderPeerAddr = "X-DART-Peer-Addr"
 type Roster struct { Epoch string; Members []RosterMember }
-type RosterMember struct { ID, Addr string; Weight float64 }
-type RosterServer struct { NodeID string; Src func() Roster; Learn func(id, addr string) }
+type RosterMember struct { ID, Addr string; Weight float64; Role cluster.Role }
+type RosterServer struct {
+    NodeID string
+    Role cluster.Role
+    Src func() Roster
+    Learn func(id, addr string)
+    LearnMember func(RosterMember)
+}
 // RosterServer.ServeHTTP answers GET RosterPath with Src() as JSON, and feeds
-// the fetcher's self-identification headers to Learn (hearsay).
+// the fetcher's self-identification headers to LearnMember (direct contact),
+// falling back to the legacy identity-only Learn callback when unset.
 func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, string, error)
+func (c *Client) FetchRosterMember(ctx context.Context, addr string, self RosterMember) (Roster, string, error)
 ```
 
 Membership rides the peer listener. Five properties are deliberate:
@@ -490,11 +498,17 @@ validated direct reports and takes precedence over the identity-only `Learn`
 adapter. `Client.FetchRosterMember` sends the complete report, preserving the
 existing timeout and discovery breaker-admission bypass. `FetchRoster` remains
 an ordinary-role convenience wrapper. Unknown numeric roles and invalid caller
-weights are rejected before learning. The v2 roster path is a coordinated-upgrade
+weights are rejected before learning. Identified callers must explicitly send
+their role; every response member must carry a non-null role, and the response
+role header must be present and consistent with the responder's unique entry.
+Anonymous diagnostic GETs may omit caller headers but do not teach membership.
+The v2 roster path is a coordinated-upgrade
 boundary, not implicit compatibility with the old v1 discovery protocol.
 
 `TestRosterRolesBothDirections` verifies caller roles and reconstructed responder
 roles over real HTTP; `TestRosterRejectsUnknownRoles` verifies both ingress paths.
+`TestRosterRequiresExplicitConsistentRoles` rejects missing/null capabilities,
+conflicting self-identification and duplicate responder entries.
 
 ### Terminal supply and metadata
 

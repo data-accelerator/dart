@@ -1,6 +1,9 @@
 {{- if not (has .Values.discovery.mode (list "dns" "k8s")) -}}
 {{- fail (printf "discovery.mode %q is not supported (want dns or k8s)" .Values.discovery.mode) -}}
 {{- end -}}
+{{- if not (has .Values.role (list "ordinary" "root-only" "non-root")) -}}
+{{- fail (printf "role %q is not supported (want ordinary, root-only or non-root)" .Values.role) -}}
+{{- end -}}
 # The production shape: one instance per node, reachable by node-local
 # clients over hostPort, so the client-facing hop never leaves the node.
 apiVersion: apps/v1
@@ -19,6 +22,7 @@ spec:
     metadata:
       labels:
         {{- include "dart.selectorLabels" . | nindent 8 }}
+        dart.data-accelerator.io/cluster: {{ include "dart.discoveryService" . | quote }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -50,6 +54,9 @@ spec:
           image: {{ include "dart.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
+            {{- if ne .Values.role "ordinary" }}
+            - -role={{ .Values.role }}
+            {{- end }}
             # Passthrough front end for overlaybd: /<prefix>/<full upstream URL>.
             - -listen=:{{ .Values.ports.client }}
             - -prefix={{ .Values.clientPrefix }}
@@ -90,12 +97,14 @@ spec:
             - name: GOMEMLIMIT
               value: {{ .Values.gomemlimit | quote }}
           ports:
+            {{- if ne .Values.role "root-only" }}
             - name: client
               containerPort: {{ .Values.ports.client }}
               {{- if .Values.hostPort }}
               # hostPort keeps node-local clients on the node.
               hostPort: {{ .Values.ports.client }}
               {{- end }}
+            {{- end }}
             - {name: peer, containerPort: {{ .Values.ports.peer }} }
             - {name: admin, containerPort: {{ .Values.ports.admin }} }
           readinessProbe:

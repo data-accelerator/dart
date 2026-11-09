@@ -5,10 +5,11 @@
 #
 # Only the peer port is published: node-local clients use the hostPort, and
 # the admin plane is scraped straight off the pods.
+{{- if .Values.discovery.createService }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "dart.fullname" . }}
+  name: {{ include "dart.discoveryService" . }}
   labels:
     {{- include "dart.labels" . | nindent 4 }}
 spec:
@@ -18,6 +19,11 @@ spec:
   # would begin from an empty seed set.
   publishNotReadyAddresses: true
   selector:
+    {{- if .Values.discovery.serviceName }}
+    dart.data-accelerator.io/cluster: {{ include "dart.discoveryService" . | quote }}
+    {{- else }}
     {{- include "dart.selectorLabels" . | nindent 4 }}
+    {{- end }}
   ports:
     - {name: peer, port: {{ .Values.ports.peer }}, targetPort: peer}
+{{- end }}

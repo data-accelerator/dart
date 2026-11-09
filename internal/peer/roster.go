@@ -90,7 +90,13 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no roster source", http.StatusInternalServerError)
 		return
 	}
-	role, err := parseRosterRole(r.Header.Get(HeaderPeerRole))
+	rawRole := r.Header.Get(HeaderPeerRole)
+	// Anonymous diagnostic GETs may omit capabilities. An identified caller
+	// must explicitly advertise them; missing data is not an Ordinary role.
+	if rawRole == "" && r.Header.Get(HeaderNode) == "" && r.Header.Get(HeaderPeerAddr) == "" {
+		rawRole = "0"
+	}
+	role, err := parseRosterRole(rawRole)
 	if err != nil {
 		http.Error(w, "invalid peer role", http.StatusBadRequest)
 		return
@@ -216,8 +222,8 @@ func (c *Client) FetchRosterMember(ctx context.Context, addr string, self Roster
 		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", fmt.Errorf("peer %s: roster: read: %w", addr, err)
 	}
-	var roster Roster
-	if err := json.Unmarshal(body, &roster); err != nil {
+	roster, err := decodeRoster(body)
+	if err != nil {
 		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", fmt.Errorf("peer %s: roster: decode: %w", addr, err)
 	}
@@ -244,6 +250,16 @@ func (c *Client) FetchRosterMember(ctx context.Context, addr string, self Roster
 		return Roster{}, "", err
 	}
 	responder := resp.Header.Get(HeaderNode)
+	seenSelf := false
+	for _, m := range roster.Members {
+		if responder != "" && m.ID == responder {
+			if seenSelf || m.Role != selfRole {
+				c.record(addr, permit, outcomeSoftFail)
+				return Roster{}, "", fmt.Errorf("peer: conflicting responder role")
+			}
+			seenSelf = true
+		}
+	}
 	if responder != "" && !rosterHas(roster, responder) {
 		roster.Members = append(roster.Members, RosterMember{ID: responder, Addr: addr, Weight: 1, Role: selfRole})
 	}
@@ -261,13 +277,35 @@ func rosterHas(r Roster, id string) bool {
 }
 
 func parseRosterRole(raw string) (cluster.Role, error) {
-	if raw == "" {
-		return cluster.Ordinary, nil
-	}
 	n, err := strconv.ParseUint(raw, 10, 8)
 	r := cluster.Role(n)
 	if err != nil || !r.Valid() {
 		return 0, fmt.Errorf("peer: invalid role %q", raw)
 	}
 	return r, nil
+}
+
+// decodeRoster requires every wire entry to declare a role. Keeping presence
+// separate from the numeric value prevents absent/null fields becoming Ordinary.
+func decodeRoster(body []byte) (Roster, error) {
+	var wire struct {
+		Epoch   string `json:"epoch"`
+		Members []struct {
+			ID     string        `json:"id"`
+			Addr   string        `json:"addr"`
+			Weight float64       `json:"weight"`
+			Role   *cluster.Role `json:"role"`
+		} `json:"members"`
+	}
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return Roster{}, err
+	}
+	out := Roster{Epoch: wire.Epoch, Members: make([]RosterMember, 0, len(wire.Members))}
+	for _, m := range wire.Members {
+		if m.Role == nil || !m.Role.Valid() {
+			return Roster{}, fmt.Errorf("missing or unknown member role")
+		}
+		out.Members = append(out.Members, RosterMember{ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: *m.Role})
+	}
+	return out, nil
 }

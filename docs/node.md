@@ -203,6 +203,13 @@ go test ./internal/node/ -race -count=1
 
 ### Test list (property each guards)
 
+Discovery regression coverage for ADR-0009 includes
+`TestDiscoveryMixedRolesConvergeAndChange`: real HTTP roster exchange, DNS/static
+seeds, inbound-only discovery, restart role changes and epoch convergence.
+`TestDiscoveryRejectsLegacyRoster` proves that a v1-only peer is not silently
+admitted as an ordinary v2 member. See [k8s.md](./k8s.md) for shared-Service
+configuration across role-specific workloads.
+
 The pre-extraction tests are listed in [dart.md §4](./dart.md); they now live in
 this package (`node_test.go`, `discover_test.go`, `size_test.go`). Added with
 the extraction:

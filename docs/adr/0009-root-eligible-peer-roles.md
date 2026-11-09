@@ -28,6 +28,11 @@ accept peer/control operations but no client data traffic. Non-root peers may
 relay or consume data and never contact origin. Roles are authoritative member
 configuration, independent of transient liveness. Direct self-reports replace
 roles; third-party hearsay cannot overwrite a directly confirmed role.
+Seed providers remain address-only. Both inbound and outbound roster exchange
+carry explicit roles; missing, unknown or conflicting self capabilities are
+rejected. Role-specific workloads share one discovery Service/domain and retain
+peer/admin endpoints regardless of client-listener eligibility. Discovery and
+health probes must not wait for a root to become discoverable.
 Role changes affect agreement;
 capacity/backend choices remain local. Ownership is independent of readers and
 of temporary backup-root selection. Replica placement does not actively copy data.
