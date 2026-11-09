@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -291,5 +292,90 @@ func TestReaderRefreshFailureDoesNotCache(t *testing.T) {
 	}
 	if got := e.readers(ctx, view, "object", 1); !reflect.DeepEqual(got, []string{"reader"}) || calls.Load() != 2 {
 		t.Fatal("next demand did not retry", got)
+	}
+}
+
+func cachedReaderEngine(n int) (*Engine, *cluster.View) {
+	members := make([]cluster.Member, n)
+	for i := range members {
+		members[i] = cluster.Member{ID: fmt.Sprintf("node-%04d", i), Addr: fmt.Sprintf("peer-%d:1", i), Weight: 1, State: cluster.Ready}
+	}
+	view := cluster.NewView(members)
+	e := &Engine{selfID: "reader", trackerClient: tracker.NewClient()}
+	addr, _, _ := e.trackerAddr(view, 1)
+	now := time.Now()
+	e.rs = map[string]*readerSet{"object": {nodes: []string{"reader"}, basis: readerBasis{addr: addr, epoch: view.Epoch()}, cachedAt: now, expiresAt: now.Add(time.Hour), leaseUntil: now.Add(time.Hour)}}
+	e.readers(context.Background(), view, "object", 1)
+	return e, view
+}
+
+func TestReaderSnapshotCacheHitDoesNotAllocate(t *testing.T) {
+	e, view := cachedReaderEngine(256)
+	for _, v := range []*cluster.View{view, cluster.NewView(view.Members())} {
+		// AllocsPerRun warms once. A replacement view selecting the same
+		// tracker may update the cache once, then must also avoid ranking.
+		allocs := testing.AllocsPerRun(100, func() {
+			if got := e.readers(context.Background(), v, "object", 1); len(got) != 1 {
+				panic("lost cached snapshot")
+			}
+		})
+		if allocs != 0 {
+			t.Fatalf("unchanged-view cache hit allocates: %g", allocs)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got := e.readers(ctx, v, "object", 1); got != nil {
+			t.Fatal("canceled lookup returned cached readers")
+		}
+	}
+}
+
+func BenchmarkReaderSnapshotCacheHit(b *testing.B) {
+	for _, n := range []int{32, 256, 4096} {
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			e, view := cachedReaderEngine(n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if got := e.readers(context.Background(), view, "object", 1); len(got) != 1 {
+					b.Fatal("lost cached snapshot")
+				}
+			}
+		})
+	}
+}
+
+func TestReaderSnapshotCacheTracksAddressAndLiveness(t *testing.T) {
+	for _, change := range []string{"address", "liveness"} {
+		t.Run(change, func(t *testing.T) {
+			e, oldView, _ := refreshClient(t, func(w http.ResponseWriter, r *http.Request) {
+				json.NewEncoder(w).Encode(tracker.JoinResponse{Readers: []string{"old"}, TTLMs: 6000})
+			})
+			if got := e.readers(context.Background(), oldView, "object", 1); !reflect.DeepEqual(got, []string{"old"}) {
+				t.Fatal(got)
+			}
+			fresh := *e.rs["object"]
+			fresh.expiresAt = time.Now().Add(time.Minute)
+			e.rs["object"] = &fresh
+			members := oldView.Members()
+			var want []string
+			if change == "address" {
+				s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					json.NewEncoder(w).Encode(tracker.JoinResponse{Readers: []string{"new"}, TTLMs: 6000})
+				}))
+				defer s.Close()
+				members[0].Addr = s.Listener.Addr().String()
+				want = []string{"new"}
+			} else {
+				members[0].State = cluster.Suspect
+			}
+			view := cluster.NewView(members)
+			if view.Epoch() != oldView.Epoch() {
+				t.Fatal("test must retain ordering epoch")
+			}
+			if got := e.readers(context.Background(), view, "object", 1); !reflect.DeepEqual(got, want) {
+				t.Fatal("reused stale tracker selection", got, want)
+			}
+		})
 	}
 }

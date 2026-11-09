@@ -164,6 +164,8 @@ do not move ownership; loss of all usable roots can still fail a cache miss.
   Waiting callers can cancel independently. A canceled refresh leader permits a
   live waiter to retry; an abandoned or older response cannot overwrite a newer
   installed entry. A failed JOIN is shared by its waiters and is not cached.
+  Fresh hits reuse tracker selection for the same immutable membership view; a
+  new view rechecks address/liveness even if its ordering epoch is unchanged.
 
 ## 7. Stability Contract
 
@@ -224,6 +226,8 @@ Engine-side (in `internal/engine`):
 | `TestReaderRefreshLeaseBounds` | small, missing and overflowing grants preserve cache lease bounds |
 | `TestReaderRefreshBackoffAndLeaseReset` | deterministic doubling, half-lease cap, and restart after idle lease expiry |
 | `TestReaderRefreshFailureDoesNotCache` | failed JOIN is shared and a later demand can retry |
+| `TestReaderSnapshotCacheHitDoesNotAllocate` | stable-view hits avoid allocation; canceled lookups return no cached readers |
+| `TestReaderSnapshotCacheTracksAddressAndLiveness` | address and liveness changes invalidate selection despite unchanged epoch |
 
 ## 9. Limitations & TODO
 
@@ -286,3 +290,12 @@ DART_TRACKER_STARTUP_EXPERIMENT=1 go test ./internal/engine \
 ```
 
 Anchor: `internal/engine/tracker_experiment_test.go::TestTrackerStartupExperiment`.
+
+`BenchmarkReaderSnapshotCacheHit` isolates the stable-view cache-hit path at
+32, 256 and 4096 members. It reports time and allocations separately from the
+network experiment; a stable hit requires zero allocations. View replacement
+may allocate once to remember an unchanged tracker selection.
+
+```bash
+go test ./internal/engine -run '^$' -bench '^BenchmarkReaderSnapshotCacheHit$' -benchmem
+```

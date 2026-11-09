@@ -40,6 +40,7 @@ type readerSet struct {
 	leaseUntil          time.Time
 	interval            time.Duration
 	basis               readerBasis
+	view                *cluster.View // immutable tracker-selection input
 }
 
 func readerRefreshDelay(previous, ceiling time.Duration) time.Duration {
@@ -78,6 +79,19 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 	if e.trackerClient == nil && e.trackerReg == nil {
 		return nil
 	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	// Reuse tracker selection only for the identical immutable view. Epoch
+	// alone excludes address and liveness changes, which can change the tracker.
+	now := time.Now()
+	e.rsMu.Lock()
+	if cached := e.rs[objectID]; cached != nil && cached.view == view && now.Before(cached.expiresAt) {
+		nodes := cached.nodes
+		e.rsMu.Unlock()
+		return nodes
+	}
+	e.rsMu.Unlock()
 	addr, self, ok := e.trackerAddr(view, fileKey)
 	if !ok || (self && e.trackerReg == nil) || (!self && e.trackerClient == nil) {
 		return nil
@@ -92,6 +106,13 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 		e.rsMu.Lock()
 		previous := e.rs[objectID]
 		if previous != nil && previous.basis == basis && now.Before(previous.expiresAt) {
+			// A newly published view may select the same tracker. Remember it
+			// without changing the refresh deadline or publication age.
+			if previous.view != view {
+				updated := *previous
+				updated.view = view
+				e.rs[objectID] = &updated
+			}
 			nodes := previous.nodes
 			e.rsMu.Unlock()
 			return nodes
@@ -161,7 +182,7 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 				// installed by a more recently started refresh for this object.
 				if current := e.rs[objectID]; current == nil || !current.cachedAt.After(now) {
 					e.rs[objectID] = &readerSet{nodes: resp.Readers, epoch: resp.EpochS, cachedAt: now,
-						expiresAt: now.Add(interval), leaseUntil: now.Add(lease), interval: interval, basis: basis}
+						expiresAt: now.Add(interval), leaseUntil: now.Add(lease), interval: interval, basis: basis, view: view}
 				}
 				e.mx.recordReaderSnapshot(len(resp.Readers))
 				c.nodes = resp.Readers

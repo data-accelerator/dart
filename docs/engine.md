@@ -43,6 +43,10 @@ cancel independently and retry after leader cancellation. Failed refreshes are
 not cached, and late responses cannot replace a more recently installed view.
 Entries past their lease are swept as the map grows beyond 256 objects. When
 the tracker is unreachable that lookup routes to the preferred owner.
+A fresh cache hit reuses tracker selection for the identical immutable membership
+view, avoiding full-cluster ranking and allocations. A replacement view is
+re-evaluated even when its ordering epoch is unchanged, because addresses and
+liveness are not part of that epoch.
 See [tracker measurements](./tracker.md#startup-measurement-and-tradeoffs) for
 startup traffic and the additional control-plane request cost.
 
