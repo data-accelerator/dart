@@ -190,8 +190,9 @@ invoke the optional validator with the length and timeout-bounded request contex
 always uses bounded `GetInto` or `GetValidated`. Misses, HTTP errors and interrupted bodies do
 not invoke validation.
 Validation failure returns no data and `held=false`, wraps the error and opens
-the current-generation circuit before another request can record success. The
-validator runs inline and must respect its context. Time and caller-owned memory
+the current-generation circuit before another request can record success, except
+context errors: caller cancellation/deadlines settle neutrally, and client-owned
+context timeouts count as soft failures. The validator runs inline and must respect its context. Time and caller-owned memory
 are O(expected block length), plus validator work. The engine supplies expected
 geometry.
 
@@ -436,7 +437,7 @@ Managed-memory regression coverage:
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **83.1%** of statements (Go 1.27.3).
+- **Coverage**: **83.0%** of statements (Go 1.27.3).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
 - **Reproduce**:
@@ -597,7 +598,8 @@ another delegated request. The body belongs to the caller and must be closed.
 duration or time a downstream consumer spends between reads. Existing HTTP
 transport/caller-context bounds also apply. Close cancels the operation and
 releases the breaker admission neutrally if the body has not completed. Internal
-idle timeouts count as failures; caller deadlines remain neutral. A source-body failure remains detectable as a
+idle timeouts and configured HTTP client/transport timeouts count as failures;
+caller deadlines remain neutral. A source-body failure remains detectable as a
 truncated response without quarantining the honest supplying root. The trusted
 domain assumption A2 applies: this endpoint adds no peer authentication or
 credential-isolation boundary.
@@ -622,3 +624,7 @@ for pre-dispatch cancellation. `TestCallerDeadlineIsNeutral`,
 caller deadlines, validation cancellation and exactly-once early close.
 `TestOriginEmptyResponseRecoversWithoutRead` verifies that complete HEAD/empty
 responses recover even when the caller closes without reading.
+
+`TestOriginHTTPClientBodyTimeoutIsFailure` verifies a configured HTTP client's
+body deadline cannot falsely recover the peer when the wrapper context is live.
+Empty-response coverage includes HTTP timeout wrappers and HEAD/204/304 semantics.

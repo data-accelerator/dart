@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -125,9 +126,11 @@ func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response
 	}
 	resp.Header.Del(HeaderOriginResponse)
 	resp.Request = req
-	if resp.Body == http.NoBody {
+	if req.Method == http.MethodHead || resp.ContentLength == 0 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified || resp.Body == http.NoBody {
 		// HEAD and explicitly empty responses are already complete. Closing
 		// them without a Read is not abandonment of an unfinished stream.
+		// Use HTTP semantics because http.Client.Timeout wraps http.NoBody.
+		resp.Body.Close()
 		cancel()
 		c.record(addr, permit, outcomeAnswered)
 		return resp, nil
@@ -163,14 +166,18 @@ func (b *originBody) Read(p []byte) (int, error) {
 		// An origin stream error is not a malformed cached block. Caller
 		// abandonment is neutral; our own idle deadline remains a failure.
 		o := outcomeAnswered
-		if b.ctx.Err() != nil {
+		var timeout net.Error
+		if errors.Is(context.Cause(b.ctx), context.DeadlineExceeded) {
+			err = context.DeadlineExceeded
+		}
+		switch {
+		case b.caller.Err() != nil:
 			o = outcomeNeutral
-			if errors.Is(context.Cause(b.ctx), context.DeadlineExceeded) {
-				err = context.DeadlineExceeded
-				if b.caller.Err() == nil {
-					o = outcomeSoftFail
-				}
-			}
+		case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+			// http.Client.Timeout and transport deadlines need not cancel ctx.
+			o = outcomeSoftFail
+		case b.ctx.Err() != nil:
+			o = outcomeNeutral
 		}
 		b.once.Do(func() { b.finish(o) })
 	}

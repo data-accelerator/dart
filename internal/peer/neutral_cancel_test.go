@@ -89,14 +89,23 @@ func TestBreakerNeutralStaleCompletion(t *testing.T) {
 	if b.State("peer") != BreakerClosed {
 		t.Fatal("current probe could not recover")
 	}
-	// Entry identity must also protect a replacement with the same generation.
+	// Entry identity must protect a replacement even with the same generation.
+	b = NewBreaker(BreakerOptions{Now: clk.now})
+	b.RecordHardFailure("peer")
+	clk.advance(DefaultBreakerCooldown)
 	old, _ = b.begin("peer", true)
 	delete(b.peers, "peer")
-	b.RecordFailure("peer")
-	b.record("peer", outcomeNeutral, &old)
-	if b.peers["peer"].failures != 1 {
-		t.Fatal("cancellation altered replacement entry")
+	b.RecordHardFailure("peer")
+	clk.advance(DefaultBreakerCooldown)
+	current, _ = b.begin("peer", true)
+	if old.generation != current.generation {
+		t.Fatal("test requires matching generations")
 	}
+	b.record("peer", outcomeNeutral, &old)
+	if b.State("peer") != BreakerHalfOpen || b.peers["peer"].inFlight != 1 {
+		t.Fatal("cancellation consumed replacement entry's probe")
+	}
+	b.record("peer", outcomeAnswered, &current)
 }
 
 func TestRosterNeutralCannotConsumeDataProbe(t *testing.T) {
@@ -255,10 +264,18 @@ func TestOriginEarlyCloseIsNeutral(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	resp.Body.Close() // completion remains exactly once
 	if c.Breaker.State(addr) != BreakerHalfOpen || c.Breaker.peers[addr].inFlight != 0 || c.Breaker.peers[addr].failures != 1 {
 		t.Fatal("early close falsely recovered or leaked")
 	}
+	p, ok := c.Breaker.begin(addr, true)
+	if !ok {
+		t.Fatal("close did not release admission")
+	}
+	resp.Body.Close() // must not consume the new probe's slot
+	if c.Breaker.peers[addr].inFlight != 1 {
+		t.Fatal("second close released another probe")
+	}
+	c.Breaker.record(addr, outcomeAnswered, &p)
 }
 
 // Wrap the real HTTP body to synchronize cancellation after the consumer enters
@@ -321,28 +338,71 @@ func TestValidationCancellationIsNeutral(t *testing.T) {
 }
 
 func TestOriginEmptyResponseRecoversWithoutRead(t *testing.T) {
-	for _, method := range []string{http.MethodGet, http.MethodHead} {
-		t.Run(method, func(t *testing.T) {
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set(HeaderOriginResponse, "1")
-				w.Header().Set("Content-Length", "0")
-			}))
-			defer srv.Close()
-			clk := &brkClock{}
-			c := NewClient()
-			c.Breaker = NewBreaker(BreakerOptions{Now: clk.now})
-			addr := srv.Listener.Addr().String()
-			c.Breaker.RecordHardFailure(addr)
-			clk.advance(DefaultBreakerCooldown)
-			req, _ := http.NewRequest(method, "http://origin/file", nil)
-			resp, err := c.RoundTripOrigin(req, addr)
-			if err != nil {
-				t.Fatal(err)
-			}
-			resp.Body.Close()
-			if c.Breaker.State(addr) != BreakerClosed {
-				t.Fatal("complete empty response did not recover")
-			}
-		})
+	for _, tc := range []struct {
+		name, method, length string
+		status               int
+	}{
+		{"empty GET", http.MethodGet, "0", http.StatusOK},
+		{"HEAD", http.MethodHead, "100", http.StatusOK},
+		{"no content", http.MethodGet, "", http.StatusNoContent},
+		{"not modified", http.MethodGet, "100", http.StatusNotModified},
+	} {
+		for _, clientTimeout := range []time.Duration{0, 5 * time.Second} {
+			t.Run(tc.name+"/"+clientTimeout.String(), func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set(HeaderOriginResponse, "1")
+					if tc.length != "" {
+						w.Header().Set("Content-Length", tc.length)
+					}
+					w.WriteHeader(tc.status)
+				}))
+				defer srv.Close()
+				clk := &brkClock{}
+				c := NewClient()
+				c.HTTP.Timeout = clientTimeout
+				c.Breaker = NewBreaker(BreakerOptions{Now: clk.now})
+				addr := srv.Listener.Addr().String()
+				c.Breaker.RecordHardFailure(addr)
+				clk.advance(DefaultBreakerCooldown)
+				req, _ := http.NewRequest(tc.method, "http://origin/file", nil)
+				resp, err := c.RoundTripOrigin(req, addr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				if c.Breaker.State(addr) != BreakerClosed {
+					t.Fatal("complete empty response did not recover")
+				}
+			})
+		}
+	}
+}
+
+func TestOriginHTTPClientBodyTimeoutIsFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(HeaderOriginResponse, "1")
+		w.Header().Set("Content-Length", "100")
+		_, _ = io.WriteString(w, "x")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	c := NewClient()
+	c.Timeout = -1
+	c.HTTP.Timeout = time.Second
+	clk := &brkClock{}
+	c.Breaker = NewBreaker(BreakerOptions{Now: clk.now})
+	addr := srv.Listener.Addr().String()
+	c.Breaker.RecordHardFailure(addr)
+	clk.advance(DefaultBreakerCooldown)
+	req, _ := http.NewRequest(http.MethodGet, "http://origin/file", nil)
+	resp, err := c.RoundTripOrigin(req, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if !errors.Is(err, context.DeadlineExceeded) || req.Context().Err() != nil || c.Breaker.State(addr) != BreakerOpen {
+		t.Fatalf("client-owned timeout falsely recovered: err=%v caller=%v breaker=%v", err, req.Context().Err(), c.Breaker.State(addr))
 	}
 }

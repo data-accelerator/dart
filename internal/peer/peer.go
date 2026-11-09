@@ -428,8 +428,10 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 }
 
 // GetValidated rejects negative expected lengths and reads at most expected+1
-// bytes before validating a complete block and recording peer success. A validation error opens the current-generation circuit and
-// returns no bytes. The callback runs inline with the bounded request context.
+// bytes before validating a complete block and recording peer success. Validation
+// errors return no bytes and open the current-generation circuit, except context
+// errors: caller cancellation is neutral and client-owned timeouts are failures.
+// The callback runs inline with the bounded request context.
 func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
 	if expected < 0 {
 		return nil, false, errors.New("peer: negative expected block length")
