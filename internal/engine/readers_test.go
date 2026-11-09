@@ -229,7 +229,10 @@ func TestReaderSnapshotChurnPreservesStrictOrder(t *testing.T) {
 					}
 					before := append([]string(nil), ids...)
 					addr, _, _ := e.trackerAddr(view, 1)
-					e.rs["object"] = &readerSet{nodes: ids, expiresAt: time.Now().Add(time.Hour), basis: readerBasis{addr: addr, epoch: view.Epoch()}}
+					e.rs["object"] = &readerSet{nodes: ids, expiresAt: time.Now().Add(time.Hour), basis: readerBasis{addr: addr, epoch: view.Epoch()}, view: view}
+					if got := e.readers(context.Background(), view, "object", 1); !reflect.DeepEqual(got, ids) {
+						t.Fatal("fixture snapshot was bypassed", got, ids)
+					}
 					order, _ := e.treeNodes(context.Background(), view, "object", 1, key)
 					seen, selfIndex := make(map[string]bool), -1
 					for i, n := range order {
