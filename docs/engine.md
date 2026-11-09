@@ -509,6 +509,8 @@ Managed-memory regression coverage:
 
 | Test | Property |
 |---|---|
+| `TestRolePlacementAndTreeGolden` | independent weighted mixed-role owners/trees, 25 cases, membership/reader permutations, fanout 1/2/4, no snapshot and sole-reader cases |
+| `TestRoleGoldenAgainstPythonReference` | `DART_GOLDEN_REF=1` regenerates and checks `testdata/roles.json` with `contrib/golden/role_reference.py`; CI runs this cross-check |
 | `TestReceiveBudgetTracksSharedDelivery` | disabled-class concurrent readers share one refill; final lease returns capacity; exhaustion prevents source I/O and updates metrics |
 | `TestReceiveBudgetPrefetchDemandProgress` | one-buffer byte/load limits preserve ordered long-Range delivery without repeated source transfers |
 | `TestReceiveBudgetFailureAndCancellation` | failed/truncated/canceled fills and failed writes release capacity |

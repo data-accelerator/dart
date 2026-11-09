@@ -45,7 +45,7 @@ func (e *Engine) trackerAddr(view *cluster.View, fileKey uint64) (addr string, s
 // readers returns the active reader set for the object, JOINing the tracker (or
 // the local registry when this node is the tracker) and caching the result for
 // readerSetTTL. It returns nil when no reader set is available, in which case
-// callers fall back to routing over all Ready members.
+// callers with tracking enabled route directly to the preferred owner.
 func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID string, fileKey uint64) []string {
 	if e.trackerClient == nil && e.trackerReg == nil {
 		return nil
@@ -78,7 +78,7 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 		var err error
 		resp, err = e.trackerClient.Join(ctx, addr, objectID, e.selfID, 0)
 		if err != nil {
-			// Tracker unreachable: fall back to all-member routing rather than
+			// Tracker unreachable: route directly to the owner rather than
 			// failing the read (S is soft state).
 			return nil
 		}
@@ -114,8 +114,9 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 //
 // Preferring the reader set means a node's parent is another node that actually
 // wants the data (so it will hold it or be fetching it), instead of an arbitrary
-// member that must fetch-on-behalf. If the reader set is unavailable or too
-// small to form a tree, it falls back to all Ready members.
+// member that must fetch-on-behalf. The owner always remains first. A missing
+// tracked snapshot routes directly to it; tracking disabled uses all eligible
+// Ready readers as descendants. Root-only peers never become descendants.
 func (e *Engine) treeNodes(ctx context.Context, view *cluster.View, objectID string, fileKey, chunkKey uint64) ([]hashring.Node, bool) {
 	roots := hashring.Rank(chunkKey, view.Roots())
 	if len(roots) == 0 {

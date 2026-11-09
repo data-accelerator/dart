@@ -781,7 +781,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 	}
 	if cfg.adminAddr != "" {
 		n.admin = admin.Handler(admin.Options{
-			Registry: reg, Store: st, Cluster: eopt.Cluster, SelfID: cfg.selfID,
+			Registry: reg, Store: st, Cluster: eopt.Cluster, SelfID: cfg.selfID, Role: cfg.role,
 		})
 	}
 	return n, nil

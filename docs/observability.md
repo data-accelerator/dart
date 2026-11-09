@@ -115,13 +115,13 @@ and `engine.RegisterPeerMetrics(reg, breaker)`; `cmd/dart` calls both.
 |---|---|---|
 | GET | `/healthz` | `ok` (text) |
 | GET | `/metrics` | Prometheus text format (`text/plain; version=0.0.4`) |
-| GET | `/admin/stats` | JSON: `self_id`, `cached_blocks` |
-| GET | `/admin/members` | JSON: `self_id`, `epoch`, `members[]{id,addr,weight,state}` |
-| GET | `/admin/ring?key=<uint64>&n=<topN>` | JSON: HRW placement order for a chunk key (`n` default 8) |
+| GET | `/admin/stats` | JSON: `self_id`, `role`, `cached_blocks` |
+| GET | `/admin/members` | JSON: `self_id`, `epoch`, `eligible_roots`, `eligible_readers`, `members[]{id,addr,weight,state,role}` |
+| GET | `/admin/ring?key=<uint64>&n=<topN>` | JSON: root-eligible HRW placement order, including role per entry (`n` default 8) |
 
 ```go
 h := admin.Handler(admin.Options{
-    Registry: reg, Store: st, Cluster: prov, SelfID: "A",
+    Registry: reg, Store: st, Cluster: prov, SelfID: "A", Role: cluster.Ordinary,
 })
 ```
 
@@ -130,7 +130,13 @@ Behavior notes:
 - Every dependency is optional: an endpoint whose dependency is nil returns
   `503` rather than preventing startup.
 - `/admin/ring` requires a decimal `uint64` key; anything else is `400`. It ranks
-  only **Ready** members (matching placement) and reports each node's address.
+  only root-eligible **Ready** members (matching placement) and reports each
+  node's address and role. Rank 0 is the preferred owner/root; readers do not
+  change this order. A valid view with no roots returns an empty order.
+- `Options.Role` reports the configured local capability in stats, even before
+  discovery converges (zero means Ordinary). Membership reports each discovered
+  role and Ready root/reader counts. These distinguish an empty supply set from
+  transport/source errors; `/healthz` remains live while no roots are available.
 - `epoch` and `key` are rendered as JSON **strings** to avoid float64 precision
   loss for large uint64 values.
 - The admin handler uses `http.ServeMux`: safe here because no admin path carries
@@ -208,6 +214,7 @@ go test ./internal/metrics/ ./internal/admin/ -race -count=1
 | `admin.TestStats` | `cached_blocks` reflects the store |
 | `admin.TestMembers` | epoch, members, state names |
 | `admin.TestRing` | Ready-only ranking, ranks, `n` limit, determinism |
+| `admin.TestRoleDiagnostics` | mixed roles in members/stats; placement excludes non-roots; zero-root views remain live |
 | `admin.TestRingBadKey` | missing/non-numeric/negative key → 400 |
 | `admin.Test*Unconfigured` | nil dependency → 503 |
 
