@@ -15,9 +15,9 @@ network and media allow.
 Core ideas: cloud-native peer discovery (K8s, stable identities, TCP only, no
 broadcast); explicit ordinary/root-only/non-root roles; weighted Rendezvous
 Hashing (HRW) over root-eligible peers for chunk placement; an owner-rooted
-preorder full k-ary tree with eligible active readers as descendants for P2P
-distribution (ADR-0009); two-tier cache (owned shards vs borrowed hot copies); mem/disk/
-hybrid tiers.
+preorder tree with separate root/descendant fanout (ADR-0011) and eligible
+active readers as descendants for P2P distribution (ADR-0009); two-tier cache
+(owned shards vs borrowed hot copies); mem/disk/hybrid tiers.
 
 ## Repository layout
 

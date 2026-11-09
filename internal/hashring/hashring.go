@@ -2,8 +2,8 @@
 // primitives:
 //
 //   - weighted Rendezvous Hashing (HRW) for chunk placement, and
-//   - a preorder full k-ary tree derived from the HRW ordering, used for the
-//     P2P distribution topology.
+//   - a preorder k-ary tree with an optional separate root degree, derived
+//     from the supplied ordering for the P2P distribution topology.
 //
 // Determinism is a load-bearing invariant of the whole system: because there
 // is no coordinator, every node must independently compute a byte-identical

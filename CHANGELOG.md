@@ -9,6 +9,11 @@ every release's upgrade notes.
 
 ### Added
 
+- Configure the preferred owner with `-root-fanout` (default 1), independently
+  of descendant `-fanout` (default 2), reducing normal first-hop replication
+  (#100, ADR-0011). Hedging, root fallback and snapshot churn remain unrestricted
+  by this topology setting.
+
 - Support ordinary, root-only and non-root peers (#95, ADR-0009). Chunk owners
   anchor distribution; root-only peers have no local client listener, while
   non-root peers obtain blocks, Size/Range metadata, Registry control responses
@@ -38,6 +43,11 @@ every release's upgrade notes.
   for fallback after the active contender releases capacity.
 
 ### Upgrade notes
+
+- The default root degree changes to 1. Set `-root-fanout` equal to `-fanout`
+  on all nodes to retain the uniform tree. Upgrade all participants before
+  enabling the new shared configuration. No Hash64, HRW, ChunkKey, membership
+  epoch framing or peer wire fields change for this option.
 
 - Coordinated upgrade required: peer block/roster paths use v2, roles participate
   in a new membership epoch, and owner-rooted trees change routing even for

@@ -306,7 +306,7 @@ func (e *Engine) hedgeTargets(ranked []hashring.Node, view *cluster.View) (prima
 	// Walk up the ancestor chain collecting the first two usable addresses, so an
 	// open circuit anywhere above us is skipped instead of stalling the branch.
 	var usable []string
-	for idx := hashring.Parent(selfIdx, len(ranked), e.fanout); idx >= 0 && len(usable) < 2; idx = hashring.Parent(idx, len(ranked), e.fanout) {
+	for idx := hashring.ParentWithRootFanout(selfIdx, len(ranked), e.fanout, e.rootFanout); idx >= 0 && len(usable) < 2; idx = hashring.ParentWithRootFanout(idx, len(ranked), e.fanout, e.rootFanout) {
 		if a := addrOf(idx); a != "" {
 			usable = append(usable, a)
 		}

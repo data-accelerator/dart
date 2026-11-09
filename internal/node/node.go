@@ -65,6 +65,7 @@ type config struct {
 	peerListen       string
 	peers            string
 	fanout           int
+	rootFanout       int
 	adminAddr        string
 	readerTree       bool
 	trackerTick      time.Duration
@@ -457,7 +458,8 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 			"membership; deliberately much larger than -discover-interval because removal "+
 			"re-runs placement while routing around a dead peer is already immediate")
 	fs.StringVar(&cfg.peers, "peers", "", "comma-separated members id@host:port (incl. self) to enable P2P")
-	fs.IntVar(&cfg.fanout, "fanout", 2, "distribution-tree branching factor (children per node)")
+	fs.IntVar(&cfg.fanout, "fanout", 2, "distribution-tree branching factor below the preferred root")
+	fs.IntVar(&cfg.rootFanout, "root-fanout", 1, "preferred root branching factor (normal tree children, not a transfer limit)")
 	fs.StringVar(&cfg.adminAddr, "admin", ":9100", "admin/metrics listen address; empty disables")
 	fs.BoolVar(&cfg.readerTree, "reader-tree", true, "build the distribution tree over the active reader set (per-file tracker)")
 	fs.DurationVar(&cfg.trackerTick, "tracker-tick", tracker.DefaultTick, "how often a tracker republishes a reader set")
@@ -480,6 +482,9 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 		"only treat \"<algo>:<hex>\" paths as content-addressed; disables recognizing Docker Distribution's object-storage layout")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
+	}
+	if cfg.rootFanout < 1 {
+		return config{}, fmt.Errorf("-root-fanout must be at least 1")
 	}
 	// Preserve explicit zero for borrowed-only caches; the API zero value
 	// without a presence bit still selects the default split.
@@ -628,7 +633,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 			F:   &fetch.HTTPFetcher{Client: &http.Client{Transport: upstreamRT}},
 			Key: objectID,
 		},
-		Role: cfg.role, Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
+		Role: cfg.role, Namespace: cfg.namespace, Fanout: cfg.fanout, RootFanout: cfg.rootFanout, Replicas: cfg.replicas,
 		Hedge: cfg.hedge, HedgeRatio: cfg.hedgeRatio,
 		PrefetchWindow: cfg.prefetchWindow, PrefetchBytes: cfg.prefetchBytes, PrefetchLoads: cfg.prefetchLoads,
 		ReceiveBytes: cfg.receiveBytes, ReceiveLoads: cfg.receiveLoads,

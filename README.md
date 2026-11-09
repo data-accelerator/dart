@@ -67,9 +67,11 @@ Three granularities, because one size cannot serve all three jobs:
 - **Placement** uses weighted [rendezvous hashing](https://en.wikipedia.org/wiki/Rendezvous_hashing)
   (HRW). Removing one node of N moves only ~1/N of the keyspace, so a node failure
   does not reshuffle the cluster.
-- **The distribution tree** is that same HRW ranking read as a pre-order traversal
-  of a k-ary tree. Parent and child are computed arithmetically from the ranking —
-  no tree is built or agreed upon, and every node derives the same one.
+- **The distribution tree** anchors at the preferred owner, followed by HRW-ranked
+  eligible readers. `-root-fanout=1` gives the owner one normal child;
+  `-fanout=2` builds binary reader subtrees below it. Both are configurable
+  cluster-wide. Parent and child are computed arithmetically from the same
+  sequence and settings, without a topology coordinator.
 - **Whole-block relay and bounded prefetch**: each node validates a complete block
   before sending it. Long client ranges pipeline up to two covering blocks,
   delivering them in order. Node-wide speculative byte/load budgets bound queued

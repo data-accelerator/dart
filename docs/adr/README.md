@@ -134,3 +134,4 @@ acceptable in current law — it is a pointer, not a narrative.
 | [0008](./0008-borrow-managed-memory-blocks.md) | Borrow managed memory blocks through validated publication and sending | superseded by ADR-0010 |
 | [0009](./0009-root-eligible-peer-roles.md) | Anchor distribution at role-eligible owners | accepted |
 | [0010](./0010-coalesce-directed-block-loads.md) | Coalesce directed normal block loads across hops | accepted |
+| [0011](./0011-separate-root-fanout.md) | Configure root fanout independently of reader branching | accepted |

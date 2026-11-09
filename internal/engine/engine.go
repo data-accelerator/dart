@@ -61,10 +61,13 @@ type Options struct {
 	SelfID  string
 	// Role is the local node capability, independent of transient membership.
 	Role cluster.Role
-	// Fanout is the distribution-tree branching factor (children per node) used
-	// when routing a miss to the parent; default 2. Larger fanout = shallower
-	// tree (owner has more direct children).
+	// Fanout is the distribution-tree branching factor below the preferred
+	// owner; default 2. Larger fanout makes descendant subtrees shallower.
 	Fanout int
+	// RootFanout is the preferred owner's branching factor; zero defaults to 1.
+	// Negative values are invalid. This limits normal tree children, not hedge
+	// or fallback requests. Set equal to Fanout for a uniform tree.
+	RootFanout int
 
 	// Replicas is how many HRW candidates count as authoritative holders of a
 	// chunk (the owned budget); default 1. Blocks this node is not in the top-R
@@ -126,14 +129,15 @@ type Engine struct {
 	ns       string
 
 	// P2P (optional)
-	cluster  cluster.Provider
-	peer     *peer.Client
-	selfID   string
-	role     cluster.Role
-	fanout   int
-	replicas int
-	p2p      bool
-	mx       *Metrics
+	cluster    cluster.Provider
+	peer       *peer.Client
+	selfID     string
+	role       cluster.Role
+	fanout     int
+	rootFanout int
+	replicas   int
+	p2p        bool
+	mx         *Metrics
 
 	// Tail-latency hedging.
 	hedgeEnabled bool
@@ -173,6 +177,9 @@ func New(opt Options) (*Engine, error) {
 	}
 	if !opt.Role.Valid() {
 		return nil, errors.New("engine: invalid node role")
+	}
+	if opt.RootFanout < 0 {
+		return nil, errors.New("engine: root fanout must not be negative")
 	}
 	if opt.Store == nil || opt.Fetcher == nil {
 		return nil, errors.New("engine: Store and Fetcher are required")
@@ -245,6 +252,10 @@ func New(opt Options) (*Engine, error) {
 	}
 	if e.fanout < 1 {
 		e.fanout = 2
+	}
+	e.rootFanout = opt.RootFanout
+	if e.rootFanout == 0 {
+		e.rootFanout = 1
 	}
 	if e.replicas < 1 {
 		e.replicas = 1
