@@ -369,9 +369,12 @@ func TestOriginEmptyResponseRecoversWithoutRead(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				resp.Body.Close()
+				defer resp.Body.Close()
 				if c.Breaker.State(addr) != BreakerClosed {
-					t.Fatal("complete empty response did not recover")
+					t.Fatal("complete empty response did not recover at headers")
+				}
+				if data, err := io.ReadAll(resp.Body); err != nil || len(data) != 0 {
+					t.Fatalf("completed response is not readable empty body: %q %v", data, err)
 				}
 			})
 		}

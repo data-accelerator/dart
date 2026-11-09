@@ -131,6 +131,7 @@ func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response
 		// them without a Read is not abandonment of an unfinished stream.
 		// Use HTTP semantics because http.Client.Timeout wraps http.NoBody.
 		resp.Body.Close()
+		resp.Body = http.NoBody
 		cancel()
 		c.record(addr, permit, outcomeAnswered)
 		return resp, nil
