@@ -178,7 +178,7 @@ func pauseHedgeArming(e *Engine) func() {
 	return func() { once.Do(e.latency.mu.Unlock) }
 }
 
-// Reproduce the alternative valid schedule behind the pressure-test flake:
+// Reproduce a possible schedule that invalidates the pressure-test assumption:
 // primary is paused before temporary admission, so the root hedge wins the only
 // buffer. There must be no rejected admission to wait for in this schedule.
 func TestRootHedgeCanWinBeforeParentAdmission(t *testing.T) {
