@@ -33,6 +33,11 @@ every release's upgrade notes.
 
 ### Fixed
 
+- Settle canceled peer requests neutrally: release probe admission without
+  erasing failures or falsely recovering a circuit (#104, ADR-0013). Apply the
+  same accounting to block reads, roster exchange and delegated-origin bodies;
+  client-owned timeouts still count as failures.
+
 - Publish new tracker readers immediately and refresh active client snapshots
   with bounded, demand-driven backoff (#102, ADR-0012). Concurrent JOINs share
   one request; departures remain tick-batched and no background polling is added.

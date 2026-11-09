@@ -338,6 +338,8 @@ const (
 	// all the time in a distributed cache, so counting it would trip the breaker
 	// on healthy peers.
 	outcomeAnswered outcome = iota
+	// outcomeNeutral releases admission without evidence of peer health.
+	outcomeNeutral
 	// outcomeSoftFail is a peer that is reachable but did not deliver: a timeout,
 	// an unexpected status, a truncated body. It might be a transient hiccup, so
 	// it spends one unit of the failure budget.
@@ -364,6 +366,15 @@ func classify(err error) outcome {
 		return outcomeHardFail
 	}
 	return outcomeSoftFail
+}
+
+// requestOutcome distinguishes caller abandonment from a client-owned timeout.
+// A canceled caller supplies no evidence that the peer answered or failed.
+func requestOutcome(caller context.Context, err error) outcome {
+	if caller.Err() != nil {
+		return outcomeNeutral
+	}
+	return classify(err)
 }
 
 // upstreamRefusal returns a non-nil error when resp carries a relay's report that
@@ -417,8 +428,10 @@ func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data [
 }
 
 // GetValidated rejects negative expected lengths and reads at most expected+1
-// bytes before validating a complete block and recording peer success. A validation error opens the current-generation circuit and
-// returns no bytes. The callback runs inline with the bounded request context.
+// bytes before validating a complete block and recording peer success. Validation
+// errors return no bytes and open the current-generation circuit, except context
+// errors: caller cancellation is neutral and client-owned timeouts are failures.
+// The callback runs inline with the bounded request context.
 func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error) (data []byte, held bool, err error) {
 	if expected < 0 {
 		return nil, false, errors.New("peer: negative expected block length")
@@ -460,11 +473,7 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 	if err := ctx.Err(); err != nil {
 		// Preserve the same caller/client-timeout distinction as Do failures.
 		// A client-owned deadline is not evidence that this peer answered.
-		if caller.Err() != nil {
-			c.record(addr, permit, outcomeAnswered)
-		} else {
-			c.record(addr, permit, classify(err))
-		}
+		c.record(addr, permit, requestOutcome(caller, err))
 		return nil, false, err
 	}
 	if onStart != nil {
@@ -473,13 +482,8 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 	resp, err := client.Do(hreq)
 	if err != nil {
 		// A caller-aborted request (hedging loser, client disconnect) is not a
-		// peer failure; charge nothing. The peer did answer if it got that far,
-		// and recording answered also releases a half-open probe slot.
-		if caller.Err() != nil {
-			c.record(addr, permit, outcomeAnswered)
-		} else {
-			c.record(addr, permit, classify(err))
-		}
+		// peer failure or proof of recovery; only release its admission.
+		c.record(addr, permit, requestOutcome(caller, err))
 		return nil, false, err
 	}
 	defer resp.Body.Close()
@@ -504,11 +508,7 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 			return nil, false, fmt.Errorf("peer %s: oversized body: %w", addr, ErrBlockLength)
 		}
 		if err != nil {
-			if caller.Err() != nil {
-				c.record(addr, permit, outcomeAnswered) // we aborted; the peer is fine
-			} else {
-				c.record(addr, permit, outcomeSoftFail)
-			}
+			c.record(addr, permit, requestOutcome(caller, err))
 			return nil, false, fmt.Errorf("peer %s: read body: %w", addr, err)
 		}
 		if expected >= 0 && int64(len(body)) != expected {
@@ -517,7 +517,11 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 		}
 		if validate != nil {
 			if err := validate(ctx, int64(len(body))); err != nil {
-				c.record(addr, permit, outcomeHardFail)
+				o := outcomeHardFail
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					o = requestOutcome(caller, err)
+				}
+				c.record(addr, permit, o)
 				return nil, false, fmt.Errorf("peer %s: invalid block: %w", addr, err)
 			}
 		}

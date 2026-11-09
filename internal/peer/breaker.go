@@ -263,6 +263,14 @@ func (b *Breaker) record(addr string, o outcome, permit *breakerPermit) {
 	if e.inFlight > 0 && (permit == nil || permit.probe) {
 		e.inFlight--
 	}
+	if o == outcomeNeutral {
+		// Cancellation alone cannot recover a circuit or erase failures. The
+		// last canceled sibling may finish a cohort with prior positive evidence.
+		if e.state != BreakerHalfOpen || !e.recovering || e.inFlight > 0 {
+			return
+		}
+		o = outcomeAnswered
+	}
 	if o == outcomeAnswered {
 		if e.state == BreakerHalfOpen && e.inFlight > 0 {
 			// Keep admitted siblings in the current generation until all

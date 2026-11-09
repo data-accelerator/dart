@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -113,11 +114,7 @@ func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response
 			err = context.DeadlineExceeded
 		}
 		cancel()
-		if req.Context().Err() != nil {
-			c.record(addr, permit, outcomeAnswered)
-		} else {
-			c.record(addr, permit, classify(err))
-		}
+		c.record(addr, permit, requestOutcome(req.Context(), err))
 		return nil, fmt.Errorf("peer origin request: %w", err)
 	}
 	if resp.Header.Get(HeaderOriginResponse) != "1" {
@@ -129,12 +126,20 @@ func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response
 	}
 	resp.Header.Del(HeaderOriginResponse)
 	resp.Request = req
-	resp.Body = &originBody{ReadCloser: resp.Body, ctx: ctx, timer: timer, bound: bound,
-		finish: func() {
+	if req.Method == http.MethodHead || resp.ContentLength == 0 || resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusNotModified || resp.Body == http.NoBody {
+		// HEAD and explicitly empty responses are already complete. Closing
+		// them without a Read is not abandonment of an unfinished stream.
+		// Use HTTP semantics because http.Client.Timeout wraps http.NoBody.
+		resp.Body.Close()
+		resp.Body = http.NoBody
+		cancel()
+		c.record(addr, permit, outcomeAnswered)
+		return resp, nil
+	}
+	resp.Body = &originBody{ReadCloser: resp.Body, ctx: ctx, caller: req.Context(), timer: timer, bound: bound,
+		finish: func(o outcome) {
 			cancel()
-			// Unlike a block, this is a verbatim origin response. An incomplete
-			// source stream cannot be attributed to malformed cached peer data.
-			c.record(addr, permit, outcomeAnswered)
+			c.record(addr, permit, o)
 		},
 	}
 	return resp, nil
@@ -143,9 +148,10 @@ func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response
 type originBody struct {
 	io.ReadCloser
 	ctx    context.Context
+	caller context.Context
 	timer  *time.Timer
 	bound  time.Duration
-	finish func()
+	finish func(outcome)
 	once   sync.Once
 }
 
@@ -158,10 +164,23 @@ func (b *originBody) Read(p []byte) (int, error) {
 		b.timer.Stop()
 	}
 	if err != nil {
+		// An origin stream error is not a malformed cached block. Caller
+		// abandonment is neutral; our own idle deadline remains a failure.
+		o := outcomeAnswered
+		var timeout net.Error
 		if errors.Is(context.Cause(b.ctx), context.DeadlineExceeded) {
 			err = context.DeadlineExceeded
 		}
-		b.once.Do(b.finish)
+		switch {
+		case b.caller.Err() != nil:
+			o = outcomeNeutral
+		case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeout) && timeout.Timeout()):
+			// http.Client.Timeout and transport deadlines need not cancel ctx.
+			o = outcomeSoftFail
+		case b.ctx.Err() != nil:
+			o = outcomeNeutral
+		}
+		b.once.Do(func() { b.finish(o) })
 	}
 	return n, err
 }
@@ -170,6 +189,6 @@ func (b *originBody) Close() error {
 	if b.timer != nil {
 		b.timer.Stop()
 	}
-	b.once.Do(b.finish)
+	b.once.Do(func() { b.finish(outcomeNeutral) })
 	return b.ReadCloser.Close()
 }
