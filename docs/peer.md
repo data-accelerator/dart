@@ -169,7 +169,9 @@ buffer. Read-only sharing and cache publication belong to the engine (ADR-0010).
 must return promptly and runs outside breaker locks. Breaker rejection, invalid
 request construction and already-canceled contexts do not notify. Dispatch can
 still fail before bytes reach the network; net/http internal retries are not
-separate observations. This is attempt instrumentation, not a byte counter.
+separate observations. The client's own deadline expiring before dispatch still
+records a breaker failure, as it does during transport; it is distinct from
+caller cancellation. This is attempt instrumentation, not a byte counter.
 
 ### 3.4 Validated whole-block reads: `Client.GetValidated`
 
@@ -445,6 +447,8 @@ go test ./internal/peer/ -race -count=1
 
 `TestGetIntoObservedDispatch` verifies pre-dispatch observation on real HTTP
 success/miss/error and exclusion of breaker/setup/cancellation rejections.
+`TestGetIntoObservedClientTimeoutBeforeDispatch` verifies that an undispatched
+client-owned timeout cannot falsely recover a half-open circuit.
 
 | Test | Property guarded |
 |---|---|

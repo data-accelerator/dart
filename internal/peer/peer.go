@@ -458,7 +458,13 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 		client = http.DefaultClient
 	}
 	if err := ctx.Err(); err != nil {
-		c.record(addr, permit, outcomeAnswered)
+		// Preserve the same caller/client-timeout distinction as Do failures.
+		// A client-owned deadline is not evidence that this peer answered.
+		if caller.Err() != nil {
+			c.record(addr, permit, outcomeAnswered)
+		} else {
+			c.record(addr, permit, classify(err))
+		}
 		return nil, false, err
 	}
 	if onStart != nil {

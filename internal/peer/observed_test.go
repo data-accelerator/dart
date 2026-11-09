@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestGetIntoObservedDispatch(t *testing.T) {
@@ -61,5 +62,32 @@ func TestGetIntoObservedDispatch(t *testing.T) {
 				t.Fatal(err, calls, notified)
 			}
 		})
+	}
+}
+
+func TestGetIntoObservedClientTimeoutBeforeDispatch(t *testing.T) {
+	var requests, notified atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer s.Close()
+	now := time.Unix(1000, 0)
+	b := NewBreaker(BreakerOptions{Cooldown: time.Second, Now: func() time.Time { return now }})
+	addr := s.Listener.Addr().String()
+	b.RecordHardFailure(addr)
+	now = now.Add(time.Second)
+	c := NewClient()
+	c.Breaker = b
+	// The client-owned deadline has elapsed before HTTP dispatch, even though
+	// the original caller remains live. This must not prove peer recovery.
+	c.Timeout = time.Nanosecond
+	caller := context.Background()
+	_, _, err := c.GetIntoObserved(caller, addr, BlockRequest{}, make([]byte, 4), nil, func() { notified.Add(1) })
+	if !errors.Is(err, context.DeadlineExceeded) || caller.Err() != nil {
+		t.Fatal("wrong deadline source", err, caller.Err())
+	}
+	if requests.Load() != 0 || notified.Load() != 0 || b.State(addr) != BreakerOpen {
+		t.Fatal("undispatched client timeout claimed recovery", requests.Load(), notified.Load(), b.State(addr))
 	}
 }
