@@ -7,6 +7,8 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+## [v0.4.0] — 2026-11-09
+
 ### Added
 
 - Expose block HTTP attempts by topology target and published reader snapshot
@@ -54,7 +56,20 @@ every release's upgrade notes.
   speculative fills. Root hedges rejected before buffer admission remain eligible
   for fallback after the active contender releases capacity.
 
+### Packaging and documentation
+
+- Align the Helm chart version/appVersion with 0.4.0/v0.4.0 and document the
+  coordinated upgrade from v0.3.0, including heterogeneous workload groups.
+  The default image tag remains `dev`; build version-stamped images from source
+  and select `image.tag=v0.4.0` for a release deployment.
+
 ### Upgrade notes
+
+**v0.3.0 and v0.4.0 peers must not share a serving cluster**, including clusters
+where every node is ordinary. Drain client traffic, stop the old peer workloads,
+replace all participating binaries and check membership before resuming traffic.
+Caches restart cold in every backend. See the
+[deployment upgrade procedure](./docs/k8s.md#upgrading-from-v030-to-v040).
 
 - The default root degree changes to 1. Set `-root-fanout` equal to `-fanout`
   on all nodes to retain the uniform tree. Upgrade all participants before

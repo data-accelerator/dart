@@ -8,8 +8,8 @@ description: >-
   variant, RBAC created automatically).
 type: application
 # version is the chart version; bump it on every chart change.
-version: 0.3.1
+version: 0.4.0
 # appVersion names the DART release (image tag) this chart version targets;
 # the default image.tag stays "dev" (source-build convention) — set it to this
 # value when deploying a tagged release.
-appVersion: "v0.3.0"
+appVersion: "v0.4.0"

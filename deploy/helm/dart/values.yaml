@@ -11,7 +11,7 @@ image:
   # DART images are not published to any registry: build from source
   # (docker build -t dart:<tag> .) or point repository at your own registry.
   # For a tagged release build, set tag to the chart's appVersion (e.g.
-  # v0.3.0) so the deployed image matches what the chart was written for.
+  # v0.4.0) so the deployed image matches what the chart was written for.
   repository: dart
   tag: dev
   pullPolicy: IfNotPresent
@@ -36,8 +36,8 @@ discovery:
   createService: true
 
 # ordinary, root-only (no client listener/hostPort), or non-root (no origin
-# egress). Restricted roles require a source build containing ADR-0009;
-# v0.3.0 binaries do not support them. All groups must use compatible binaries.
+# egress). Roles require v0.4.0 or a compatible source build (ADR-0009).
+# Do not mix v0.3.0 and v0.4.0 peers; upgrade all groups together.
 role: ordinary
 
 rbac:

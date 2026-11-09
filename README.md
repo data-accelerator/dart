@@ -237,8 +237,9 @@ resources, registry upstream).
 
 For heterogeneous supply/compute groups, the chart also supports `role` and a
 shared `discovery.serviceName`, with exactly one release creating that Service.
-Use compatible source builds for this role-aware protocol; v0.3.0 does not
-implement roles. See [the discovery/deployment contract](./docs/k8s.md#heterogeneous-node-groups)
+Use v0.4.0 or compatible source builds for this role-aware protocol. Upgrading
+from v0.3.0 requires draining traffic and replacing all peers together, even for
+all-ordinary clusters. See [the discovery/deployment contract](./docs/k8s.md#heterogeneous-node-groups)
 for group selectors, stable identities and coordinated-upgrade requirements.
 
 The default `dart` image needs **no RBAC and never contacts the Kubernetes API** —
