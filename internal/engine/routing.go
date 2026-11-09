@@ -54,6 +54,22 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 	}
 	ranked, _ := e.treeNodes(ctx, view, objectID, e.fileKey(objectID), key.Chunk)
 	primary, backup := e.hedgeTargets(ranked, view)
+	// Classify against the direct tree parent, not the first healthy ancestor:
+	// a breaker-promoted target still counts as ancestor traffic.
+	parentAddr := ""
+	if e.mx != nil {
+		for i, n := range ranked {
+			if n.ID != e.selfID {
+				continue
+			}
+			if p := hashring.ParentWithRootFanout(i, len(ranked), e.fanout, e.rootFanout); p >= 0 {
+				if m, ok := view.Get(ranked[p].ID); ok {
+					parentAddr = m.Addr
+				}
+			}
+			break
+		}
+	}
 	attempted := make(map[string]bool)
 	var attemptsMu sync.Mutex
 	rootAddr := ""
@@ -75,7 +91,11 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 		if already {
 			return peerResult{}
 		}
-		data, held, err := e.peer.GetInto(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply, Epoch: view.Epoch(), HasEpoch: true}, b.bytes(), nil)
+		var onStart func()
+		if e.mx != nil {
+			onStart = func() { e.mx.recordPeerFetch(supply, addr == parentAddr) }
+		}
+		data, held, err := e.peer.GetIntoObserved(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply, Epoch: view.Epoch(), HasEpoch: true}, b.bytes(), nil, onStart)
 		if err != nil || !held {
 			return peerResult{held: held, err: err}
 		}

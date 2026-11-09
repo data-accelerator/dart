@@ -147,6 +147,8 @@ type LeaseSource func(context.Context, BlockRequest) (store.Lease, bool, error)
 // Server.Borrow LeaseSource takes precedence over Server.Src.
 func (c *Client) GetInto(ctx context.Context, addr string, req BlockRequest,
     dst []byte, validate func(context.Context, int64) error) ([]byte, bool, error)
+func (c *Client) GetIntoObserved(ctx context.Context, addr string, req BlockRequest,
+    dst []byte, validate func(context.Context, int64) error, onStart func()) ([]byte, bool, error)
 ```
 
 `LeaseSource` transfers immutable pinned bytes to the server, including any lease
@@ -162,6 +164,14 @@ after return. On error dst may contain partial bytes and must not be published.
 It reads at most len(dst)+1 bytes, without a growing payload allocation. The
 known-length GetValidated compatibility API allocates one expected-size payload
 buffer. Read-only sharing and cache publication belong to the engine (ADR-0010).
+
+`GetIntoObserved` adds an inline callback immediately before HTTP dispatch. It
+must return promptly and runs outside breaker locks. Breaker rejection, invalid
+request construction and already-canceled contexts do not notify. Dispatch can
+still fail before bytes reach the network; net/http internal retries are not
+separate observations. The client's own deadline expiring before dispatch still
+records a breaker failure, as it does during transport; it is distinct from
+caller cancellation. This is attempt instrumentation, not a byte counter.
 
 ### 3.4 Validated whole-block reads: `Client.GetValidated`
 
@@ -434,6 +444,11 @@ go test ./internal/peer/ -race -count=1
 ```
 
 ### Test list (property each guards)
+
+`TestGetIntoObservedDispatch` verifies pre-dispatch observation on real HTTP
+success/miss/error and exclusion of breaker/setup/cancellation rejections.
+`TestGetIntoObservedClientTimeoutBeforeDispatch` verifies that an undispatched
+client-owned timeout cannot falsely recover a half-open circuit.
 
 | Test | Property guarded |
 |---|---|

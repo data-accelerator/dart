@@ -55,7 +55,7 @@ dart [flags]
 | `-root-fanout` | `1` | preferred root normal branching factor (≥1); not a limit on hedge/fallback transfers |
 | `-admin` | `:9100` | admin/metrics listen address; empty disables |
 | `-reader-tree` | `true` | build the distribution tree over the active reader set (per-file tracker) |
-| `-tracker-tick` | `3s` | how often a tracker republishes a reader set |
+| `-tracker-tick` | `3s` | removal/expiry batching interval; new readers publish immediately |
 | `-replicas` | `1` | HRW candidates that authoritatively hold a chunk (the owned budget) |
 | `-owned-fraction` | `0.8` | owned share in [0,1]; 0 is borrowed-only, 1 owned-only; invalid/non-finite values fail startup |
 | `-mem-size` | `256 MiB` | Hybrid hot-set size; ignored in memory/disk modes; below one block disables the Hybrid front tier |

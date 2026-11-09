@@ -77,6 +77,8 @@ and safe for concurrent use, since it runs on the scrape path.
 | `dart_relay_total` | counter | `result=served\|declined` | relay requests handled for peers |
 | `dart_block_fetch_seconds` | histogram | `source=peer\|origin` | block-path fetch latency: cache fills and peer reads only — Size probes and the uncached passthrough path are **not** observed here (`dart_passthrough_total` counts the latter). A coalesced fetch still observes its latency (the caller genuinely waited) even though its bytes are not double-counted in `dart_bytes_total` |
 | `dart_hedge_total` | counter | `event=fired\|primary_won\|backup_won` | tail-latency hedges: duplicates launched, and which contender served the block |
+| `dart_peer_fetch_total` | counter | `target=root,parent,ancestor` | dispatched block HTTP attempts; root includes fallback supply roots; parent means the direct tree parent, ancestor a higher non-root ancestor |
+| `dart_reader_snapshot_size` | histogram | — | reader count in successful JOIN replies; one observation per completed shared refresh, not per waiter or cache hit |
 | `dart_peer_failover_total` | counter | — | definite peer failures escalated to the next ancestor (not rate limited, unlike hedges) |
 | `dart_passthrough_total` | counter | `reason=range_unsupported` | requests proxied without block caching (direct for root-capable nodes, delegated for non-root nodes; see docs/engine.md §3.9) |
 | `dart_peer_circuits_open` | gauge | — | peers whose circuit is currently open |
@@ -108,6 +110,31 @@ just briefly slow.
 
 The store and breaker metrics are wired by `engine.RegisterStoreMetrics(reg, store)`
 and `engine.RegisterPeerMetrics(reg, breaker)`; `cmd/dart` calls both.
+
+### Inspecting reader-tree startup
+
+`dart_peer_fetch_total` classifies from the requesting node's tree snapshot.
+A root is counted as `root` even when it is the direct parent; a breaker-skipped
+parent does not turn the promoted ancestor into `parent`. Buffer admission
+rejections, circuit rejection and local hits do not count. Failed or canceled
+after-dispatch attempts and hedges do count; internal HTTP retries do not add
+another observation. These are attempts, not successful blocks or wire bytes.
+
+```promql
+# Root share of dispatched block attempts across the selected instances.
+sum(rate(dart_peer_fetch_total{target="root"}[1m]))
+  / sum(rate(dart_peer_fetch_total[1m]))
+# Fraction of observed JOIN responses with at most one published reader.
+sum(rate(dart_reader_snapshot_size_bucket{le="1"}[1m]))
+  / sum(rate(dart_reader_snapshot_size_count[1m]))
+```
+
+The histogram measures raw published IDs before membership/role filtering and
+local-self completion, not the size of every currently cached client view.
+It also observes local-registry JOINs. No file, URL or peer-ID label is emitted.
+Compare root share, singleton observations and existing byte/hedge/failover
+metrics over an active interval. These signals reveal likely startup collapse;
+they cannot prove a globally consistent tree or measure per-target bandwidth.
 
 ## 4. `internal/admin` endpoints
 

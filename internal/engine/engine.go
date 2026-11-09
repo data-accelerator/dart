@@ -149,6 +149,7 @@ type Engine struct {
 	trackerReg    *tracker.Registry
 	rsMu          sync.Mutex
 	rs            map[string]*readerSet
+	rsCalls       map[readerFlightKey]*readerFlight
 
 	mu             sync.Mutex
 	sizes          map[string]sizeMeta // origin endpoint -> probe result

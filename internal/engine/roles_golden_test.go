@@ -76,7 +76,13 @@ func TestRolePlacementAndTreeGolden(t *testing.T) {
 			}
 			readers := append([]string(nil), tc.Readers...)
 			rng.Shuffle(len(readers), func(i, j int) { readers[i], readers[j] = readers[j], readers[i] })
-			e.rs["object"] = &readerSet{nodes: readers, expiresAt: time.Now().Add(time.Hour)}
+			addr, _, _ := e.trackerAddr(view, 123)
+			e.rs["object"] = &readerSet{nodes: readers, expiresAt: time.Now().Add(time.Hour), basis: readerBasis{addr: addr, epoch: view.Epoch()}, view: view}
+			if tc.Readers != nil {
+				if got := e.readers(context.Background(), view, "object", 123); !reflect.DeepEqual(got, readers) {
+					t.Fatal("golden snapshot was bypassed", got, readers)
+				}
+			}
 			if roots := roleIDs(hashring.Rank(tc.Key, view.Roots())); !reflect.DeepEqual(roots, tc.Roots) {
 				t.Fatalf("key=%x roots=%v want=%v", tc.Key, roots, tc.Roots)
 			}

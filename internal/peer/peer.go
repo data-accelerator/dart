@@ -413,7 +413,7 @@ func (c *Client) record(addr string, permit breakerPermit, o outcome) {
 // Get fetches a block from the peer at addr (host:port) per req. held is false
 // if the peer returned 404 (cannot provide the block).
 func (c *Client) Get(ctx context.Context, addr string, req BlockRequest) (data []byte, held bool, err error) {
-	return c.get(ctx, addr, req, -1, nil, nil)
+	return c.get(ctx, addr, req, -1, nil, nil, nil)
 }
 
 // GetValidated rejects negative expected lengths and reads at most expected+1
@@ -423,13 +423,13 @@ func (c *Client) GetValidated(ctx context.Context, addr string, req BlockRequest
 	if expected < 0 {
 		return nil, false, errors.New("peer: negative expected block length")
 	}
-	return c.get(ctx, addr, req, expected, validate, nil)
+	return c.get(ctx, addr, req, expected, validate, nil, nil)
 }
 
 // ErrBlockLength reports a peer body that does not match the expected geometry.
 var ErrBlockLength = errors.New("peer: invalid block length")
 
-func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error, dst []byte) (data []byte, held bool, err error) {
+func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expected int64, validate func(context.Context, int64) error, dst []byte, onStart func()) (data []byte, held bool, err error) {
 	permit, err := c.allow(addr)
 	if err != nil {
 		return nil, false, err
@@ -456,6 +456,19 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 	client := c.HTTP
 	if client == nil {
 		client = http.DefaultClient
+	}
+	if err := ctx.Err(); err != nil {
+		// Preserve the same caller/client-timeout distinction as Do failures.
+		// A client-owned deadline is not evidence that this peer answered.
+		if caller.Err() != nil {
+			c.record(addr, permit, outcomeAnswered)
+		} else {
+			c.record(addr, permit, classify(err))
+		}
+		return nil, false, err
+	}
+	if onStart != nil {
+		onStart()
 	}
 	resp, err := client.Do(hreq)
 	if err != nil {
@@ -527,5 +540,13 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 // dst may contain partial bytes and must not be published. The caller owns dst;
 // it is never retained after this call, including on cancellation.
 func (c *Client) GetInto(ctx context.Context, addr string, req BlockRequest, dst []byte, validate func(context.Context, int64) error) ([]byte, bool, error) {
-	return c.get(ctx, addr, req, int64(len(dst)), validate, dst)
+	return c.get(ctx, addr, req, int64(len(dst)), validate, dst, nil)
+}
+
+// GetIntoObserved is GetInto with an inline, nonblocking notification immediately
+// before dispatching an HTTP attempt. Breaker rejection, invalid request setup,
+// and already-canceled contexts do not notify. Dispatch may still fail before
+// bytes reach the network; internal HTTP transport retries are not new attempts.
+func (c *Client) GetIntoObserved(ctx context.Context, addr string, req BlockRequest, dst []byte, validate func(context.Context, int64) error, onStart func()) ([]byte, bool, error) {
+	return c.get(ctx, addr, req, int64(len(dst)), validate, dst, onStart)
 }

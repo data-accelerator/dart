@@ -1,18 +1,17 @@
 // Package tracker maintains the per-file active reader set S: which nodes are
 // currently reading a given object.
 //
-// The distribution tree is built over S rather than over all members, so a
-// node's parent is always another reader (and therefore a node that actually
-// wants the data) instead of an arbitrary member that would have to
-// fetch-on-behalf. See docs/tracker.md.
+// Below the fixed chunk owner, the distribution tree is built over S rather
+// than all members. Intermediate nodes are readers that want the data, instead
+// of arbitrary members fetching only on behalf of others. See docs/tracker.md.
 //
 // Design properties:
 //
 //   - Leases: a reader JOINs with a TTL and refreshes; when it stops reading the
 //     lease lapses and it drops out of S, shrinking the tree. S is soft state, so
 //     a tracker restart self-heals as readers renew.
-//   - Tick freeze: the set is only recomputed on a fixed tick, so the topology
-//     (and epochS) is stable between ticks and TCP connections do not churn.
+//   - Immediate growth: each new reader is published during its JOIN. Removal
+//     and expiry are batched on a tick; renewing a lease does not change epochS.
 //   - Control plane only: small JSON messages, no data flows through a tracker.
 //
 // Which node is the tracker for a file is decided by the caller (HRW top-1 over
@@ -52,12 +51,12 @@ type JoinRequest struct {
 	TTLMs int64 `json:"ttlMs,omitempty"`
 }
 
-// JoinResponse is the frozen reader set for a file.
+// JoinResponse is the published reader set for a file.
 type JoinResponse struct {
-	// EpochS changes whenever the frozen set changes; readers compare it to
+	// EpochS changes whenever the published set changes; readers compare it to
 	// detect a topology change without diffing the member list.
 	EpochS uint64 `json:"epochS"`
-	// Readers is the frozen set, sorted by node ID (deterministic across nodes).
+	// Readers is the published set, sorted by node ID (deterministic across nodes).
 	Readers []string `json:"readers"`
 	// TTLMs is the granted lease in milliseconds.
 	TTLMs int64 `json:"ttlMs"`
@@ -69,10 +68,10 @@ type lease struct {
 	expireAt time.Time
 }
 
-// fileState is the live and frozen reader sets for one file.
+// fileState is the live and published reader sets for one file.
 type fileState struct {
 	leases map[string]*lease // node -> lease (live, updated on every join)
-	frozen []string          // set published to readers, recomputed on a tick
+	frozen []string          // sorted published set; grows on JOIN, shrinks on a tick
 	epoch  uint64            // bumped when frozen changes
 	nextAt time.Time         // when the next recompute is due
 	// lastActivity is the last Join/Readers for this file; it drives idle
@@ -96,7 +95,7 @@ type Registry struct {
 
 // Options configures a Registry. Zero values select the defaults.
 type Options struct {
-	// Tick is how often the frozen set is recomputed.
+	// Tick is the removal/expiry batching interval; new readers publish immediately.
 	Tick time.Duration
 	// LeaseTTL is the default lease granted to a reader.
 	LeaseTTL time.Duration
@@ -133,7 +132,7 @@ func NewRegistry(opt Options) *Registry {
 }
 
 // Join records (or refreshes) node's interest in file and returns the currently
-// frozen reader set. The returned readers slice is a copy owned by the caller.
+// published reader set. The returned readers slice is a copy owned by the caller.
 func (r *Registry) Join(file, node string, ttl time.Duration) JoinResponse {
 	if ttl <= 0 {
 		ttl = r.ttl
@@ -158,6 +157,16 @@ func (r *Registry) Join(file, node string, ttl time.Duration) JoinResponse {
 		fs.leases[node] = &lease{node: node, expireAt: now.Add(ttl)}
 	}
 	r.refreshLocked(fs, now)
+	// Growth must be visible in this JOIN response. Only departures need tick
+	// batching: stale subsets still have strictly ordered forwarding edges.
+	// Insert into the sorted snapshot without rebuilding it on every renewal.
+	i := sort.SearchStrings(fs.frozen, node)
+	if i == len(fs.frozen) || fs.frozen[i] != node {
+		fs.frozen = append(fs.frozen, "")
+		copy(fs.frozen[i+1:], fs.frozen[i:])
+		fs.frozen[i] = node
+		fs.epoch++
+	}
 
 	return JoinResponse{
 		EpochS:  fs.epoch,
@@ -167,7 +176,7 @@ func (r *Registry) Join(file, node string, ttl time.Duration) JoinResponse {
 }
 
 // Leave drops node's lease on file immediately (a clean shutdown or a reader
-// that finished). The frozen set updates on the next tick.
+// that finished). The published set updates on the next tick.
 func (r *Registry) Leave(file, node string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -179,7 +188,7 @@ func (r *Registry) Leave(file, node string) {
 	}
 }
 
-// Readers returns the frozen reader set for file (a copy) and its epoch.
+// Readers returns the published reader set for file (a copy) and its epoch.
 func (r *Registry) Readers(file string) ([]string, uint64) {
 	now := r.now()
 	r.mu.Lock()
@@ -226,7 +235,7 @@ func (r *Registry) sweepLocked(now time.Time) {
 	}
 }
 
-// refreshLocked recomputes the frozen set if the tick is due, dropping expired
+// refreshLocked recomputes the published set if the tick is due, dropping expired
 // leases. Caller must hold r.mu.
 func (r *Registry) refreshLocked(fs *fileState, now time.Time) {
 	if fs.nextAt.IsZero() {
@@ -237,13 +246,13 @@ func (r *Registry) refreshLocked(fs *fileState, now time.Time) {
 		return
 	}
 	if now.Before(fs.nextAt) {
-		return // frozen: keep the topology stable between ticks
+		return // Departures remain batched; JOIN publishes growth separately.
 	}
 	fs.nextAt = now.Add(r.tick)
 	fs.recompute(now)
 }
 
-// recompute drops expired leases and rebuilds the frozen set, bumping the epoch
+// recompute drops expired leases and rebuilds the published set, bumping the epoch
 // when it changed.
 func (fs *fileState) recompute(now time.Time) {
 	live := make([]string, 0, len(fs.leases))

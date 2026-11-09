@@ -156,12 +156,18 @@ func TestRootFallbackAfterHedgeAdmissionDeclines(t *testing.T) {
 			if rootCalls.Load() != 0 {
 				t.Fatal("root contacted without admission")
 			}
+			if mx.peerFetchRoot.Value() != 0 || mx.peerFetchParent.Value() != 1 {
+				t.Fatal("unadmitted hedge counted as dispatched", mx.peerFetchRoot.Value(), mx.peerFetchParent.Value())
+			}
 			unblock()
 			if err := <-done; err != nil {
 				t.Fatal("healthy root was skipped after capacity returned", err)
 			}
 			if rootCalls.Load() != 1 || parentCalls.Load() != 1 {
 				t.Fatal("wrong attempts", rootCalls.Load(), parentCalls.Load())
+			}
+			if mx.peerFetchRoot.Value() != 1 || mx.peerFetchParent.Value() != 1 || mx.peerFetchAncestor.Value() != 0 {
+				t.Fatal("fallback target metrics disagree with HTTP calls")
 			}
 			if n, b := receiveUsage(e); n != 0 || b != 0 {
 				t.Fatal("receive leak", n, b)

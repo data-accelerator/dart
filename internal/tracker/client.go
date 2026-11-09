@@ -29,7 +29,7 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-// Join announces interest in file and returns the frozen reader set.
+// Join announces interest in file and returns the published reader set.
 func (c *Client) Join(ctx context.Context, addr, file, node string, ttl time.Duration) (JoinResponse, error) {
 	body, err := json.Marshal(JoinRequest{File: file, Node: node, TTLMs: ttl.Milliseconds()})
 	if err != nil {
