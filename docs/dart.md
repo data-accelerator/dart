@@ -53,7 +53,7 @@ dart [flags]
 | `-reader-tree` | `true` | build the distribution tree over the active reader set (per-file tracker) |
 | `-tracker-tick` | `3s` | how often a tracker republishes a reader set |
 | `-replicas` | `1` | HRW candidates that authoritatively hold a chunk (the owned budget) |
-| `-owned-fraction` | `0.8` | share of the cache reserved for owned blocks (0<f<1); an explicitly-set out-of-range value fails startup |
+| `-owned-fraction` | `0.8` | owned share in [0,1]; 0 is borrowed-only, 1 owned-only; invalid/non-finite values fail startup |
 | `-mem-size` | `256 MiB` | Hybrid hot-set size; ignored in memory/disk modes; below one block disables the Hybrid front tier |
 
 | `-hedge` | `true` | hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99 |
@@ -83,8 +83,13 @@ selects the disk backend, ignoring `-mem-size`.
 It never creates or opens a cache directory, arena or directory lock; `-cache-dir`
 and `-mem-size` are unused. The existing `-owned-fraction` split and borrowed
 TinyLFU admission remain, so single-node owned traffic can fill only its reserved
-share. Capacity rounds down to whole blocks and must contain at least two blocks
-(one per class); invalid modes, capacities and fractions fail clearly. RAM payloads
+share. Capacity rounds down to whole blocks. Split budgets require at least two
+blocks; `-owned-fraction=0` (borrowed-only) or `=1` (owned-only) requires only one.
+Disabled-class writes are skipped in all modes, including Hybrid's RAM hot set,
+without taking capacity from the other class. Cache bypass does not fail a read.
+Roles do not set budgets automatically: a dedicated root-only peer commonly uses
+`-owned-fraction=1`, and a non-root peer uses `-owned-fraction=0` (ADR-0009).
+Invalid modes, capacities and fractions fail clearly. RAM payloads
 are managed in lazy arena segments; cache capacity excludes metadata, temporary buffers and
 in-flight reads/prefetch, so it is not a process RSS limit. Restart starts cold.
 Backend choice is node-local and can mix within a uniform-geometry cluster

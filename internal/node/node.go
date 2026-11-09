@@ -68,6 +68,7 @@ type config struct {
 	trackerTick      time.Duration
 	replicas         int
 	ownedFraction    float64
+	ownedFractionSet bool
 	memSize          int64
 	hedge            bool
 	hedgeRatio       float64
@@ -459,7 +460,7 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.BoolVar(&cfg.readerTree, "reader-tree", true, "build the distribution tree over the active reader set (per-file tracker)")
 	fs.DurationVar(&cfg.trackerTick, "tracker-tick", tracker.DefaultTick, "how often a tracker republishes a reader set")
 	fs.IntVar(&cfg.replicas, "replicas", 1, "HRW candidates that authoritatively hold a chunk (the owned budget)")
-	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "share of the cache reserved for owned blocks (0<f<1)")
+	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "owned cache share in [0,1]; 0 borrowed-only, 1 owned-only")
 	sizeVar(fs, &cfg.memSize, "mem-size", 256*chunk.MiB, "in-memory hot-set size; below one block disables the memory tier")
 	fs.BoolVar(&cfg.hedge, "hedge", true, "hedge a slow peer fetch to the grandparent/root once it exceeds the estimated p99")
 	fs.IntVar(&cfg.prefetchWindow, "prefetch-window", 2, "covering blocks in flight per client Range; 1 disables prefetch (max 64)")
@@ -476,19 +477,21 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
-	// An explicitly-set out-of-range share is an operator error, not a "0.8
-	// please": fail startup. (0 unset means default; here Visit sees only
-	// flags actually given, so 0 can only be explicit.)
+	// Preserve explicit zero for borrowed-only caches; the API zero value
+	// without a presence bit still selects the default split.
 	var badFraction bool
 	fs.Visit(func(f *flag.Flag) {
-		// NaN slips past <=/>= comparisons; reject non-finite explicitly.
+		if f.Name == "owned-fraction" {
+			cfg.ownedFractionSet = true
+		}
+		// NaN slips past range comparisons; reject non-finite explicitly.
 		if f.Name == "owned-fraction" && (math.IsNaN(cfg.ownedFraction) || math.IsInf(cfg.ownedFraction, 0) ||
-			cfg.ownedFraction <= 0 || cfg.ownedFraction >= 1) {
+			cfg.ownedFraction < 0 || cfg.ownedFraction > 1) {
 			badFraction = true
 		}
 	})
 	if badFraction {
-		return config{}, fmt.Errorf("-owned-fraction must satisfy 0 < f < 1, got %g", cfg.ownedFraction)
+		return config{}, fmt.Errorf("-owned-fraction must satisfy 0 <= f <= 1, got %g", cfg.ownedFraction)
 	}
 	// The mirror and the prefix API share a listener, so the prefix must not
 	// shadow the registry API path.

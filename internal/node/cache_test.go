@@ -75,7 +75,7 @@ func TestCacheModesAndRestart(t *testing.T) {
 
 func TestCacheModeValidationAndFlags(t *testing.T) {
 	cfg := memoryConfig(t)
-	for _, change := range []func(*config){func(c *config) { c.cacheMode = "unknown" }, func(c *config) { c.cacheSize = 0 }, func(c *config) { c.cacheSize = 16 }, func(c *config) { c.ownedFraction = 1 }} {
+	for _, change := range []func(*config){func(c *config) { c.cacheMode = "unknown" }, func(c *config) { c.cacheSize = 0 }, func(c *config) { c.cacheSize = 16 }, func(c *config) { c.ownedFraction = 1.5 }} {
 		bad := cfg
 		change(&bad)
 		if _, _, err := openCache(bad); err == nil {

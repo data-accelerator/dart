@@ -222,6 +222,7 @@ the extraction:
 | `TestRunPrintsVersion` | `-version` prints the version passed to `Run` |
 | `TestSelfIDRejectsControlBytes` / `TestParsePeersRejectsControlByteIDs` | control-byte member IDs rejected at `-self-id` and `-peers` (epoch-framing safety) |
 | `TestWildcardAdvertiseRejected` | explicit wildcard `-peer-advertise` values are rejected (incl. IPv6 long/zoned forms); loopback stays valid |
+| `TestSingleClassCacheConfiguration` | explicit zero/one shares allow one-block memory/disk/Hybrid caches without disabled-class spillover |
 | `TestOwnedFractionFlagValidation` | an explicit out-of-range or non-finite `-owned-fraction` fails startup |
 | `TestParseByteSizeExact` | plain byte counts are exact above 2^53; overflow errors |
 | `TestDiscoveryErrorsRoutedAndThrottled` | discovery errors go to `out`, one line/minute with a suppression count |

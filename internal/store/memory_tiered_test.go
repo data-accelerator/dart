@@ -63,7 +63,7 @@ func TestMemoryTieredBudgetsAndAdmission(t *testing.T) {
 }
 
 func TestMemoryTieredValidationAndConcurrency(t *testing.T) {
-	for _, opt := range []TieredOptions{{SlotSize: 0, Slots: 4}, {SlotSize: 16, Slots: 1}, {SlotSize: 16, Slots: 4, OwnedFraction: math.NaN()}, {SlotSize: 16, Slots: 4, OwnedFraction: 1}} {
+	for _, opt := range []TieredOptions{{SlotSize: 0, Slots: 4}, {SlotSize: 16, Slots: 1}, {SlotSize: 16, Slots: 4, OwnedFraction: math.NaN()}, {SlotSize: 16, Slots: 4, OwnedFraction: 1.5}} {
 		opt.Memory = true
 		if _, err := OpenTiered(opt); err != ErrBadTieredOptions {
 			t.Fatalf("invalid options: %+v %v", opt, err)
