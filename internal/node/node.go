@@ -537,7 +537,6 @@ func parsePeers(s string) ([]cluster.Member, error) {
 // node holds a built DART node's handlers and the resource closer.
 type node struct {
 	client   http.Handler // client data plane; nil for root-only
-	frontend http.Handler // underlying frontend for delegated root operations
 	peer     http.Handler // peer block server; nil when P2P is off
 	admin    http.Handler // metrics/admin; nil when -admin is empty
 	closer   io.Closer    // releases the store and any disk-cache directory lock
@@ -587,13 +586,16 @@ func build(cfg config, out io.Writer) (*node, error) {
 	upstreamBase := http.DefaultTransport.(*http.Transport).Clone()
 	upstreamBase.ResponseHeaderTimeout = 30 * time.Second
 	var upstreamRT http.RoundTripper = upstreamBase
+	if !cfg.role.CanRoot() {
+		upstreamRT = deniedOriginTransport{}
+	}
 	if cfg.registryAuth != "" {
 		creds, err := registry.LoadCredentials(cfg.registryAuth)
 		if err != nil {
 			closer.Close()
 			return nil, err
 		}
-		upstreamRT = registry.NewAuthTransport(upstreamBase, creds)
+		upstreamRT = registry.NewAuthTransport(upstreamRT, creds)
 	}
 
 	// Object identity: how a digest is recovered from an upstream URL. It feeds
@@ -716,9 +718,13 @@ func build(cfg config, out io.Writer) (*node, error) {
 	// A blob pulled either way is stored once, because both key on its digest.
 	prefixH := &engine.Handler{E: e, Resolve: resolver(cfg.origin, cfg.prefix)}
 	var clientH http.Handler = prefixH
+	frontendRT := upstreamRT
+	if !cfg.role.CanRoot() {
+		frontendRT = delegatedFrontendTransport{base: e.OriginTransport()}
+	}
 	if cfg.registry != "" {
 		mirror, err := registry.New(registry.Options{
-			Upstream: cfg.registry, Engine: e, Transport: upstreamRT,
+			Upstream: cfg.registry, Engine: e, Transport: frontendRT,
 		})
 		if err != nil {
 			closer.Close()
@@ -728,9 +734,8 @@ func build(cfg config, out io.Writer) (*node, error) {
 	}
 
 	n := &node{
-		client:   clientH,
-		frontend: clientH,
-		closer:   closer,
+		client: clientH,
+		closer: closer,
 	}
 	if cfg.role == cluster.RootOnly {
 		n.client = nil
@@ -748,6 +753,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 		}
 		mux.Handle("/peer/", blocks)
 		mux.Handle(peer.MetadataPath, &peer.MetadataServer{Probe: e.ProbeSource()})
+		mux.Handle(peer.OriginPath, &peer.OriginServer{Transport: e.OriginSource(upstreamRT)})
 		if dyn != nil {
 			// Membership exchange rides the peer listener. Learn makes it
 			// bidirectional: whoever asks us also tells us who they are, so a node

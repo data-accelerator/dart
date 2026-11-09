@@ -28,6 +28,10 @@ accept peer/control operations but no client data traffic. Non-root peers may
 relay or consume data and never contact origin. Roles are authoritative member
 configuration, independent of transient liveness. Direct self-reports replace
 roles; third-party hearsay cannot overwrite a directly confirmed role.
+These are operational capabilities within A2's trusted deployment domain, not
+security principals. Existing plaintext, unauthenticated peer access and Registry
+authentication semantics remain; role support adds no adversarial-node model or
+intra-cluster credential-isolation requirement.
 Seed providers remain address-only. Both inbound and outbound roster exchange
 carry explicit roles; missing, unknown or conflicting self capabilities are
 rejected. Role-specific workloads share one discovery Service/domain and retain
@@ -49,6 +53,14 @@ Object metadata is delegated to a root chosen by a file-level key independent of
 Size and reader membership. Endpoint-specific Size/Range probe state remains
 separate from digest-shared bytes. Full origin isolation also covers passthrough
 and Registry control traffic; no frontend may silently bypass role restrictions.
+Uncached GET/HEAD requests use a terminal peer origin endpoint, selected by the
+metadata file-key order. Registry operator authentication executes on the supply
+root. Redirects in both frontends remain delegated; a non-root peer does not
+follow an origin Location using its peer transport or hand an origin redirect to
+an isolated local Registry client. Actual origin statuses terminate an attempt;
+root transport failures permit bounded candidate fallback. Header waits and idle
+body reads are bounded without imposing a block-request lifetime on an entire
+object. Midstream failures abort the response, including unknown-length framing.
 
 Memory, disk and Hybrid backend selection and cold restart semantics from
 ADR-0007 continue. Owned-only and borrowed-only budgets are permitted; disabled

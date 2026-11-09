@@ -35,7 +35,7 @@ func TestRootOnlyHasNoClientHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer n.closer.Close()
-	if n.client != nil || n.peer == nil || n.frontend == nil {
+	if n.client != nil || n.peer == nil {
 		t.Fatal("root-only listener assembly incorrect")
 	}
 	cfg.peers = "a@a:1"

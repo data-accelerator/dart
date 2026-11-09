@@ -217,6 +217,9 @@ func New(opt Options) (*Engine, error) {
 	e.origins.maxFlight = limit
 	e.loads.leaseLoads.maxFlight = limit
 	e.opener, _ = opt.Fetcher.(fetch.Opener)
+	if !e.role.CanRoot() {
+		e.opener = &fetch.HTTPFetcher{Client: &http.Client{Transport: e.OriginTransport()}}
+	}
 	if e.fanout < 1 {
 		e.fanout = 2
 	}

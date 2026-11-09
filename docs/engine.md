@@ -384,16 +384,19 @@ Another endpoint for the same digest can still use the cache and P2P:
   `Last-Modified`/`Cache-Control`/`Accept-Ranges`) and body are streamed back
   **verbatim** — the client sees exactly what talking to the origin directly
   would produce;
-- nothing is cached, nothing is routed through P2P, and passthrough traffic is
-  not coalesced;
+- nothing is cached and passthrough traffic is not coalesced. Non-root peers
+  delegate the operation to a supply root without using the block tree;
 - a `HEAD` is served from an upstream GET (a presigned URL is signed for GET
   alone), forwarding headers with an empty body;
 - an error is reported (as a clean `502`) only before the response is
-  committed; afterwards a failure can only truncate the body.
+  committed; afterwards a failure aborts the HTTP response, including the
+  terminating chunk for unknown-length responses, so truncation is detectable.
 
 `ServePassthrough` streams through the fetcher's `fetch.Opener` interface
 (`HTTPFetcher` and `Coalescing` implement it); with a fetcher that cannot
-stream it fails cleanly instead of falling back to per-block pulls. On the
+stream it fails cleanly instead of falling back to per-block pulls. Non-root
+engines install a delegated opener independently of the local fetcher's streaming
+capability. On the
 peer plane, a relay that has marked an object Range-unsupported **declines**
 relay requests for it (`held=false`) on both relay sources
 (`PeerSource`), so the requester uses its own
@@ -402,8 +405,9 @@ its behalf. Defense in depth: `block()` never caches bytes sliced from a
 Range-ignored whole-object response even when the marker is absent.
 
 Metrics: `dart_passthrough_total{reason="range_unsupported"}` counts proxied
-requests; their bytes are counted as both `client` and `origin_in` wire bytes
-(they crossed both wires) but not as any block source.
+requests; their bytes are counted as `client` plus `origin_in` for a root-capable
+node, or `client` plus `peer_in` for non-root delegation. They do not count as
+block sources. A supply root records its proxied response bytes as `origin_in`.
 
 ## 4. Invariants & Guarantees
 
@@ -643,9 +647,40 @@ stop redundant credential/source attempts; transport/path failure may fail over.
 and nil for non-root nodes. Non-root Size probes use a file-key-ranked root,
 endpoint-scoped singleflight and the existing credential/cancellation rules.
 Root-eligible nodes retain local endpoint probing. Cached metadata and blocks
-continue to work without a reachable root. This metadata/block support does not
-alone implement full Registry or Range-unsupported frontend delegation.
+continue to work without a reachable root. Uncached frontend operations use
+the terminal origin transport below.
 
 `TestRolesColdReadAndRootFailover` uses real HTTP roots and a forbidden local
 fetcher to verify delegated metadata, cold P2P reads, no replica query on owner
 miss, backup supply, warm reads without roots and bounded cold failure.
+
+### Uncached origin delegation
+
+`func (e *Engine) OriginTransport() http.RoundTripper` supplies the non-root
+frontend transport. Each bodyless GET/HEAD chooses roots by the same file-key
+ranking as metadata, independently of object size or the reader tree. It tries
+at most the relay hop bound of candidates and skips duplicate addresses.
+Peer failures permit fallback; every actual origin HTTP response, including
+4xx/5xx, is terminal. No roots yields an error without calling the local fetcher.
+Requests are not coalesced or cached. Ranking costs O(N log N) over eligible roots;
+streaming storage is independent of object size. The transport is concurrent-safe.
+
+`func (e *Engine) OriginSource(rt http.RoundTripper) http.RoundTripper` supplies a
+root's terminal HTTP transport and accounts streamed response bytes as origin
+ingress. It returns nil on non-root engines or for a nil transport. The argument
+must perform local origin access and must never delegate to other DART peers.
+Node assembly mounts it through `peer.OriginServer` on the peer listener.
+
+For Range-unsupported reads, the delegated opener follows HTTP redirects through
+`OriginTransport` again; it never opens a direct connection to the redirected
+endpoint. Registry control delegation and redirect handling are wired separately
+in [node.md](./node.md), using the same transport. The raw peer client never
+follows a redirect itself. Header wait and blocked body reads have time bounds;
+successful long transfers have no block-sized whole-request deadline. Closing a
+body cancels the upstream operation. A midstream failure aborts the downstream
+response, including unknown-length framing, and never publishes partial blocks.
+
+`TestNonRootOriginFailoverKeepsRefusalsTerminal` covers definitive origin errors,
+root transport failure, and the no-root path. `TestNonRootPassthroughAbortsIncompleteResponse`
+covers truncated unknown-length delivery. `TestNonRootPassthroughCountsPeerBytes`
+checks both supply and consumer byte accounting and non-root source rejection.

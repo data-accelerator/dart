@@ -529,3 +529,41 @@ is endpoint-specific even when block bytes share a digest identity.
 statuses retain `HeaderUpstreamStatus`, including a typed fetch.StatusError for
 credential retry logic. `TestSourceFailureDoesNotQuarantineRelay` verifies this
 boundary over a real HTTP connection.
+
+### Terminal origin proxy
+
+`OriginPath` is `/peer/v2/origin`. `OriginServer{Transport http.RoundTripper}`
+implements `ServeHTTP` for bodyless GET/HEAD with `HeaderOrigin`; HTTP/HTTPS
+origins only. Upgrade requests are refused. A nil transport answers 503, as on a
+non-root node. The transport must be local origin access, never another peer
+delegate. The proxy consumes its routing envelope and applies standard HTTP
+hop-by-hop header handling.
+Escaped path/query, method, entity headers and origin statuses are preserved.
+Streaming uses bounded buffers rather than buffering a whole object; requests
+are independent and the handler is concurrent-safe when its transport is.
+
+`func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response, error)`
+forwards one operation to that root. `HeaderOriginResponse`
+(`X-DART-Origin-Response: 1`) distinguishes an actual origin response, including
+refusal, from a root unable to supply the request. The marker is consumed before
+returning to the caller. Redirects are returned without following their Location
+on the peer transport. Higher frontend layers may follow them only by submitting
+another delegated request. The body belongs to the caller and must be closed.
+
+`Client.Timeout` bounds header acquisition and each blocked body read (default
+30 seconds, negative disables these bounds). It does not bound total streaming
+duration or time a downstream consumer spends between reads. Existing HTTP
+transport/caller-context bounds also apply. Close cancels the operation and
+releases the breaker admission. A source-body failure remains detectable as a
+truncated response without quarantining the honest supplying root. The trusted
+domain assumption A2 applies: this endpoint adds no peer authentication or
+credential-isolation boundary.
+
+Tests: `TestOriginDelegationPreservesResponseAndDoesNotFollowRedirect` checks the
+wire boundary and escaped identities; `TestOriginDelegationRejectsUnsupportedOperations`
+checks methods, schemes and role refusal; `TestOriginDelegationPreservesOriginRefusal`
+checks status/body propagation; `TestOriginDelegationTruncationDoesNotQuarantineRoot`
+checks unknown-length truncation; `TestOriginDelegationUsesIdleInsteadOfWholeStreamDeadline`
+and `TestOriginDelegationCancelsStalledBody` check stream lifetime and cancellation.
+`TestOriginDelegationBoundsHeaderWait` distinguishes the internal timeout from
+caller cancellation and checks request cleanup and breaker accounting.

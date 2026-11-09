@@ -261,3 +261,20 @@ a client listener; peer and operational handlers remain available.
 `TestRootOnlyHasNoClientHandler` checks root-only assembly and inconsistent or
 standalone role rejection. These assembly rules accompany the engine routing
 contract; a role must not be used as a substitute for source-access enforcement.
+
+Non-root nodes have no local origin backend. Their
+Registry control requests use `Engine.OriginTransport`; redirect following also
+uses this transport, so a local client is not sent to an origin/CDN URL to finish
+the pull. Blob data retains the block/cache/tree path. Range-unsupported requests
+use the engine's delegated opener. Root-capable nodes expose terminal origin and
+metadata services on the peer listener; root-only nodes need no client listener
+to provide them. Registry operator credentials and token exchanges are used on
+the supply root. Non-root operator credentials do not replace root configuration.
+Registry authentication uses the existing transport semantics. Roles express
+operational capabilities within the trusted cluster (A2), not security identities.
+
+`TestNonRootRegistryAndPassthroughUseSupplyRoot` builds real nodes and HTTP
+listeners, with credentials only on the root, and exercises manifest GET/HEAD,
+manifest redirects, token exchange, blob reads, Range-unsupported GET/HEAD,
+cross-endpoint redirects and root outage. Warm blob
+reads survive the outage; uncached control requests fail without direct fallback.
