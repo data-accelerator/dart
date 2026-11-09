@@ -281,22 +281,21 @@ func TestBlockLoadsRetryFailuresWithOwnURL(t *testing.T) {
 	}
 }
 
-func TestBlockLoadsSeparateKeysAndRelayDepth(t *testing.T) {
-	for _, other := range []blockLoadKey{{block: store.BlockKey{Block: 1}}, {hop: 1}} {
+func TestBlockLoadsSeparateKeysSupplyAndEpoch(t *testing.T) {
+	for _, other := range []blockLoadKey{{block: store.BlockKey{Block: 1}}, {supply: true}, {epoch: 1}} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		var g blockLoads
 		r, _, err := g.do(ctx, blockLoadKey{}, "url", func() (blockRead, error) {
-			// A same-key higher-hop relay must not join the outer call and
-			// deadlock before the hop limit can advance under membership skew.
+			// Terminal fallback supply must not join its waiting normal load.
 			r, shared, err := g.do(ctx, other, "url", func() (blockRead, error) { return blockRead{data: []byte("valid")}, nil })
 			if shared {
-				t.Error("different key/depth shared a flight")
+				t.Error("different key/mode/epoch shared a flight")
 			}
 			return r, err
 		})
 		cancel()
 		if err != nil || string(r.data) != "valid" {
-			t.Fatalf("different block/depth = %q, %v", r.data, err)
+			t.Fatalf("different block/mode/epoch = %q, %v", r.data, err)
 		}
 	}
 }
@@ -500,7 +499,7 @@ func (f *witnessedOriginFlight) Fetch(ctx context.Context, url string, start, en
 	return f.inner.Fetch(j, url, start, end)
 }
 
-func TestMixedDepthOriginFlightsReturnOwnedBytes(t *testing.T) {
+func TestCrossHopLoadsReturnOwnedBytes(t *testing.T) {
 	content := blob(16)
 	origin := countingOrigin(t, content, nil)
 	parent := httptest.NewServer(http.NotFoundHandler())
@@ -540,8 +539,7 @@ func TestMixedDepthOriginFlightsReturnOwnedBytes(t *testing.T) {
 			done <- result{data, err}
 		}(hop)
 	}
-	// Both relay depths now join the engine's immutable origin lease flight;
-	// only its one backend consumer enters the Fetcher-level compatibility flight.
+	// Both hops join the outer normal load; only one backend reaches origin.
 	select {
 	case waiting := <-f.waiting:
 		waitBlockEvent(t, ctx, waiting)
@@ -549,17 +547,17 @@ func TestMixedDepthOriginFlightsReturnOwnedBytes(t *testing.T) {
 		t.Fatal("origin backend did not start")
 	}
 	for {
-		e.origins.mu.Lock()
+		e.loads.mu.Lock()
 		joined := false
-		for _, c := range e.origins.m {
+		for _, c := range e.loads.m {
 			joined = c.refs == 2
 		}
-		e.origins.mu.Unlock()
+		e.loads.mu.Unlock()
 		if joined {
 			break
 		}
 		if ctx.Err() != nil {
-			t.Fatal("mixed-depth loads did not join the origin lease flight")
+			t.Fatal("mixed-depth loads did not join the normal load")
 		}
 		runtime.Gosched()
 	}

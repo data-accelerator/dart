@@ -25,6 +25,7 @@ GET /peer/v2/block/<chunkKey-hex>/<blockIndex>
 X-DART-Origin: <upstream url>   (optional; enables relay fetch-on-behalf)
 X-DART-Hop:    <n>              (relay depth, for loop safety)
 X-DART-Supply: 1                (optional; root must terminate at cache/origin)
+X-DART-Epoch: <decimal uint64>   (ordering basis; engine forwarding includes it)
 ```
 
 - `<chunkKey-hex>` is `store.BlockKey.Chunk` in base-16; `<blockIndex>` is
@@ -50,6 +51,12 @@ X-DART-Supply: 1                (optional; root must terminate at cache/origin)
   effectively forever. The bound itself (`maxHop`) is enforced by the engine,
   not here, so any non-negative value — including one at or past the bound —
   is a valid wire value at this layer.
+- `X-DART-Epoch` carries the normal sender's pinned membership epoch as a
+  decimal uint64. Malformed values return `400`. `BlockRequest.HasEpoch`
+  distinguishes a valid zero from absence; omitted values adopt the receiver's
+  view for direct callers. Engines always include the epoch when forwarding.
+  On a cache miss, a different epoch declines with `404` before joining normal
+  work. Terminal supply and cache hits do not require matching epochs (ADR-0010).
 - Responses: `200` + complete block bytes (`X-DART-Node`, explicit `Content-Length`), `404` if the peer cannot provide the block, `400`
   for a malformed path or an invalid `X-DART-Hop`, `405` for non-GET, `500`
   on an unclassified source error, `503` + `X-DART-Source-Failure` for a
@@ -68,6 +75,8 @@ type BlockRequest struct {
     URL string         // X-DART-Origin: origin for relay; "" = transport-only
     Hop int            // X-DART-Hop: relay depth
     Supply bool        // X-DART-Supply: terminal root request
+    Epoch uint64       // pinned membership ordering epoch
+    HasEpoch bool      // whether Epoch is explicitly supplied
 }
 type Source func(ctx context.Context, req BlockRequest) ([]byte, bool, error)
 ```
@@ -152,7 +161,7 @@ aliasing dst only on successful complete validation. No caller buffer is retaine
 after return. On error dst may contain partial bytes and must not be published.
 It reads at most len(dst)+1 bytes, without a growing payload allocation. The
 known-length GetValidated compatibility API allocates one expected-size payload
-buffer. Read-only sharing and cache publication belong to the engine (ADR-0008).
+buffer. Read-only sharing and cache publication belong to the engine (ADR-0010).
 
 ### 3.4 Validated whole-block reads: `Client.GetValidated`
 
@@ -180,7 +189,7 @@ geometry.
 byte. Failed loads produce a clean `500`, credential refusals a `502` with
 `HeaderUpstreamStatus`, and declines a `404`. A failure writing an already valid
 block still truncates its Content-Length response. See
-[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md) for the cross-package rule.
+[ADR-0010](./adr/0010-coalesce-directed-block-loads.md) for the cross-package rule.
 
 `UpstreamRefusedError` is the source error interface with `UpstreamStatus() int`;
 `Server` uses it to preserve the origin refusal code without blaming the relay.
@@ -360,6 +369,13 @@ their pending outcomes, so discovery also restores reachability without hiding a
 data-probe failure.
 
 
+Caller cancellation/deadlines while awaiting delegated origin headers release the
+breaker permit without charging a root failure. The client's own header timeout
+still records a failure. `TestOriginCallerCancellationDoesNotQuarantineRoot`
+checks repeated cancellations followed by a healthy request;
+`TestOriginDelegationBoundsHeaderWait` checks the internal-timeout distinction.
+`TestBlockRoutingEpochWire` pins absent, zero, maximum and malformed epoch values.
+
 ## 4. Invariants & Guarantees
 
 1. **Faithful transport**: a `200` returns exactly the block bytes the source
@@ -388,9 +404,10 @@ data-probe failure.
 - The wire path (`/peer/v2/block/<hex>/<dec>`) is part of the peer protocol.
   Changing it is a peer-protocol version bump.
 - Peer-plane traffic is plaintext by design; encryption is a CNI concern.
-- ADR-0008 requires full validated engine blocks before peer success is committed.
+- ADR-0010 requires full validated engine blocks before peer success is committed.
   Server responses use Content-Length; clients also accept older chunked peers.
-  Whole-block forwarding preserves paths, keys and epoch framing. The removed
+  Whole-block forwarding uses the ADR-0009 v2 paths and epoch framing;
+  ADR-0010 carries membership epochs on block requests without changing keys. The removed
   streaming APIs are internal and have no compatibility shim.
 
 ## 7. Testing
@@ -474,16 +491,18 @@ go test ./internal/peer/ -race -count=1
 ## 8. Limitations & TODO
 
 - **Routing lives in the engine**: this package is the transport; the engine
-  decides who to ask (parent in the preorder tree over `cluster.Ready()`) and
-  provides the relay `Source` (`engine.PeerSource`). Membership skew is bounded
-  by `X-DART-Hop`; full epoch convergence is future work.
+  decides who to ask in the owner-rooted reader tree and supplies the relay
+  source. Ordinary edges follow strict reader order; membership epoch mismatch
+  declines cold relays. Hop remains a forwarding cap.
 - **Whole-block only**: a complete validated block is transferred as one
   Content-Length body. Cold multi-hop startup waits for each whole-block load;
-  concurrent covering-block requests supply steady-state pipelining (ADR-0008).
-- **Epoch convergence**: `X-DART-Epoch` is defined but not yet exchanged/acted
-  on; membership-skew convergence is a later addition.
-- **Zero-copy**: the server currently `Write`s a buffer; serving via
-  `sendfile`/`splice` from the store slot is future optimization.
+  concurrent covering-block requests supply steady-state pipelining (ADR-0010).
+- **Epoch convergence**: block epochs detect incompatible ordering views; they
+  do not synchronize discovery. Transient skew may bypass reader relays through
+  terminal supply until roster membership converges.
+- **Transport copies**: memory leases avoid owned block copies, but HTTP/TCP
+  writes still use the operating system transport path; no kernel zero-copy
+  guarantee is made.
 
 Half-open regression tests: `TestHalfOpenProbesWaitForSiblingOutcome` covers
 concurrent recovery and a sibling hard-failure veto;

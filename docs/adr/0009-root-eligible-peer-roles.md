@@ -46,8 +46,10 @@ bounded attempts and deadlines. A root supply operation terminates at its local
 cache or origin, never reentering the distribution tree. Normal misses and cache
 admission declines are not peer failures. Reported upstream errors do not mark an
 honest relay as a malformed-data sender. Cached immutable data remains usable
-without contacting an owner. Snapshot disagreement retains bounded hop/lifetime
-protection; singleflight keys must not introduce cyclic waits between routing modes.
+without contacting an owner. Ordinary reader forwarding follows a strict common
+HRW order after local inclusion of eligible self; reader snapshot disagreement
+cannot create cycles. ADR-0010 defines cross-hop flight sharing, terminal supply
+separation and the membership-ordering boundary.
 
 Object metadata is delegated to a root chosen by a file-level key independent of
 Size and reader membership. Endpoint-specific Size/Range probe state remains

@@ -137,7 +137,11 @@ uses all eligible Ready readers below the owner. The engine then:
 2. JOINs (locally if it *is* the tracker, else over HTTP) and caches the reader
    set for ~2s, so a read does not make a tracker call per block;
 3. anchors the tree at the root-eligible chunk owner, appends ranked eligible
-   readers without duplicating the owner, and takes its parent from that sequence.
+   readers union eligible self, deduplicates them (including the owner), and takes
+   its parent from that sequence. This local completion does not mutate the
+   tracker snapshot or wait for a tick. With fixed member weights, snapshot
+   additions/removals preserve common-node order; normal forwarding always goes
+   earlier in that order (ADR-0010).
    Root-only peers supply roots but do not JOIN as readers (ADR-0009).
 
 **Fallbacks:** a missing/unreachable tracked snapshot routes directly to the
@@ -198,7 +202,7 @@ Engine-side (in `internal/engine`):
 | Test | Property guarded |
 |---|---|
 | `TestTreeNodesPrefersReaderSet` | tree anchors at the owner and uses eligible active readers below it |
-| `TestTreeNodesFallsBackToAllMembers` | tracking disabled uses eligible readers; a tracked sole reader retains the owner |
+| `TestTreeNodesWithoutReaderSnapshot` | tracking disabled uses eligible readers; a tracked sole reader retains the owner |
 | `TestReaderSetTreeEndToEnd` | 3 nodes sharing one tracker all read correct bytes |
 
 ## 9. Limitations & TODO

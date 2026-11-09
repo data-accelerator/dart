@@ -340,10 +340,10 @@ func TestHedgeTargetsPickParentAndGrandparent(t *testing.T) {
 	if p, _ := root.hedgeTargets(ranked, view); p != "" {
 		t.Errorf("root primary = %q, want empty", p)
 	}
-	// A non-member asks the owner and has no backup above it.
+	// A non-member has no ordinary parent; routing must use terminal supply.
 	outsider := newHedgeEngine(t, prov, "OUTSIDER")
-	if p, b := outsider.hedgeTargets(ranked, view); p != "r0:1" || b != "" {
-		t.Errorf("outsider targets = (%q, %q), want (r0:1, \"\")", p, b)
+	if p, b := outsider.hedgeTargets(ranked, view); p != "" || b != "" {
+		t.Errorf("outsider targets = (%q, %q), want (\"\", \"\")", p, b)
 	}
 }
 
@@ -509,13 +509,15 @@ func TestHedgeSameAddressNotRaced(t *testing.T) {
 	addr := slowPeer(t, "ONE", 0, data, &hits)
 
 	prov := cluster.NewStaticProvider(cluster.Member{ID: "OWNER", Addr: addr, Weight: 1, State: cluster.Ready})
-	e := newHedgeEngine(t, prov, "SELF") // not a member: primary = owner, backup = ""
+	e := newHedgeEngine(t, prov, "SELF") // no ordinary position; terminal root fallback
 
 	oid, _ := chunk.ObjectID("http://origin.invalid/x")
 	ck := chunk.ChunkKey("dart", oid, 0)
 	key := store.BlockKey{Chunk: ck, Block: 0}
-	if _, ok := e.fromPeer(context.Background(), "http://origin.invalid/x", oid, ck, key, 0, 16); !ok {
-		t.Fatal("expected the owner to serve the block")
+	r, err := e.loadRouted(context.Background(), "http://origin.invalid/x", oid, 16, 0, 0, key, 16, prov.Current(), hashring.Rank(ck, prov.Current().Roots()))
+	defer r.lease.Release()
+	if err != nil || !bytes.Equal(r.lease.Bytes(), data) {
+		t.Fatal("expected terminal owner to serve the block", err)
 	}
 	if n := atomic.LoadInt64(&hits); n != 1 {
 		t.Errorf("peer hit %d times, want exactly 1 (no pointless duplicate)", n)

@@ -19,6 +19,26 @@ func supplyContext(ctx context.Context) context.Context {
 	return context.WithValue(ctx, supplyKey{}, true)
 }
 
+type routingViewKey struct{}
+
+// pinRouting freezes the ordering basis before admission, including for the
+// owned-copy adapter. Reader snapshots may vary; membership weights may not.
+func (e *Engine) pinRouting(ctx context.Context, key store.BlockKey) (context.Context, blockLoadKey) {
+	k := blockLoadKey{block: key, supply: isSupply(ctx)}
+	if !e.p2p || k.supply {
+		return ctx, k
+	}
+	view, pinned := ctx.Value(routingViewKey{}).(*cluster.View)
+	if !pinned {
+		view = e.cluster.Current()
+		ctx = context.WithValue(ctx, routingViewKey{}, view)
+	}
+	if view != nil {
+		k.epoch = view.Epoch()
+	}
+	return ctx, k
+}
+
 var errNoRoot = errors.New("engine: no usable supply root")
 
 // loadRouted preserves directed dependencies: ancestors may relay, whereas
@@ -44,7 +64,7 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 			return peerResult{err: err}
 		}
 		defer b.abort()
-		data, held, err := e.peer.GetInto(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply}, b.bytes(), nil)
+		data, held, err := e.peer.GetInto(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply, Epoch: view.Epoch(), HasEpoch: true}, b.bytes(), nil)
 		if err != nil || !held {
 			return peerResult{held: held, err: err}
 		}

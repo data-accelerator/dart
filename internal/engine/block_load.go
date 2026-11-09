@@ -21,11 +21,12 @@ type blockRead struct {
 	source blockSource
 }
 
-// Relay depth must stay in the flight identity: joining a shallower request
-// when a skewed tree loops back would turn the hop bound into a wait cycle.
+// Normal loads share across hops and reader snapshots within one membership
+// epoch. Terminal supply stays separate: a fallback root may already be waiting
+// on the requesting reader in its normal flight.
 type blockLoadKey struct {
 	block  store.BlockKey
-	hop    int
+	epoch  uint64
 	supply bool
 }
 

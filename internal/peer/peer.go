@@ -81,6 +81,10 @@ type BlockRequest struct {
 	Hop int
 	// Supply selects terminal root service.
 	Supply bool
+	// Epoch pins the sender's membership ordering basis. HasEpoch distinguishes
+	// a valid zero epoch from direct callers that adopt the receiver's view.
+	Epoch    uint64
+	HasEpoch bool
 }
 
 // Source returns the bytes of a block for a peer request. held is false if this
@@ -148,6 +152,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req := BlockRequest{Key: key, URL: r.Header.Get(HeaderOrigin), Hop: hop, Supply: supply == "1"}
+
+	if raw := r.Header.Get(HeaderEpoch); raw != "" {
+		epoch, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "bad epoch header", http.StatusBadRequest)
+			return
+		}
+		req.Epoch, req.HasEpoch = epoch, true
+	}
 
 	var l store.Lease
 	var held bool
@@ -433,6 +446,9 @@ func (c *Client) get(ctx context.Context, addr string, req BlockRequest, expecte
 		hreq.Header.Set(HeaderOrigin, req.URL)
 	}
 	hreq.Header.Set(HeaderHop, strconv.Itoa(req.Hop))
+	if req.HasEpoch {
+		hreq.Header.Set(HeaderEpoch, strconv.FormatUint(req.Epoch, 10))
+	}
 	if req.Supply {
 		hreq.Header.Set(HeaderSupply, "1")
 	}

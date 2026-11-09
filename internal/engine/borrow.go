@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/data-accelerator/dart/internal/chunk"
+	"github.com/data-accelerator/dart/internal/cluster"
 	"github.com/data-accelerator/dart/internal/fetch"
 	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/peer"
@@ -41,7 +42,8 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 	} else if ok {
 		return leasedRead{lease: l, source: blockFromCache}, nil
 	}
-	r, err := e.borrowed.do(ctx, blockLoadKey{block: key, hop: hop, supply: isSupply(ctx)}, url, false, func(ctx context.Context) (leasedRead, error) {
+	ctx, flightKey := e.pinRouting(ctx, key)
+	r, err := e.borrowed.do(ctx, flightKey, url, false, func(ctx context.Context) (leasedRead, error) {
 		if l, ok, err := store.Acquire(e.store, key); err != nil {
 			return leasedRead{}, err
 		} else if ok {
@@ -53,7 +55,7 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 				return leasedRead{}, errNoRoot
 			}
 		} else if e.p2p {
-			view := e.cluster.Current()
+			view, _ := ctx.Value(routingViewKey{}).(*cluster.View)
 			if view == nil {
 				return leasedRead{}, errNoRoot
 			}
@@ -67,8 +69,7 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 		} else if !e.role.CanRoot() {
 			return leasedRead{}, errNoRoot
 		}
-		// Origin results can be shared across relay depths; peer flights cannot,
-		// because a skewed forwarding loop must continue toward the hop bound.
+		// Terminal origin work can be shared across normal/supply modes and epochs.
 		isSpeculativeOuter := isSpeculative(ctx)
 		return e.origins.do(ctx, blockLoadKey{block: key}, url, true, func(ctx context.Context) (leasedRead, error) {
 			if l, ok, err := store.Acquire(e.store, key); err != nil {
@@ -147,6 +148,14 @@ func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool
 		return l, true, nil
 	}
 	if req.URL == "" || req.Hop >= maxHop {
+		e.mx.recordRelay(false)
+		return store.Lease{}, false, nil
+	}
+	ctx, flightKey := e.pinRouting(ctx, req.Key)
+	if !isSupply(ctx) && req.HasEpoch && flightKey.epoch != req.Epoch {
+		// A changed weight/role/membership basis may reverse reader order.
+		// Decline a cold relay before joining a flight; terminal supply and
+		// already-cached bytes remain usable during convergence.
 		e.mx.recordRelay(false)
 		return store.Lease{}, false, nil
 	}

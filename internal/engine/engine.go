@@ -400,7 +400,8 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		return data, nil
 	}
 	start := time.Now()
-	r, _, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop, supply: isSupply(ctx)}, url, func() (blockRead, error) {
+	ctx, flightKey := e.pinRouting(ctx, key)
+	r, _, err := e.loads.do(ctx, flightKey, url, func() (blockRead, error) {
 		// A previous leader can publish between our first miss and flight
 		// admission. Recheck after becoming leader, without holding the map lock.
 		if data, ok, err := e.store.Get(key); err != nil {

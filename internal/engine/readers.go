@@ -117,6 +117,7 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 // member that must fetch-on-behalf. The owner always remains first. A missing
 // tracked snapshot routes directly to it; tracking disabled uses all eligible
 // Ready readers as descendants. Root-only peers never become descendants.
+// Eligible self is always included; published snapshots are never mutated.
 func (e *Engine) treeNodes(ctx context.Context, view *cluster.View, objectID string, fileKey, chunkKey uint64) ([]hashring.Node, bool) {
 	roots := hashring.Rank(chunkKey, view.Roots())
 	if len(roots) == 0 {
@@ -138,7 +139,21 @@ func (e *Engine) treeNodes(ctx context.Context, view *cluster.View, objectID str
 	} else {
 		nodes = view.Readers()
 	}
-	ordered := hashring.Rank(chunkKey, nodes)
+	// A tracker snapshot may predate our JOIN. Complete and deduplicate a local
+	// copy, never the shared tracker/view slice. HRW preserves common-member
+	// relative order, so every ordinary ancestor remains strictly earlier.
+	unique := make([]hashring.Node, 0, len(nodes)+1)
+	present := make(map[string]bool, len(nodes)+1)
+	for _, n := range nodes {
+		if !present[n.ID] {
+			unique = append(unique, n)
+			present[n.ID] = true
+		}
+	}
+	if m, ok := view.Get(e.selfID); ok && m.State == cluster.Ready && m.Role.CanRead() && m.Addr != "" && !present[m.ID] {
+		unique = append(unique, hashring.Node{ID: m.ID, Weight: m.Weight})
+	}
+	ordered := hashring.Rank(chunkKey, unique)
 	out := make([]hashring.Node, 0, len(ordered)+1)
 	out = append(out, root)
 	seen := map[string]bool{root.ID: true}

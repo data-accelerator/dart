@@ -46,7 +46,7 @@ def reference():
                         ["A", "C", "D", "F", "G", "H", "B", "E", "I"]]:
             eligible = [(m["ID"], m["Weight"]) for m in members
                         if m["Role"] != 1 and m["State"] == 1
-                        and (readers is None or m["ID"] in readers)]
+                        and (readers is None or m["ID"] in readers or m["ID"] == "C")]
             order = [roots[0]] + [node for node in rank(key, eligible) if node != roots[0]]
             cases.append(dict(key=key, readers=readers, owners=roots[:2],
                               roots=roots, order=order,

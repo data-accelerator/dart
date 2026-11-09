@@ -90,15 +90,21 @@ or a window above 64 are rejected; zero selects each default.
 
 ADR-0009 fixes the preferred root to the first HRW candidate from `View.Roots`.
 `Options.Role` is the local capability. Active ordinary/non-root readers form the
-ordered descendants; other root-only peers never enter the tree. With tracking
-configured, an unavailable reader snapshot routes directly to the owner. With
-tracking disabled, the descendants are the Ready reader-eligible members.
+ordered descendants; other root-only peers never enter the tree. The local
+candidate set includes eligible self even when the tracker snapshot omits it,
+deduplicated and ranked with the same member weights. The tracker snapshot is
+unchanged. An unavailable snapshot yields owner plus eligible self; tracking
+disabled uses all Ready reader-eligible members. Every ordinary parent/ancestor
+precedes self in the common HRW reader order. Reader-set changes preserve that
+relative order and cannot create a forwarding cycle (ADR-0010).
 
 A root supply request terminates at cache/origin. A non-root never falls through
 to local origin; failed ancestors can be bypassed toward root candidates, with
 at most the existing hop-bound count of root candidates under the shared flight
-lifetime. Supply mode and relay depth are both in block-flight identity, so a
-backup root does not join an outer relay waiting for it. A healthy owner miss
+lifetime. Normal flights share across hops and reader snapshots. Terminal supply
+has a separate flight so a backup root does not join its own waiting relay. A
+local backup root bypasses peer HTTP and goes directly to cache/origin. Supply
+and normal origin reads still coalesce in the origin flight. A healthy owner miss
 never probes another root or a reader. Source refusals preserve their status and
 stop redundant credential/source attempts; transport/path failure may fail over.
 
@@ -175,12 +181,17 @@ block is served from cache or fetched+stored; only the requested sub-bytes of
 each block are written, in order.
 
 **Buffered miss coalescing (P2P enabled).** Concurrent misses for the same
-block and relay depth share one load through geometry validation and cache
-publication. Disjoint subranges do not launch independent peer downloads of
+block and membership ordering epoch share one normal load through geometry
+validation and cache publication. Disjoint subranges do not launch independent peer downloads of
 that block. A new leader rechecks cache after admission, closing the window
 between an earlier miss and another load's completed insertion. Different
-blocks and relay depths remain independent; depth is retained so membership
-skew cannot turn a forwarding loop into a wait cycle before the hop bound.
+blocks remain independent. Hop is only a forwarding limit, never a content-load
+identity. Normal loads pin a membership view before admission and carry its epoch
+on outgoing requests. A cold receiver with a different epoch declines before
+metadata probing or flight admission; cached bytes and terminal supply remain
+usable. This bounds the weight/role/membership convergence case without splitting
+ordinary same-epoch requests by hop or tracker reader-set epoch. Direct callers
+omitting the epoch adopt the receiver's view; engine forwarding always includes it.
 
 The leader runs synchronously in its serving caller, retaining the existing
 peer/origin timeouts. A waiter can cancel independently. If an inline leader is
@@ -221,7 +232,7 @@ independently of peer transport timeout or total client Range duration.
 This
 coalescing covers `Serve`/`PeerSource` block loads and their origin fallback.
 The lifecycle and whole-block pipeline contract is recorded in
-[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md).
+[ADR-0010](./adr/0010-coalesce-directed-block-loads.md).
 
 **Block-length validation.** A block's byte length is fixed by the object
 geometry (a full `BlockSize`, or a shorter final block). Before a fetched block
@@ -534,31 +545,31 @@ block sources. A supply root records its proxied response bytes as `origin_in`.
 
 - `Engine` is safe for concurrent use: the size cache is mutex-guarded, the
   store is concurrency-safe, and buffered P2P misses are coordinated by
-  block/depth through cache publication. Origin lease flights independently
-  share across depths; traditional Coalescing.Fetch remains available for owned
-  callers. Verified with `-race` under overlapping `Serve`.
+  block/ordering-epoch through cache publication, separately from terminal supply.
+  Origin lease flights independently share across both modes and epochs;
+  traditional Coalescing.Fetch remains available for owned callers. Verified with `-race` under overlapping `Serve`.
 - Shared buffered loads keep store access in the leader caller's lifetime;
   Serve-owned prefetch workers are canceled and joined before Serve returns.
   Serve and PeerLeaseSource release immutable block leases after writes. The
   compatibility PeerSource retains owned copies. Waiters do not keep a goroutine
   after cancellation; the last origin waiter joins shared backend cleanup
-  (ADR-0003 and ADR-0008).
+  (ADR-0003 and ADR-0010).
 - `Handler` is safe for concurrent use if `Resolve`/`E` are not mutated after
   construction.
 
 ## 6. Determinism / Stability Contract
 
-- ADR-0008 specifies complete validated blocks before peer success responses and
+- ADR-0010 specifies complete validated blocks before peer success responses and
   bounded in-range prefetch. The removed streaming internal APIs are not retained.
-  GET paths, keys, hop headers, credentials and HTTP/1.1 interoperability remain
-  unchanged; cold multi-hop first-block latency includes full transfer per hop.
+  ADR-0009 introduces v2 paths and roles; ADR-0010 carries the ordering epoch
+  on block requests. Keys, hop limits, credentials and HTTP/1.1 framing remain; cold multi-hop first-block latency includes full transfer per hop.
 
 
 - The block key uses `chunk.ChunkKey` (part of the wire protocol via placement),
-  but nothing else here is on the wire. HTTP Range/Content-Range is the external
+  and the engine supplies hop, supply and ordering-epoch wire fields.
+  HTTP Range/Content-Range is the external
   client contract.
-- Buffered coalescing preserves geometry, key construction and the wire
-  protocol; caller ownership and cancellation follow §3.3 and ADR-0008.
+- Buffered coalescing preserves geometry and key construction; caller ownership and cancellation follow §3.3 and ADR-0010.
 
 Managed-memory serving preserves whole-block validation and the existing HTTP
 wire contract. Borrowed results require explicit release; legacy owned-copy APIs
@@ -573,7 +584,11 @@ Managed-memory regression coverage:
 |---|---|
 | `TestDelegatedSizeScopesRangeCapabilityToOrigin` / `TestConcurrentDelegatedSizeProbes` | real HTTP metadata roots preserve per-endpoint Range state, independent concurrent probes and cross-origin digest reuse |
 | `TestDelegatedProbeRecoveryAndCancellation` | failed/canceled delegated probes terminate and recover; successful results remain cached |
-| `TestRoleViewSkewTerminatesAtSupplyRoot` | live cyclic reader views advance to the hop bound, recover through terminal supply and release nested buffers |
+| `TestCrossHopReadersShareOnePeerTransfer` | R-hot/A-B-cold real HTTP overlap: one 4 MiB R-to-A payload across hops, with cache refusal, canceled waiter and last-lease release |
+| `TestReaderSnapshotChurnPreservesStrictOrder` | missing self, duplicate IDs, changing reader/member subsets and fanout preserve strict normal parent/backup order |
+| `TestNormalFlightCanReceiveFallbackSupply` | A waits on B while B falls back to supply from A; cache decline does not create a wait cycle |
+| `TestRoutingEpochSkewKeepsCacheAndSupplyUsable` | mismatched cold relay declines before metadata/flight, while terminal supply and warm bytes remain available |
+| `TestRoleWeightSkewDeclinesBeforeFlight` | opposing membership weights decline cold relay before admission, recover through terminal supply and release buffers |
 | `TestZeroClassBudgetsDeliverOverP2P` | a full multi-block Range crosses two nodes with both serving cache classes disabled and one temporary buffer each |
 | `TestRootCandidatesShareAttemptDeadline` | root fallback cannot restart the block-flight deadline; expiry cancels active HTTP and releases buffers |
 | `TestRolePlacementAndTreeGolden` | independent weighted mixed-role owners/trees, 25 cases, membership/reader permutations, fanout 1/2/4, no snapshot and sole-reader cases |
@@ -624,12 +639,12 @@ go test ./internal/engine/ -cover -count=1
 | `TestConcurrentSubBlockPeerMissesSharePublication` | four 1 MiB subranges share one 4 MiB peer transfer through blocked cache publication, including declined admission; bytes and per-read/wire metrics remain correct |
 | `TestBlockLoadsCancellation` | a waiter cancels independently and a live waiter takes over after leader cancellation |
 | `TestBlockLoadsRetryFailuresWithOwnURL` | failures do not poison different credentials/endpoints and completed failures are not retained |
-| `TestBlockLoadsSeparateKeysAndRelayDepth` | distinct blocks remain independent and a higher-hop request cannot join a shallower flight |
+| `TestBlockLoadsSeparateKeysSupplyAndEpoch` | distinct blocks, terminal supply and ordering epochs remain independent |
 | `TestBlockLoadsDetachLeaderBytes` | caller-owned leader bytes do not alias the waiters' immutable snapshot |
 | `TestBlockLoadRechecksCacheAfterAdmission` | a caller with an older miss sees another load's publication before doing new I/O |
 | `TestBlockLoadPanicReleasesAdmission` | an unwinding source cannot pin the flight entry |
 | `TestCoalescedPeerRefusalRetriesCallerCredential` | a renewed credential survives an expired leader's peer/origin refusal without quarantining the parent |
-| `TestMixedDepthOriginFlightsReturnOwnedBytes` | separate relay-depth flights can share origin I/O but never share caller-owned backing arrays; wire bytes still count once |
+| `TestCrossHopLoadsReturnOwnedBytes` | cross-hop callers share normal loads while receiving independent mutable copies; origin wire bytes count once |
 | `TestBlockLoadAlreadyCanceled` | an already-canceled caller creates no new flight |
 | `TestCoalescedBlockValidatesBeforeSharingOriginFallback` | short peer data is rejected; waiters share only the validated origin fallback and wire bytes count once |
 | `TestServeAcrossBlocksAndChunks` | a range crossing block/chunk boundaries is assembled correctly |
@@ -716,17 +731,18 @@ go test ./internal/engine/ -cover -count=1
 
 - **P2P tree wired**: a miss routes to the parent in the preorder tree; relay
   nodes fetch-on-behalf and cache, offloading the owner; the root fetches origin.
-  Loop-bounded by `X-DART-Hop`. Nodes obtain and validate whole blocks before
+  Normal reader edges are strictly ordered; cold epoch mismatches use supply
+  fallback. `X-DART-Hop` caps forwarding. Nodes validate whole blocks before
   relaying. Long client ranges overlap different blocks using bounded prefetch.
-  The active-reader-set tree spans readers when configured, otherwise Ready
-  members. Still missing: slot-based zero copy and full epoch-skew convergence.
+  The owner-rooted tree spans eligible readers plus self when configured,
+  otherwise all Ready eligible readers. Epoch checks do not synchronize discovery.
 - **Range-unsupported origins are proxied, not cached** (§3.9): nothing about
   them is learned beyond the mark itself (no TTL, no re-probe until restart),
   and their traffic bypasses the P2P tree entirely.
 - **Readahead scope**: prefetch covers only the current request. Adaptive windows,
   cross-request fairness and reading beyond the requested range are not provided.
-- **Streaming vs buffering**: blocks are fetched whole into memory (bounded by
-  block size) then written; fine for cache hits/`sendfile` later.
+- **Streaming vs buffering**: blocks are validated whole before sending, using
+  pinned cache leases or bounded temporary buffers. HTTP transport copies remain.
 - **Size cache lifetime**: endpoint probe results are cached for process life with no TTL —
   correct for immutable objects; mutable objects need the policy layer.
 - **Mid-stream errors**: once headers are sent, a block error can only truncate

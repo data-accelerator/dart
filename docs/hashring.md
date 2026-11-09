@@ -132,6 +132,10 @@ Callers may rely on the following (each is guarded by a test, see §7):
    output, independent of input order, platform, or build.
 2. **Total order**: `Rank` is a strict total order (score desc + ID asc
    tie-break), no ambiguity from ties.
+   Fixed per-member weights preserve the relative order of common nodes under
+   set additions/removals. The engine's owner-rooted tree locally inserts eligible
+   self before ranking readers (ADR-0010); normal ancestors must precede self.
+   Changing weights can change relative order and requires the epoch boundary.
 3. **Weight proportionality**: the probability a node becomes owner equals
    `weight_i / Σweight` (weighted HRW / straw2).
 4. **Minimal disruption**: adding/removing one node reassigns only ~`1/(m±1)` of

@@ -221,7 +221,7 @@ owned-copy APIs; copying happens outside the metadata lock. `Reserve` fills a
 private slot, and `Reservation.Commit` publishes only after caller validation.
 The arena and cache metadata perform zero steady-state allocations after the
 needed payload segments exist; this does not claim zero allocations in HTTP,
-request scheduling, flights, compatibility copies or pressure fallback (ADR-0008).
+request scheduling, flights, compatibility copies or pressure fallback (ADR-0010).
 
 `Hybrid` is a `ClassStore` that puts a `MemStore` hot set in front of a backing
 `ClassStore` (normally a `Tiered`):
@@ -395,7 +395,7 @@ if ok {
   **not** persisted across restarts (§7), so it is free to change.
 
 The additive managed-memory contract follows
-[ADR-0008](./adr/0008-borrow-managed-memory-blocks.md). Existing owned-copy APIs
+[ADR-0010](./adr/0010-coalesce-directed-block-loads.md). Existing owned-copy APIs
 and wire keys retain their contract. Memory reservation can decline under pins;
 callers treat caching as best effort. These rules also apply to Hybrid's RAM tier.
 

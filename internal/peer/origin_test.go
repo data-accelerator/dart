@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -201,5 +202,61 @@ func TestOriginDelegationPreservesOriginRefusal(t *testing.T) {
 	b, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != 503 || !strings.Contains(string(b), "source denied") {
 		t.Fatalf("refusal lost: %d %q %v", resp.StatusCode, b, err)
+	}
+}
+
+func TestOriginCallerCancellationDoesNotQuarantineRoot(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprint("deadline=", deadline), func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			root := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Test-Stall") == "1" {
+					started <- struct{}{}
+					<-r.Context().Done()
+					return
+				}
+				w.Header().Set(HeaderOriginResponse, "1")
+				_, _ = io.WriteString(w, "healthy")
+			}))
+			defer root.Close()
+			c := NewClient()
+			c.Timeout = time.Second
+			c.Breaker = NewBreaker(BreakerOptions{FailureThreshold: 1})
+			addr := root.Listener.Addr().String()
+			for i := 0; i < 3; i++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				if deadline {
+					cancel()
+					ctx, cancel = context.WithTimeout(context.Background(), 50*time.Millisecond)
+				}
+				req, _ := http.NewRequestWithContext(ctx, "GET", "http://origin/file", nil)
+				req.Header.Set("Test-Stall", "1")
+				done := make(chan error, 1)
+				go func() { _, err := c.RoundTripOrigin(req, addr); done <- err }()
+				select {
+				case <-started:
+				case <-time.After(3 * time.Second):
+					t.Fatal("request did not reach root")
+				}
+				if !deadline {
+					cancel()
+				}
+				err := <-done
+				cancel()
+				if !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) || c.Breaker.State(addr) != BreakerClosed {
+					t.Fatal("caller cancellation quarantined root", err, c.Breaker.State(addr))
+				}
+			}
+			req, _ := http.NewRequest("GET", "http://origin/file", nil)
+			resp, err := c.RoundTripOrigin(req, addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			b, err := io.ReadAll(resp.Body)
+			if err != nil || string(b) != "healthy" {
+				t.Fatal(string(b), err)
+			}
+		})
 	}
 }

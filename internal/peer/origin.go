@@ -113,7 +113,11 @@ func (c *Client) RoundTripOrigin(req *http.Request, addr string) (*http.Response
 			err = context.DeadlineExceeded
 		}
 		cancel()
-		c.record(addr, permit, classify(err))
+		if req.Context().Err() != nil {
+			c.record(addr, permit, outcomeAnswered)
+		} else {
+			c.record(addr, permit, classify(err))
+		}
 		return nil, fmt.Errorf("peer origin request: %w", err)
 	}
 	if resp.Header.Get(HeaderOriginResponse) != "1" {

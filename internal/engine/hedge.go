@@ -298,8 +298,9 @@ func (e *Engine) hedgeTargets(ranked []hashring.Node, view *cluster.View) (prima
 	}
 
 	if selfIdx < 0 {
-		// Not a member of this tree: the owner is our upstream, no backup above it.
-		return addrOf(0), ""
+		// No ordered reader position: only loadRouted may select a terminal
+		// supply root. Never guess an ordinary parent from a snapshot.
+		return "", ""
 	}
 
 	// Walk up the ancestor chain collecting the first two usable addresses, so an

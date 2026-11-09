@@ -112,7 +112,7 @@ func TestDelegatedProbeRecoveryAndCancellation(t *testing.T) {
 	}
 }
 
-func TestRoleViewSkewTerminatesAtSupplyRoot(t *testing.T) {
+func TestRoleWeightSkewDeclinesBeforeFlight(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	content := blob(16)
@@ -168,9 +168,9 @@ func TestRoleViewSkewTerminatesAtSupplyRoot(t *testing.T) {
 	if err := engines["A"].Serve(ctx, &output, origin.URL, 0, 15); err != nil || !bytes.Equal(output.Bytes(), content) {
 		t.Fatal("skewed relay did not recover", err)
 	}
-	// The first root attempt carries maxHop and is declined too; the previous
-	// relay then recovers through the same terminal root at maxHop-1.
-	if maxSeen.Load() != maxHop || relays.Load() != maxHop || rootCalls.Load() != 2 {
+	// Opposing weights change the ordering basis, unlike reader-set churn.
+	// The cold receiver declines before admission, then A uses terminal supply.
+	if maxSeen.Load() != 1 || relays.Load() != 1 || rootCalls.Load() != 1 {
 		t.Fatal("unexpected hop/recovery path", maxSeen.Load(), relays.Load(), rootCalls.Load())
 	}
 	if forbidden.calls.Load() != 0 {
@@ -279,5 +279,34 @@ func TestRootCandidatesShareAttemptDeadline(t *testing.T) {
 	}
 	if n, b := receiveUsage(e); n != 0 || b != 0 {
 		t.Fatal("deadline leaked buffer", n, b)
+	}
+}
+
+func TestRoutingEpochSkewKeepsCacheAndSupplyUsable(t *testing.T) {
+	content := blob(16)
+	origin := countingOrigin(t, content, nil)
+	p := cluster.NewStaticProvider(cluster.Member{ID: "A", Addr: "a:1", Weight: 1, State: cluster.Ready})
+	e, err := New(Options{Chunk: testCfg(), Store: openStoreAt(t), Fetcher: newFetcher(), Cluster: p, Peer: peer.NewClient(), SelfID: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := blockKeyFor(origin.URL)
+	req := peer.BlockRequest{Key: key, URL: origin.URL, Hop: 1, HasEpoch: true, Epoch: p.Current().Epoch() ^ 1}
+	l, held, err := e.PeerLeaseSource()(context.Background(), req)
+	l.Release()
+	if err != nil || held || len(e.borrowed.m) != 0 || len(e.sizes) != 0 {
+		t.Fatal("cold epoch mismatch did not decline before probe/flight", held, err)
+	}
+	req.Supply = true
+	l, held, err = e.PeerLeaseSource()(context.Background(), req)
+	if err != nil || !held || !bytes.Equal(l.Bytes(), content) {
+		t.Fatal("terminal supply rejected epoch skew", held, err)
+	}
+	l.Release()
+	req.Supply = false
+	l, held, err = e.PeerLeaseSource()(context.Background(), req)
+	defer l.Release()
+	if err != nil || !held || !bytes.Equal(l.Bytes(), content) {
+		t.Fatal("warm immutable bytes rejected epoch skew", held, err)
 	}
 }

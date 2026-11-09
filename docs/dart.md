@@ -162,7 +162,7 @@ dart -listen :8080 -peer-listen :9000 -self-id B \
 
 ## 3. Behavior & guarantees
 
-Long ranges use bounded ordered in-range prefetch (ADR-0008). The byte/load
+Long ranges use bounded ordered in-range prefetch (ADR-0010). The byte/load
 limits cover speculative payload/results, not cache memory, foreground reads or
 transient copies. Prefetch workers are canceled and joined before handler exit.
 `-prefetch-window=1` selects serial block reads; no peer handler expands its range.
@@ -230,7 +230,7 @@ stamped at build time (`-ldflags "-X main.version=..."`) and reported by
   `node.Run`'s scheme registration.
 
 Memory reads borrow pinned blocks and supported refills receive directly into
-unpublished slots (ADR-0008). A pin delays slot reuse after eviction. Slot pressure
+unpublished slots (ADR-0010). A pin delays slot reuse after eviction. Slot pressure
 waits at most 2 ms with cancellation and then serves through temporary buffers
 without cache insertion. This exceptional path may allocate/copy. Existing cache
 flags and owned/borrowed policy remain; no persistent shared memory is provided.

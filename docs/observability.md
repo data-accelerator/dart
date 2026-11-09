@@ -20,7 +20,7 @@ The engine's instrumentation lives in `internal/engine/metrics.go`
 `*Metrics` disables instrumentation, so tests and embedders need not wire a
 registry.
 
-Bounded Range prefetch (ADR-0008) uses the same block-source and wire accounting
+Bounded Range prefetch (ADR-0010) uses the same block-source and wire accounting
 as demand. Completed prefetched loads count even if the client later stops before
 consuming them; client bytes count only writes actually accepted by its writer.
 The block latency histogram measures loads, not client-perceived Range latency.
@@ -159,7 +159,7 @@ Behavior notes:
 - Admin JSON shapes are debugging aids, not a stable API, but avoid gratuitous
   changes.
 
-Managed-memory pressure follows ADR-0008. `TieredStats.SlotWaits` and
+Managed-memory pressure follows ADR-0010. `TieredStats.SlotWaits` and
 `TieredStats.WriteBypasses` feed two cumulative counters:
 
 | Metric | Type | Meaning |

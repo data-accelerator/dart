@@ -23,6 +23,15 @@ every release's upgrade notes.
 - Support heterogeneous Helm workloads sharing one discovery Service; existing
   seed-plus-roster discovery carries roles in both directions.
 
+### Fixed
+
+- Coalesce normal block misses across relay hops (#97, ADR-0010). Include eligible
+  self in local reader trees and preserve strictly earlier parent/ancestor edges.
+  Terminal supply remains independent of waiting relays; cold requests crossing
+  membership ordering epochs fall back to supply while warm bytes remain usable.
+- Keep caller cancellation of delegated origin requests from opening a healthy
+  supply root's circuit; internally imposed header timeouts still count as failures.
+
 ### Upgrade notes
 
 - Coordinated upgrade required: peer block/roster paths use v2, roles participate
