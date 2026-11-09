@@ -162,6 +162,9 @@ Managed-memory pressure follows ADR-0008. `TieredStats.SlotWaits` and
 | `dart_store_write_bypass_total` | counter | memory reservations declined by pressure or TinyLFU admission |
 | `dart_temporary_buffers_total` | counter | temporary block receive buffers allocated outside cache arenas |
 | `dart_temporary_buffer_bytes_total` | counter | cumulative requested bytes in those temporary buffers |
+| `dart_receive_buffers` | gauge | live temporary receive buffers, including shared results held after download |
+| `dart_receive_bytes` | gauge | payload bytes held by those live temporary buffers |
+| `dart_receive_budget_rejected_total` | counter | temporary admission declines, including skipped speculation |
 
 Temporary-buffer counters include compatible disk/Hybrid ingress and unsupported
 reserving stores; they are cumulative allocation volume, not live RSS. Memory

@@ -92,6 +92,15 @@ type Options struct {
 	// Zero selects 16. Exhaustion falls back to demand without waiting for a slot.
 	PrefetchLoads int
 
+	// ReceiveBytes bounds live temporary block receive buffers, including results
+	// awaiting their last lease release. Zero selects max(256 MiB, BlockSize).
+	// Explicit values must fit a full block. Cache slots/copies are separate.
+	ReceiveBytes int64
+	// ReceiveLoads bounds the number of those buffers. Zero selects 64.
+	// Admission waits at most 2 ms; speculative fills do not wait and leave
+	// capacity for one demand block. Exhaustion returns ErrReceiveBudget.
+	ReceiveLoads int
+
 	// Metrics, if non-nil, instruments block sources, bytes, and latencies.
 	// Build it with NewMetrics(registry); nil disables instrumentation.
 	Metrics *Metrics
@@ -142,6 +151,7 @@ type Engine struct {
 	loads          blockLoads
 	prefetchWindow int
 	prefetch       prefetchBudget
+	receive        receiveBudget
 
 	// opener streams verbatim origin responses for the passthrough fallback
 	// (Range-ignoring origins); nil when the fetcher cannot stream.
@@ -179,6 +189,18 @@ func New(opt Options) (*Engine, error) {
 	if opt.PrefetchLoads == 0 {
 		opt.PrefetchLoads = 16
 	}
+	if opt.ReceiveBytes < 0 || opt.ReceiveLoads < 0 {
+		return nil, errors.New("engine: invalid receive limits")
+	}
+	if opt.ReceiveBytes == 0 {
+		opt.ReceiveBytes = max(256*chunk.MiB, opt.Chunk.BlockSize)
+	}
+	if opt.ReceiveBytes < opt.Chunk.BlockSize {
+		return nil, errors.New("engine: receive byte limit must fit a full block")
+	}
+	if opt.ReceiveLoads == 0 {
+		opt.ReceiveLoads = 64
+	}
 	ns := opt.Namespace
 	if ns == "" {
 		ns = "dart"
@@ -202,6 +224,7 @@ func New(opt Options) (*Engine, error) {
 		sizes:          make(map[string]sizeMeta),
 		prefetchWindow: opt.PrefetchWindow,
 		prefetch:       prefetchBudget{maxBytes: opt.PrefetchBytes, maxLoads: opt.PrefetchLoads},
+		receive:        receiveBudget{maxBytes: opt.ReceiveBytes, maxLoads: opt.ReceiveLoads, blockSize: opt.Chunk.BlockSize, mx: opt.Metrics},
 
 		replicas:      opt.Replicas,
 		hedgeEnabled:  opt.Hedge,

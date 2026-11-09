@@ -263,6 +263,12 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 			if errors.Is(r.err, peer.ErrUpstreamRefused) {
 				return peerResult{err: r.err}, false
 			}
+			if errors.Is(r.err, ErrReceiveBudget) {
+				// Another already-running contender may own a usable buffer. Wait
+				// for it, but changing sources cannot fix local admission pressure.
+				timerC = nil
+				continue
+			}
 			// Definite failure: fail over now, regardless of the hedge budget.
 			if backupUsable && !backupLaunched {
 				timerC = nil

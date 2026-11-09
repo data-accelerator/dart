@@ -188,6 +188,11 @@ fills publish only after validation. All request-owned workers and shared origin
 backends are joined before their last serving owner exits (ADR-0008), retaining
 ADR-0003's store-close ordering. No new flag, wire setting or epoch is required.
 
+Temporary block receive capacity is forwarded from `-receive-bytes` and
+`-receive-loads` into `engine.Options.ReceiveBytes/ReceiveLoads`, independently
+of cache and speculative prefetch budgets. Engine construction validates these
+limits; the detailed admission/lifetime contract is in docs/engine.md §3.5.1.
+
 ## 7. Testing
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.

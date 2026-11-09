@@ -36,17 +36,17 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 		rootAddr = m.Addr
 	}
 	get := func(ctx context.Context, addr string, supply bool) peerResult {
-		r, dst, cache, err := e.receiveBuffer(ctx, key, want)
+		b, err := e.receiveBuffer(ctx, key, want, isSpeculative(ctx))
 		if err != nil {
 			return peerResult{err: err}
 		}
-		defer r.Abort()
-		data, held, err := e.peer.GetInto(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply}, dst, nil)
+		defer b.abort()
+		data, held, err := e.peer.GetInto(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply}, b.bytes(), nil)
 		if err != nil || !held {
 			return peerResult{held: held, err: err}
 		}
 		e.mx.recordIngress(blockFromPeer, len(data))
-		l, err := e.finishBuffer(&r, key, data, cache)
+		l, err := e.finishBuffer(&b, key, true)
 		return peerResult{lease: l, held: err == nil, err: err}
 	}
 	var last error
@@ -60,7 +60,7 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 			return leasedRead{lease: r.lease, source: blockFromPeer}, nil
 		}
 		last = r.err
-		if errors.Is(last, peer.ErrUpstreamRefused) {
+		if errors.Is(last, peer.ErrUpstreamRefused) || errors.Is(last, ErrReceiveBudget) {
 			return leasedRead{}, last
 		}
 	}
@@ -88,7 +88,7 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 		}
 		r.lease.Release()
 		last = r.err
-		if errors.Is(last, peer.ErrUpstreamRefused) {
+		if errors.Is(last, peer.ErrUpstreamRefused) || errors.Is(last, ErrReceiveBudget) {
 			return leasedRead{}, last
 		}
 	}

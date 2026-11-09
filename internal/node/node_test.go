@@ -141,6 +141,13 @@ func TestParseFlagsDefaults(t *testing.T) {
 	if cfg.listen != ":8080" || cfg.prefix != "dart" || cfg.blockSize == 0 {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
+	if cfg.receiveBytes != 0 || cfg.receiveLoads != 64 {
+		t.Fatalf("wrong temporary receive defaults: %+v", cfg)
+	}
+	receiveCfg, err := parseFlags([]string{"-receive-bytes", "32MiB", "-receive-loads", "8"}, io.Discard, nil)
+	if err != nil || receiveCfg.receiveBytes != 32<<20 || receiveCfg.receiveLoads != 8 {
+		t.Fatalf("wrong temporary receive flags: %+v %v", receiveCfg, err)
+	}
 	if cfg.prefetchWindow != 2 || cfg.prefetchBytes != 64<<20 || cfg.prefetchLoads != 16 {
 		t.Fatalf("wrong prefetch defaults: %+v", cfg)
 	}

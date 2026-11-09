@@ -13,6 +13,8 @@ import (
 // become no-ops), so tests and embedders need not wire a registry.
 type Metrics struct {
 	temporaryBuffers, temporaryBytes *metrics.Counter
+	receiveLoads, receiveBytes       *metrics.Gauge
+	receiveRejected                  *metrics.Counter
 	// Where a served block came from.
 	cacheHits *metrics.Counter
 	peerHits  *metrics.Counter
@@ -53,6 +55,9 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 	return &Metrics{
 		temporaryBuffers: r.NewCounter("dart_temporary_buffers_total", "temporary block receive buffers"),
 		temporaryBytes:   r.NewCounter("dart_temporary_buffer_bytes_total", "bytes allocated for temporary block receive buffers"),
+		receiveLoads:     r.NewGauge("dart_receive_buffers", "live temporary block receive buffers including retained results"),
+		receiveBytes:     r.NewGauge("dart_receive_bytes", "live temporary block receive payload bytes including retained results"),
+		receiveRejected:  r.NewCounter("dart_receive_budget_rejected_total", "temporary receive admissions declined, including skipped speculation"),
 		cacheHits: r.NewCounter("dart_block_source_total",
 			"blocks served, by source", metrics.LabelPair{Name: "source", Value: "cache"}),
 		peerHits: r.NewCounter("dart_block_source_total",

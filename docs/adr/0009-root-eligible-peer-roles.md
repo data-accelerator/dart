@@ -68,8 +68,11 @@ classes bypass publication without consuming the other class's capacity. Existin
 TinyLFU, complete-block validation, bounded slot waits, lease lifetime and shared
 uncached delivery from ADR-0008 remain. Role alone does not allocate cache space.
 Transient receive storage requires bounded admission separately from persistent
-capacity and speculative prefetch limits. Peer block requests do not expand
-prefetch windows.
+capacity and speculative prefetch limits. Temporary admission is held through the
+last result lease, including uncached shared delivery. Bounded pressure failure
+is preferable to unbounded allocation or waiting on peer resource dependencies.
+Local speculative fills leave demand headroom and may be skipped/retried on
+demand. Peer block requests do not expand prefetch windows.
 
 Membership epochs use FNV-1a over ASCII `dart-roles-v1` and NUL, followed by each
 canonical member's ID, 0x1F, big-endian float64 weight, one role byte (ordinary=0,

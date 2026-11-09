@@ -250,6 +250,7 @@ the backing store's count. It exists for metrics/diagnostics, not hot paths.
 ```go
 type Lease struct { /* private data, owner, slot and generation */ }
 func HeapLease(data []byte) Lease
+func HeapLeaseWithRelease(data []byte, release func()) Lease
 func (l Lease) Bytes() []byte
 func (l Lease) Clone() Lease
 func (l *Lease) Release()
@@ -267,6 +268,7 @@ type Reservation struct { /* private exclusive slot ownership */ }
 func (r Reservation) Bytes() []byte
 func (r *Reservation) Commit() (Lease, error)
 func (r *Reservation) Abort()
+func (r *Reservation) Detach() Lease
 ```
 
 A `Lease` owns one reference. Move it by assignment, or call `Clone` to create
@@ -275,7 +277,16 @@ release, with capacity restricted to valid bytes. Do not mutate it or concurrent
 operate on the same lease variable. Different owners can read/release concurrently.
 The zero value and repeated release of the same variable are safe. `HeapLease`
 takes an existing buffer as immutable owned storage; the caller relinquishes
-mutation. The generic `Acquire` wraps a legacy store's copy when needed.
+mutation. `HeapLeaseWithRelease` additionally invokes a non-panicking callback
+once, after the final clone releases its bytes. It allocates one O(1) shared
+reference record when the callback is non-nil; cloning/releasing is O(1) with no
+payload copy. The callback must not access the released data. A nil callback
+retains `HeapLease` behavior. This lets receive admission cover slow writers and
+shared results after the backend fetch exits. `Reservation.Detach` freezes a
+validated fill without publishing a cache entry, transferring its existing pin
+in O(1) time/space. Stop writing before Detach, as before Commit. Each reservation
+ends with exactly one Commit, Detach or Abort.
+The generic `Acquire` wraps a legacy store's copy when needed.
 
 Memory Acquire/Clone/Release use O(1) space and expected O(1) metadata work.
 `Tiered` prefers owned and feeds only borrowed accesses to TinyLFU. Disk Acquire
@@ -402,6 +413,8 @@ Managed-memory regression coverage:
 | `TestFixedIndexChurnMatchesMap` | 50,000 deterministic random operations cross-checked against an independent map |
 | `TestHybridAdmissionFalseWhenBothTiersDecline` | backing admission rejection plus pinned RAM returns false; memory-only admission still returns true |
 | `TestReservationCloseBeforePublication` | closing an unfinished fill rejects publication and frees its arena |
+| `TestHeapLeaseFinalRelease` | concurrent clones return temporary capacity exactly once, after the final owner releases |
+| `TestReservationDetachRetainsUnpublishedSlot` | uncached immutable fill keeps its slot pinned without publication or copying |
 | `TestTieredBorrowedLeaseSurvivesPromotion` | promotion preserves old readers, isolation and pressure counters |
 | `TestLeaseConcurrentReuse` | concurrent borrowed-slot churn under race detector |
 

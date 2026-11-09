@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -43,7 +44,10 @@ type blockFuture struct {
 	err           error
 	reserved      int64
 }
-type blockJob struct{ index int64 }
+type blockJob struct {
+	index       int64
+	speculative bool
+}
 type blockResult struct {
 	index int64
 	lease store.Lease
@@ -93,7 +97,11 @@ func (e *Engine) serveBlocks(ctx context.Context, w io.Writer, url string, size,
 				case <-ctx.Done():
 					return
 				case job := <-jobs:
-					l, err := e.borrowBlock(ctx, url, objectID, size, job.index, 0)
+					work := ctx
+					if job.speculative {
+						work = speculativeContext(ctx)
+					}
+					l, err := e.borrowBlock(work, url, objectID, size, job.index, 0)
 					results <- blockResult{index: job.index, lease: l, err: err}
 				}
 			}
@@ -122,7 +130,7 @@ func (e *Engine) serveBlocks(ctx context.Context, w io.Writer, url string, size,
 	future := func(index int64) *blockFuture { return &pending[index%int64(window)] }
 	launch := func(index, reserved int64) {
 		*future(index) = blockFuture{index: index, active: true, reserved: reserved}
-		jobs <- blockJob{index: index}
+		jobs <- blockJob{index: index, speculative: reserved != 0}
 	}
 	for index := first; index <= last; index++ {
 		if err := ctx.Err(); err != nil {
@@ -151,6 +159,14 @@ func (e *Engine) serveBlocks(ctx context.Context, w io.Writer, url string, size,
 				done := future(r.index)
 				done.lease, done.err, done.ready = r.lease, r.err, true
 			}
+		}
+		if errors.Is(f.err, ErrReceiveBudget) && f.reserved != 0 {
+			// An unallocated speculative fill is a skipped optimization. Retry
+			// once as demand when it reaches the head of the ordered response.
+			e.prefetch.release(f.reserved)
+			f.reserved = 0
+			f.lease.Release()
+			f.lease, f.err = e.borrowBlock(ctx, url, objectID, size, index, 0)
 		}
 		if f.err != nil {
 			return f.err

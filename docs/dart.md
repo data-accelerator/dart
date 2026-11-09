@@ -40,6 +40,8 @@ dart [flags]
 | `-prefetch-window` | `2` | covering blocks in flight per client range, including demand; 1 disables, maximum 64 |
 | `-prefetch-bytes` | `64 MiB` | node-wide reserved speculative payload, including completed queued results |
 | `-prefetch-loads` | `16` | node-wide outstanding speculative loads/results; exhaustion preserves demand progress |
+| `-receive-bytes` | `0` (auto) | live temporary block receive payload; auto selects max(256 MiB, block-size); explicit limit must fit one block |
+| `-receive-loads` | `64` | live temporary block receive buffers, including retained shared results; separate from cache/prefetch capacity |
 | `-namespace` | `dart` | chunk-key namespace |
 | `-self-id` | `""` | this node's cluster ID (required with `-peers`) |
 | `-peer-listen` | `:9000` | peer block-server listen address (P2P mode) |
@@ -65,7 +67,7 @@ dart [flags]
 | `-registry-auth` | `""` | JSON file mapping registry host to `{username,password}` for private upstreams |
 | `-oci-digest-only` | `false` | only treat `<algo>:<hex>` paths as content-addressed (disables the Distribution object-store layout) |
 
-**Size units.** `-cache-size`, `-chunk-size`, `-block-size`, `-prefetch-bytes` and `-mem-size` accept
+**Size units.** `-cache-size`, `-chunk-size`, `-block-size`, `-prefetch-bytes`, `-receive-bytes` and `-mem-size` accept
 either a plain byte count or a suffix, following the Kubernetes convention so these
 values can sit beside container resource limits without a second convention: an `i`
 selects a power of two (`8GiB`, `512MiB`, also `Gi`/`Mi`) and its absence a power of
@@ -92,6 +94,13 @@ Roles do not set budgets automatically: a dedicated root-only peer commonly uses
 Invalid modes, capacities and fractions fail clearly. RAM payloads
 are managed in lazy arena segments; cache capacity excludes metadata, temporary buffers and
 in-flight reads/prefetch, so it is not a process RSS limit. Restart starts cold.
+Temporary receives are bounded separately by `-receive-bytes` and
+`-receive-loads` until the last reader releases each result. Exhaustion waits up
+to 2 ms before failing the load; speculative temporary fills skip immediately,
+leaving headroom for one demand block. Cached hits and arena-backed fills do not
+consume this temporary allowance. Defaults are capacity guardrails, not measured
+optimal concurrency; zero-cache-class workloads may need larger receive limits.
+
 Backend choice is node-local and can mix within a uniform-geometry cluster
 (ADR-0007); paths, keys and placement are unchanged.
 

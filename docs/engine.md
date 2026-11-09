@@ -70,6 +70,8 @@ type Options struct {
     PrefetchWindow int   // default 2, 1 disables; allowed 1..64 (zero = default)
     PrefetchBytes  int64 // default 64 MiB reserved speculative payload
     PrefetchLoads  int   // default 16 outstanding speculative loads/results
+    ReceiveBytes  int64 // default max(256 MiB, BlockSize); live temporary receive payload
+    ReceiveLoads  int   // default 64 temporary buffers, including leased results
 
     // Active-reader-set tree (optional):
     TrackerClient   *tracker.Client   // reach remote trackers
@@ -260,6 +262,34 @@ The exceptional path may allocate/copy. `fetch.IntoFetcher` permits direct origi
 fills; unsupported fetchers retain validation and copy into the receive buffer.
 Neither cache admission nor pressure may fail a read that already has valid bytes.
 
+`ReceiveBytes` / `ReceiveLoads` independently limit temporary block receive
+storage for both origin and peer fills, including hedges and fills for disabled
+cache classes. Zero options select defaults of `max(256 MiB, BlockSize)` and 64;
+negative limits or an explicit byte limit smaller than a block are rejected.
+These are capacity guardrails, not benchmark-derived throughput tuning. Capacity
+is acquired before allocation and stays charged through the final result lease,
+including shared readers and slow HTTP writers. Arena reservations use their
+cache capacity instead. Range-ignored results retain the original unpublished
+slot or temporary lease without making a second payload copy.
+
+Demand admission waits at most 2 ms (subject to scheduling and earlier context
+cancellation), then returns `ErrReceiveBudget` if still full. It never waits
+indefinitely while another peer may depend on this node. Local capacity failure
+occurs before contacting a source; relay reporting uses the existing source-failure
+response, without quarantining an honest sender. HTTP handlers abort an already
+committed response on failure, as for other block errors. Completed valid results
+are delivered even if all capacity becomes occupied afterward. To sustain more
+concurrent uncached delivery, configure larger receive limits.
+
+Local speculative fills never wait for temporary capacity and leave one load and
+one full block of headroom for demand. A skipped fill is retried as demand when
+its turn arrives; a foreground caller joining that speculative flight retries
+with demand admission. Other concurrent demand or incoming peer loads can still
+exhaust the budget. These limits bound live engine-owned receive payloads, not
+RSS, buffered copies returned by legacy APIs/custom fetchers, disk-cache hit
+copies, transport buffers or garbage awaiting collection. Cache slot capacity
+and prefetch reservations remain separate bounds.
+
 ### 3.6 Bounded ordered Range prefetch
 
 `Serve` schedules only blocks covering the clamped request, nearest first, and
@@ -270,8 +300,9 @@ handlers fetch exactly one requested block and never expand a prefetch window.
 The engine's `PrefetchBytes` and `PrefetchLoads` admission is non-blocking.
 Reservations cover each speculative block's expected payload through consumption,
 including completed results held behind a slow client. On exhaustion, a foreground
-block still loads without a reservation; demand is never queued behind budget
-admission. These limits bound speculative payload/results, not total process RSS:
+block still loads without a speculative reservation. It remains subject to
+temporary receive admission described in §3.5.1. These prefetch limits bound
+speculative payload/results, not total process RSS:
 foreground reads, caches, transport buffers and temporary validation/singleflight
 copies have separate memory costs. A block larger than the byte budget is read on
 demand. Existing cache hits and same-block flights are reused, and fetched blocks
@@ -478,6 +509,12 @@ Managed-memory regression coverage:
 
 | Test | Property |
 |---|---|
+| `TestReceiveBudgetTracksSharedDelivery` | disabled-class concurrent readers share one refill; final lease returns capacity; exhaustion prevents source I/O and updates metrics |
+| `TestReceiveBudgetPrefetchDemandProgress` | one-buffer byte/load limits preserve ordered long-Range delivery without repeated source transfers |
+| `TestReceiveBudgetFailureAndCancellation` | failed/truncated/canceled fills and failed writes release capacity |
+| `TestReceiveBudgetRangeIgnoredRetainsOneBuffer` | range-ignored results retain one accounted payload without publication |
+| `TestReceiveBudgetAdmission` | independent byte/load caps, reserved demand headroom, cancellation, bounded pressure failure and invalid options |
+| `TestDemandRetriesSkippedSpeculativeFlight` | a demand caller sharing a declined speculative flight retries with demand admission |
 | `TestBorrowedOriginUsesReceiveSlot` | receive/cache/sender share one payload; zero warm block allocation |
 | `TestBorrowedPressureBypassesPublication` | correct subrange and temporary accounting with a pinned full arena |
 | `TestBorrowedWriteFailureReleasesPins` | all queued/current pins and speculative reservations released on client error |

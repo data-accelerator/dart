@@ -57,6 +57,8 @@ type config struct {
 	prefetchWindow   int
 	prefetchBytes    int64
 	prefetchLoads    int
+	receiveBytes     int64
+	receiveLoads     int
 	namespace        string
 	selfID           string
 	role             cluster.Role
@@ -466,6 +468,8 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.IntVar(&cfg.prefetchWindow, "prefetch-window", 2, "covering blocks in flight per client Range; 1 disables prefetch (max 64)")
 	sizeVar(fs, &cfg.prefetchBytes, "prefetch-bytes", 64*chunk.MiB, "node-wide speculative payload budget, including queued results")
 	fs.IntVar(&cfg.prefetchLoads, "prefetch-loads", 16, "node-wide outstanding speculative loads/results")
+	sizeVar(fs, &cfg.receiveBytes, "receive-bytes", 0, "live temporary block receive byte limit; 0 selects max(256MiB, block-size)")
+	fs.IntVar(&cfg.receiveLoads, "receive-loads", 64, "live temporary block receive buffer limit")
 	fs.Float64Var(&cfg.hedgeRatio, "hedge-ratio", 0.05, "max share of peer fetches allowed to hedge")
 	fs.DurationVar(&cfg.peerTimeout, "peer-timeout", peer.DefaultRequestTimeout, "per-request timeout for peer block fetches")
 	fs.IntVar(&cfg.breakerFails, "breaker-failures", peer.DefaultFailureThreshold, "consecutive peer failures that open its circuit; 0 disables breaking")
@@ -627,6 +631,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 		Role: cfg.role, Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
 		Hedge: cfg.hedge, HedgeRatio: cfg.hedgeRatio,
 		PrefetchWindow: cfg.prefetchWindow, PrefetchBytes: cfg.prefetchBytes, PrefetchLoads: cfg.prefetchLoads,
+		ReceiveBytes: cfg.receiveBytes, ReceiveLoads: cfg.receiveLoads,
 		Metrics: engine.NewMetrics(reg),
 	}
 	// P2P is enabled by either a static peer list or a discovery spec.
