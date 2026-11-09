@@ -446,7 +446,7 @@ whose circuit is open** by walking toward usable ancestors and roots. Each
 attempt validates the full block before handing it to the requester. Reported
 source failures do not quarantine an honest relay; malformed data does. If no
 ancestor or supply-root candidate can serve, the read fails. The candidate
-sequence shares `fetch.FlightLimit(Fetcher)` (default 30 s), in addition to each
+sequence shares `fetch.FlightLimit(Fetcher)` (default ten minutes), in addition to each
 peer's timeout and the caller's earlier deadline.
 
 Together these bound abrupt node death: the dial timeout makes the first affected
