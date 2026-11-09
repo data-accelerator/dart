@@ -9,24 +9,53 @@ import (
 	"github.com/data-accelerator/dart/internal/tracker"
 )
 
-// readerSetTTL is the fallback cache period for a locally cached reader set,
-// used only when the tracker granted no lease duration. Normally the cache
-// period is half the granted lease (see readers), so renewal always lands
-// before the lease lapses.
+// readerSetTTL is used when a tracker reports no lease duration.
 const readerSetTTL = 2 * time.Second
 
-// readerSet is a cached, frozen reader set for one file.
+// Startup refreshes are demand-driven: no timer or background worker is kept
+// for an object. The normal ceiling remains half of the granted reader lease.
+const initialReaderRefresh = 50 * time.Millisecond
+
+type readerBasis struct {
+	addr  string
+	epoch uint64
+}
+
+type readerFlightKey struct {
+	objectID string
+	basis    readerBasis
+}
+
+type readerFlight struct {
+	done   chan struct{}
+	leader context.Context
+	nodes  []string
+}
+
+// Published cache entries are immutable; callers only read their node slices.
 type readerSet struct {
-	nodes     []string
-	epoch     uint64
-	cachedAt  time.Time
-	expiresAt time.Time
+	nodes               []string
+	epoch               uint64
+	cachedAt, expiresAt time.Time
+	leaseUntil          time.Time
+	interval            time.Duration
+	basis               readerBasis
+}
+
+func readerRefreshDelay(previous, ceiling time.Duration) time.Duration {
+	if previous <= 0 {
+		return min(initialReaderRefresh, ceiling)
+	}
+	if previous >= ceiling/2 {
+		return ceiling
+	}
+	return min(previous*2, ceiling)
 }
 
 // trackerAddr returns the address of the tracker responsible for fileKey: the
 // HRW top-1 Ready member (every node computes the same one, so no registry is
-// needed). ok is false when membership is unusable or this node is the tracker
-// (in which case the caller uses the local registry directly).
+// needed). ok is false when membership is unusable; self selects the local
+// registry when this node is the tracker.
 func (e *Engine) trackerAddr(view *cluster.View, fileKey uint64) (addr string, self bool, ok bool) {
 	ranked := hashring.Rank(fileKey, view.Ready())
 	if len(ranked) == 0 {
@@ -42,71 +71,106 @@ func (e *Engine) trackerAddr(view *cluster.View, fileKey uint64) (addr string, s
 	return m.Addr, false, true
 }
 
-// readers returns the active reader set for the object, JOINing the tracker (or
-// the local registry when this node is the tracker) and caching the result for
-// readerSetTTL. It returns nil when no reader set is available, in which case
-// callers with tracking enabled route directly to the preferred owner.
+// readers returns a cached reader set or joins the tracker. One inline caller
+// owns each refresh; waiters can cancel independently, and a canceled leader
+// allows a live waiter to retry without letting the old result overwrite it.
 func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID string, fileKey uint64) []string {
 	if e.trackerClient == nil && e.trackerReg == nil {
 		return nil
 	}
-	now := time.Now()
-
-	e.rsMu.Lock()
-	if rs, hit := e.rs[objectID]; hit && now.Before(rs.expiresAt) {
-		nodes := rs.nodes
-		e.rsMu.Unlock()
-		return nodes
-	}
-	e.rsMu.Unlock()
-
 	addr, self, ok := e.trackerAddr(view, fileKey)
-	if !ok {
+	if !ok || (self && e.trackerReg == nil) || (!self && e.trackerClient == nil) {
 		return nil
 	}
-
-	var resp tracker.JoinResponse
-	if self {
-		if e.trackerReg == nil {
+	basis := readerBasis{addr: addr, epoch: view.Epoch()}
+	key := readerFlightKey{objectID: objectID, basis: basis}
+	for {
+		if ctx.Err() != nil {
 			return nil
 		}
-		resp = e.trackerReg.Join(objectID, e.selfID, 0)
-	} else {
-		if e.trackerClient == nil {
-			return nil
+		now := time.Now()
+		e.rsMu.Lock()
+		previous := e.rs[objectID]
+		if previous != nil && previous.basis == basis && now.Before(previous.expiresAt) {
+			nodes := previous.nodes
+			e.rsMu.Unlock()
+			return nodes
 		}
-		var err error
-		resp, err = e.trackerClient.Join(ctx, addr, objectID, e.selfID, 0)
-		if err != nil {
-			// Tracker unreachable: route directly to the owner rather than
-			// failing the read (S is soft state).
-			return nil
-		}
-	}
-
-	// Cache for half the granted lease, so the next re-Join lands well before
-	// our tracker lease lapses: a renewal period longer than the lease would
-	// silently drop this node from the frozen reader set while it is still
-	// reading. (readerSetTTL is only the fallback for a tracker that reported
-	// no grant.)
-	ttl := time.Duration(resp.TTLMs) * time.Millisecond / 2
-	if ttl <= 0 {
-		ttl = readerSetTTL
-	}
-	e.rsMu.Lock()
-	if len(e.rs) > 256 {
-		// Bound the cache: drop expired entries before growing past a few
-		// hundred objects. Live entries stay; the map tracks objects currently
-		// being read, which is naturally small.
-		for id, rs := range e.rs {
-			if now.After(rs.expiresAt) {
-				delete(e.rs, id)
+		if c := e.rsCalls[key]; c != nil && c.leader.Err() == nil {
+			e.rsMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-c.leader.Done():
+				continue
+			case <-c.done:
+				if ctx.Err() != nil {
+					return nil
+				}
+				if c.leader.Err() != nil {
+					continue
+				}
+				return c.nodes
 			}
 		}
+		if e.rsCalls == nil {
+			e.rsCalls = make(map[readerFlightKey]*readerFlight)
+		}
+		c := &readerFlight{done: make(chan struct{}), leader: ctx}
+		e.rsCalls[key] = c
+		e.rsMu.Unlock()
+
+		var resp tracker.JoinResponse
+		var err error
+		if self {
+			resp = e.trackerReg.Join(objectID, e.selfID, 0)
+		} else {
+			resp, err = e.trackerClient.Join(ctx, addr, objectID, e.selfID, 0)
+		}
+		e.rsMu.Lock()
+		if e.rsCalls[key] == c {
+			delete(e.rsCalls, key)
+			if err == nil && ctx.Err() == nil {
+				// Clamp before duration conversion, matching the registry's
+				// grant bound. A missing grant retains the historical fallback.
+				lease := time.Duration(0)
+				if resp.TTLMs > 0 {
+					lease = time.Duration(min(resp.TTLMs, tracker.MaxLeaseTTL.Milliseconds())) * time.Millisecond
+				}
+				ceiling := lease / 2
+				if ceiling <= 0 {
+					ceiling = readerSetTTL
+					lease = 2 * ceiling
+				}
+				interval := time.Duration(0)
+				if previous != nil && previous.basis == basis && now.Before(previous.leaseUntil) {
+					interval = previous.interval
+				}
+				interval = readerRefreshDelay(interval, ceiling)
+				if len(e.rs) > 256 {
+					for id, cached := range e.rs {
+						if !now.Before(cached.leaseUntil) {
+							delete(e.rs, id)
+						}
+					}
+				}
+				if e.rs == nil {
+					e.rs = make(map[string]*readerSet)
+				}
+				// A response from an older tracker view must not replace a cache
+				// installed by a more recently started refresh for this object.
+				if current := e.rs[objectID]; current == nil || !current.cachedAt.After(now) {
+					e.rs[objectID] = &readerSet{nodes: resp.Readers, epoch: resp.EpochS, cachedAt: now,
+						expiresAt: now.Add(interval), leaseUntil: now.Add(lease), interval: interval, basis: basis}
+				}
+				e.mx.recordReaderSnapshot(len(resp.Readers))
+				c.nodes = resp.Readers
+			}
+		}
+		close(c.done)
+		e.rsMu.Unlock()
+		return c.nodes
 	}
-	e.rs[objectID] = &readerSet{nodes: resp.Readers, epoch: resp.EpochS, cachedAt: now, expiresAt: now.Add(ttl)}
-	e.rsMu.Unlock()
-	return resp.Readers
 }
 
 // treeNodes returns the ordered candidate set the distribution tree is built

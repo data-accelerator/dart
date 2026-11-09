@@ -36,7 +36,9 @@ type Metrics struct {
 	// Failover: a definite peer failure escalated to the next ancestor. Counted
 	// separately from hedging because it is reactive rather than speculative and
 	// is deliberately not rate limited.
-	failover *metrics.Counter
+	failover                                          *metrics.Counter
+	peerFetchRoot, peerFetchParent, peerFetchAncestor *metrics.Counter
+	readerSnapshotSize                                *metrics.Histogram
 
 	// Passthrough: requests proxied verbatim because the origin ignores Range.
 	passthrough *metrics.Counter
@@ -53,11 +55,15 @@ var blockLatencyBounds = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10}
 // NewMetrics registers the engine's metrics on r and returns the handle.
 func NewMetrics(r *metrics.Registry) *Metrics {
 	return &Metrics{
-		temporaryBuffers: r.NewCounter("dart_temporary_buffers_total", "temporary block receive buffers"),
-		temporaryBytes:   r.NewCounter("dart_temporary_buffer_bytes_total", "bytes allocated for temporary block receive buffers"),
-		receiveLoads:     r.NewGauge("dart_receive_buffers", "live temporary block receive buffers including retained results"),
-		receiveBytes:     r.NewGauge("dart_receive_bytes", "live temporary block receive payload bytes including retained results"),
-		receiveRejected:  r.NewCounter("dart_receive_budget_rejected_total", "temporary receive admissions declined, including skipped speculation"),
+		peerFetchRoot:      r.NewCounter("dart_peer_fetch_total", "peer block HTTP attempts dispatched by topology target", metrics.LabelPair{Name: "target", Value: "root"}),
+		peerFetchParent:    r.NewCounter("dart_peer_fetch_total", "peer block HTTP attempts dispatched by topology target", metrics.LabelPair{Name: "target", Value: "parent"}),
+		peerFetchAncestor:  r.NewCounter("dart_peer_fetch_total", "peer block HTTP attempts dispatched by topology target", metrics.LabelPair{Name: "target", Value: "ancestor"}),
+		readerSnapshotSize: r.NewHistogram("dart_reader_snapshot_size", "published reader count in successful tracker JOIN responses, excluding cache hits and coalesced waiters", []float64{0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024}),
+		temporaryBuffers:   r.NewCounter("dart_temporary_buffers_total", "temporary block receive buffers"),
+		temporaryBytes:     r.NewCounter("dart_temporary_buffer_bytes_total", "bytes allocated for temporary block receive buffers"),
+		receiveLoads:       r.NewGauge("dart_receive_buffers", "live temporary block receive buffers including retained results"),
+		receiveBytes:       r.NewGauge("dart_receive_bytes", "live temporary block receive payload bytes including retained results"),
+		receiveRejected:    r.NewCounter("dart_receive_budget_rejected_total", "temporary receive admissions declined, including skipped speculation"),
 		cacheHits: r.NewCounter("dart_block_source_total",
 			"blocks served, by source", metrics.LabelPair{Name: "source", Value: "cache"}),
 		peerHits: r.NewCounter("dart_block_source_total",
@@ -97,6 +103,26 @@ func NewMetrics(r *metrics.Registry) *Metrics {
 		originLatency: r.NewHistogram("dart_block_fetch_seconds",
 			"block fetch latency by source", blockLatencyBounds,
 			metrics.LabelPair{Name: "source", Value: "origin"}),
+	}
+}
+
+func (m *Metrics) recordPeerFetch(root, parent bool) {
+	if m == nil {
+		return
+	}
+	switch {
+	case root:
+		m.peerFetchRoot.Inc()
+	case parent:
+		m.peerFetchParent.Inc()
+	default:
+		m.peerFetchAncestor.Inc()
+	}
+}
+
+func (m *Metrics) recordReaderSnapshot(n int) {
+	if m != nil {
+		m.readerSnapshotSize.Observe(float64(n))
 	}
 }
 

@@ -15,7 +15,7 @@ This directory holds DART's **official documentation** (tracked in git). It targ
 | [fetch.md](./fetch.md) | `internal/fetch` — origin HTTP range fetch + singleflight coalescing | Implemented, tests passing |
 | [engine.md](./engine.md) | `internal/engine` — read-through orchestration (cache/peer/origin), whole-block relay, bounded prefetch, hedging | Implemented, tests passing |
 | [peer.md](./peer.md) | `internal/peer` — node-to-node block transport (server + pooled client) | Implemented, tests passing |
-| [tracker.md](./tracker.md) | `internal/tracker` — per-file active reader set (leases, tick freeze) | Implemented, tests passing |
+| [tracker.md](./tracker.md) | `internal/tracker` — per-file active reader set (leases, immediate growth, batched departures) | Implemented, tests passing |
 | [registry.md](./registry.md) | `internal/registry` — container registry pull-through mirror (OverlayBD/containerd path) | Implemented, tests passing |
 | [observability.md](./observability.md) | `internal/metrics` + `internal/admin` — Prometheus exporter, admin endpoints | Implemented, tests passing |
 | [node.md](./node.md) | `internal/node` — node assembly: flags, store/engine wiring, discovery-scheme dispatch | Implemented, tests passing |

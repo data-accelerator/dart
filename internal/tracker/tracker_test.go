@@ -52,30 +52,44 @@ func TestJoinPublishesFirstReaderImmediately(t *testing.T) {
 	}
 }
 
-// TestTickFreeze: a second reader joining within the same tick must not change
-// the published set (topology stays stable between ticks).
-func TestTickFreeze(t *testing.T) {
+// New readers are published immediately; renewal does not advance the epoch.
+func TestJoinPublishesGrowthImmediately(t *testing.T) {
 	clk := newClock()
 	r := newReg(clk, 5*time.Second, 10*time.Second)
-	first := r.Join("f1", "A", 0)
+	first := r.Join("f1", "B", 0)
+	next := r.Join("f1", "A", 0)
+	if !equalStrings(next.Readers, []string{"A", "B"}) || next.EpochS != first.EpochS+1 {
+		t.Fatal(next)
+	}
+	renewed := r.Join("f1", "B", 0)
+	if renewed.EpochS != next.EpochS {
+		t.Fatal("renewal republished", renewed)
+	}
+	next.Readers[0] = "mutated"
+	if got, _ := r.Readers("f1"); !equalStrings(got, []string{"A", "B"}) {
+		t.Fatal("JOIN response aliases publication", got)
+	}
+}
 
-	// B joins in the same tick: still frozen at [A].
-	resp := r.Join("f1", "B", 0)
-	if len(resp.Readers) != 1 || resp.Readers[0] != "A" {
-		t.Errorf("within tick readers = %v, want [A] (frozen)", resp.Readers)
+func TestDeparturesWaitForTick(t *testing.T) {
+	clk := newClock()
+	r := newReg(clk, 5*time.Second, 10*time.Second)
+	r.Join("f", "A", 0)
+	first := r.Join("f", "B", 0)
+	r.Leave("f", "A")
+	next := r.Join("f", "C", 0)
+	if !equalStrings(next.Readers, []string{"A", "B", "C"}) || next.EpochS != first.EpochS+1 {
+		t.Fatal(next)
 	}
-	if resp.EpochS != first.EpochS {
-		t.Errorf("epochS changed within a tick: %d -> %d", first.EpochS, resp.EpochS)
+	// Growth must not postpone the existing removal tick.
+	clk.advance(5 * time.Second)
+	got, epoch := r.Readers("f")
+	if !equalStrings(got, []string{"B", "C"}) || epoch != next.EpochS+1 {
+		t.Fatal(got, epoch)
 	}
-
-	// After the tick, both are published and the epoch advances.
-	clk.advance(6 * time.Second)
-	resp2 := r.Join("f1", "B", 0)
-	if len(resp2.Readers) != 2 || resp2.Readers[0] != "A" || resp2.Readers[1] != "B" {
-		t.Errorf("after tick readers = %v, want [A B]", resp2.Readers)
-	}
-	if resp2.EpochS == first.EpochS {
-		t.Error("epochS should change when the frozen set changes")
+	// A rejoining departed reader is immediately visible again.
+	if got := r.Join("f", "A", 0); !equalStrings(got.Readers, []string{"A", "B", "C"}) {
+		t.Fatal(got)
 	}
 }
 

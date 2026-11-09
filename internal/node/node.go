@@ -462,7 +462,7 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs.IntVar(&cfg.rootFanout, "root-fanout", 1, "preferred root branching factor (normal tree children, not a transfer limit)")
 	fs.StringVar(&cfg.adminAddr, "admin", ":9100", "admin/metrics listen address; empty disables")
 	fs.BoolVar(&cfg.readerTree, "reader-tree", true, "build the distribution tree over the active reader set (per-file tracker)")
-	fs.DurationVar(&cfg.trackerTick, "tracker-tick", tracker.DefaultTick, "how often a tracker republishes a reader set")
+	fs.DurationVar(&cfg.trackerTick, "tracker-tick", tracker.DefaultTick, "tracker removal/expiry batching interval (new readers publish immediately)")
 	fs.IntVar(&cfg.replicas, "replicas", 1, "HRW candidates that authoritatively hold a chunk (the owned budget)")
 	fs.Float64Var(&cfg.ownedFraction, "owned-fraction", 0.8, "owned cache share in [0,1]; 0 borrowed-only, 1 owned-only")
 	sizeVar(fs, &cfg.memSize, "mem-size", 256*chunk.MiB, "in-memory hot-set size; below one block disables the memory tier")

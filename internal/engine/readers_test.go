@@ -63,10 +63,8 @@ func TestTreeNodesPrefersReaderSet(t *testing.T) {
 		t.Fatalf("fileKey mismatch: %d vs %d", got, fileKey)
 	}
 
-	// Register the two readers and let the tick publish them.
+	// Both readers are published in their JOIN responses.
 	reg.Join(oid, self, 0)
-	reg.Join(oid, other, 0)
-	time.Sleep(5 * time.Millisecond)
 	reg.Join(oid, other, 0)
 
 	nodes, fromReaders := e.treeNodes(context.Background(), view, oid, fileKey, 12345)
@@ -230,7 +228,8 @@ func TestReaderSnapshotChurnPreservesStrictOrder(t *testing.T) {
 						}
 					}
 					before := append([]string(nil), ids...)
-					e.rs["object"] = &readerSet{nodes: ids, expiresAt: time.Now().Add(time.Hour)}
+					addr, _, _ := e.trackerAddr(view, 1)
+					e.rs["object"] = &readerSet{nodes: ids, expiresAt: time.Now().Add(time.Hour), basis: readerBasis{addr: addr, epoch: view.Epoch()}}
 					order, _ := e.treeNodes(context.Background(), view, "object", 1, key)
 					seen, selfIndex := make(map[string]bool), -1
 					for i, n := range order {

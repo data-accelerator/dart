@@ -9,6 +9,9 @@ every release's upgrade notes.
 
 ### Added
 
+- Expose block HTTP attempts by topology target and published reader snapshot
+  sizes to diagnose startup distribution without per-connection traffic capture.
+
 - Configure the preferred owner with `-root-fanout` (default 1), independently
   of descendant `-fanout` (default 2), reducing normal first-hop replication
   (#100, ADR-0011). Hedging, root fallback and snapshot churn remain unrestricted
@@ -29,6 +32,10 @@ every release's upgrade notes.
   seed-plus-roster discovery carries roles in both directions.
 
 ### Fixed
+
+- Publish new tracker readers immediately and refresh active client snapshots
+  with bounded, demand-driven backoff (#102, ADR-0012). Concurrent JOINs share
+  one request; departures remain tick-batched and no background polling is added.
 
 - Coalesce normal block misses across relay hops (#97, ADR-0010). Include eligible
   self in local reader trees and preserve strictly earlier parent/ancestor edges.

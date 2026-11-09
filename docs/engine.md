@@ -32,14 +32,19 @@ never become descendants; non-root peers never contact origin. Without P2P,
 ordinary nodes operate as single-node caches; node assembly requires P2P for
 restricted roles.
 
-Reader-set lookups are **cached per object for half the granted tracker lease**
-(and the cache doubles as the lease renewal: a hit re-serves the frozen set, a
-miss re-JOINs, which refreshes this node's own lease). Caching for half the
-lease guarantees renewal always lands before the lease lapses; a tracker that
-grants nothing falls back to a 2 s period. Expired entries are swept as the
-cache grows past a few hundred objects, so the map tracks objects currently
-being read and stays small. When the tracker is unreachable the engine falls
-back to the preferred owner for that lookup (the reader set is soft state).
+Reader-set lookups are cached per object and tracker membership view (ADR-0012).
+On continued routing demand, successful refreshes use 50 ms, 100 ms, 200 ms, ...,
+capped at half the granted tracker lease. A short lease caps even the first
+interval; a missing grant uses a 2 s ceiling. Each miss re-JOINs to renew the
+lease. The schedule restarts after lease expiry or tracker-view change, never
+because the reader list changed. There are no background polls or refresh RPCs
+on an ordinary cache hit. Concurrent JOINs share one inline caller; waiters can
+cancel independently and retry after leader cancellation. Failed refreshes are
+not cached, and late responses cannot replace a more recently installed view.
+Entries past their lease are swept as the map grows beyond 256 objects. When
+the tracker is unreachable that lookup routes to the preferred owner.
+See [tracker measurements](./tracker.md#startup-measurement-and-tradeoffs) for
+startup traffic and the additional control-plane request cost.
 
 ## 2. Concepts
 
@@ -579,6 +584,10 @@ block sources. A supply root records its proxied response bytes as `origin_in`.
 
 ## 6. Determinism / Stability Contract
 
+Reader JOIN growth is immediate; client refresh uses demand-driven bounded
+backoff and shared per-object/view calls (ADR-0012, [tracker](./tracker.md)).
+This does not alter HRW order, normal cross-hop flights or terminal supply.
+
 - ADR-0011 defaults the preferred root to one child and descendants to two.
   Explicit equal degrees preserve the uniform tree. Changing degrees preserves
   the strict HRW dependency order; no flight key or membership epoch change is
@@ -718,7 +727,8 @@ go test ./internal/engine/ -cover -count=1
 | `TestBlockDoesNotCacheRangeIgnored` | defense in depth: bytes sliced from a Range-ignored 200 are served, never cached |
 | `TestHedgeWinMetricsRequireFiredHedge` | no hedge fired → no hedge-win counters (the backup_won/fired comparison stays meaningful) |
 | `TestMissesDoNotFeedLatencyEstimator` | fast 404 misses never arm the hedge delay |
-| `TestReaderSetCacheFollowsGrantedLease` | the reader-set cache renews at half the granted lease, never lapsing mid-read |
+| `TestReaderSetCacheFollowsGrantedLease` | a short granted lease bounds the reader-set cache renewal period |
+| `TestPeerFetchTargetMetrics` | real root, parent and ancestor attempts match metrics, including breaker-promoted ancestors |
 | `TestRelayParentErrorFallsBackToOrigin` | an open-circuit/errored parent is skipped to origin, not propagated as a 500 |
 | `TestEmptyObjectGetServes200` | empty object: 200 empty on both paths; a Range request stays 416 |
 | `TestParseRangeSuffixEmptyObject` | a suffix range on an empty object is unsatisfiable (no inverted `[0,-1]` interval); non-empty suffix behavior unchanged |
