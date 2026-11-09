@@ -189,6 +189,7 @@ func (c *Client) FetchRosterMember(ctx context.Context, addr string, self Roster
 	if c.Breaker != nil {
 		permit, _ = c.Breaker.begin(addr, false)
 	}
+	caller := ctx
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 
@@ -208,7 +209,7 @@ func (c *Client) FetchRosterMember(ctx context.Context, addr string, self Roster
 	req.Header.Set(HeaderPeerWeight, strconv.FormatFloat(self.Weight, 'g', -1, 64))
 	resp, err := c.http().Do(req)
 	if err != nil {
-		c.record(addr, permit, classify(err))
+		c.record(addr, permit, requestOutcome(caller, err))
 		return Roster{}, "", fmt.Errorf("peer %s: roster: %w", addr, err)
 	}
 	defer resp.Body.Close()
@@ -219,7 +220,7 @@ func (c *Client) FetchRosterMember(ctx context.Context, addr string, self Roster
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRosterBody))
 	if err != nil {
-		c.record(addr, permit, outcomeSoftFail)
+		c.record(addr, permit, requestOutcome(caller, err))
 		return Roster{}, "", fmt.Errorf("peer %s: roster: read: %w", addr, err)
 	}
 	roster, err := decodeRoster(body)

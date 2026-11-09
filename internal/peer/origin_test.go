@@ -137,6 +137,7 @@ func TestOriginDelegationCancelsStalledBody(t *testing.T) {
 	defer root.Close()
 	c := NewClient()
 	c.Timeout = 100 * time.Millisecond
+	c.Breaker = NewBreaker(BreakerOptions{FailureThreshold: 1})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, origin.URL, nil)
@@ -148,6 +149,9 @@ func TestOriginDelegationCancelsStalledBody(t *testing.T) {
 	_, err = io.Copy(io.Discard, resp.Body)
 	if !errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 		t.Fatalf("idle timeout did not fire before caller deadline: %v", err)
+	}
+	if c.Breaker.State(root.Listener.Addr().String()) != BreakerOpen {
+		t.Fatal("client-owned idle timeout did not record failure")
 	}
 	select {
 	case <-done:

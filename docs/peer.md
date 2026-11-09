@@ -226,20 +226,24 @@ recovered peer is picked back up without operator action.
 
 States: `closed` → (`FailureThreshold` **consecutive** failures) → `open` → (after
 `Cooldown`) → `half-open`, admitting `HalfOpenProbes` probes. After the first
-success, admission pauses until all admitted probes finish. All must succeed to
-close the circuit; a probe failure re-opens it and restarts the cooldown.
+success, admission pauses until all admitted probes finish. At least one genuine
+answer and no failures are required to close the circuit; canceled siblings
+release their slots without providing health evidence. An all-canceled cohort
+stays half-open and admits new probes. A probe failure re-opens the circuit and
+restarts the cooldown.
 
 **A `404` is not a failure.** It is a legitimate answer ("I do not hold that
 block") and blocks legitimately 404 all the time in a distributed cache — counting
 them would trip the breaker on perfectly healthy peers.
 
-**Caller cancellation is not a failure either.** When the caller's own context
-is aborted (a hedging loser, a client disconnect mid-body), `Get`/`GetValidated`
-record *answered*, not a failure: the peer demonstrably responded, and charging
-it would open circuits on healthy peers. (The half-open probe slot must also be
-released, which recording answered does.) Our own per-request timeout firing
-while the caller is still waiting still counts as a soft failure — the peer was
-genuinely slow.
+**Caller cancellation is neutral.** Block, roster and delegated-origin requests
+abandoned by their caller (including caller deadlines) release their admission
+without clearing failures or proving recovery. A half-open circuit remains
+half-open unless another current-generation answer has established recovery and
+all outstanding data probes finish without failure. Early close of an unread
+delegated-origin body is neutral too. Client-owned timeouts while the caller is
+still waiting count as failures. See
+[ADR-0013](./adr/0013-settle-canceled-peer-requests-neutrally.md).
 
 **The cooldown starts when the circuit opens**, not when the last in-flight
 request dies: a late failure arriving while already open does not restamp
@@ -265,7 +269,8 @@ automatically:
 
 | Outcome | Example | Effect |
 |---|---|---|
-| answered | `200`, `404` | closes the circuit, clears the count |
+| answered | validated `200`, `404` | closes after outstanding probes finish without failure, clears the count |
+| neutral | caller cancellation/deadline, early delegated-body close | releases admission; preserves health unless completing an already-successful cohort |
 | **soft** fail | timeout, unexpected status, truncated body | spends one unit of the budget; may be a transient hiccup |
 | **hard** fail | the dial failed or timed out (`net.OpError` with `Op == "dial"`) | **opens immediately** |
 
@@ -380,7 +385,7 @@ data-probe failure.
 
 
 Caller cancellation/deadlines while awaiting delegated origin headers release the
-breaker permit without charging a root failure. The client's own header timeout
+breaker permit without charging a root failure or proving recovery. The client's own header timeout
 still records a failure. `TestOriginCallerCancellationDoesNotQuarantineRoot`
 checks repeated cancellations followed by a healthy request;
 `TestOriginDelegationBoundsHeaderWait` checks the internal-timeout distinction.
@@ -431,8 +436,7 @@ Managed-memory regression coverage:
 
 
 - **Results**: `go vet` clean; `go test` all pass; `go test -race` clean.
-- **Coverage**: **92.4%** of statements (Go 1.27.0). Uncovered lines are a couple of rare
-  I/O-error branches.
+- **Coverage**: **83.1%** of statements (Go 1.27.3).
 - **Note**: tests use `t.TempDir()` (store files); in the sandbox export
   `TMPDIR=$PWD/.gotmp`.
 - **Reproduce**:
@@ -475,7 +479,7 @@ client-owned timeout cannot falsely recover a half-open circuit.
 | `TestBreakerSweepsCleanEntries` | the peer map is bounded: clean entries are swept past the cap, dirty ones kept |
 | **`TestBreakerCapHardUnderFailedChurn`** | **the cap is a HARD bound even when every churned address carries failure state (below-threshold / open / half-open); recently-touched addresses keep their breaker behavior** |
 | **`TestBreakerEvictionDropsStalest`** | **eviction picks the least-recently-active entry; an actively routed-to sick peer never loses its open circuit** |
-| `TestCallerCancelNotChargedToPeer` | a caller-aborted read records answered, not a soft failure |
+| `TestCallerCancelNotChargedToPeer` | a caller-aborted read does not charge a failure |
 | `TestBreakerIsolatesPeers` | one sick peer does not affect others |
 | `TestBreakerDefaultsAndStateNames` / `TestBreakerConcurrent` | defaults; concurrency (`-race`) |
 | **`TestClientBreakerShortCircuits`** | **an open circuit stops dialing entirely (server sees no further requests)** |
@@ -592,7 +596,8 @@ another delegated request. The body belongs to the caller and must be closed.
 30 seconds, negative disables these bounds). It does not bound total streaming
 duration or time a downstream consumer spends between reads. Existing HTTP
 transport/caller-context bounds also apply. Close cancels the operation and
-releases the breaker admission. A source-body failure remains detectable as a
+releases the breaker admission neutrally if the body has not completed. Internal
+idle timeouts count as failures; caller deadlines remain neutral. A source-body failure remains detectable as a
 truncated response without quarantining the honest supplying root. The trusted
 domain assumption A2 applies: this endpoint adds no peer authentication or
 credential-isolation boundary.
@@ -605,3 +610,15 @@ checks unknown-length truncation; `TestOriginDelegationUsesIdleInsteadOfWholeStr
 and `TestOriginDelegationCancelsStalledBody` check stream lifetime and cancellation.
 `TestOriginDelegationBoundsHeaderWait` distinguishes the internal timeout from
 caller cancellation and checks request cleanup and breaker accounting.
+
+Cancellation regression coverage: `TestBreakerNeutralProbeCohorts` checks canceled,
+mixed and failing cohorts in both completion orders;
+`TestBreakerNeutralStaleCompletion` checks quarantine generations and entry reuse;
+`TestRosterNeutralCannotConsumeDataProbe` pins discovery's admission bypass.
+`TestClientCancellationIsNeutral` uses real HTTP requests and deterministic
+barriers before headers and during body reads, including zero server requests
+for pre-dispatch cancellation. `TestCallerDeadlineIsNeutral`,
+`TestValidationCancellationIsNeutral` and `TestOriginEarlyCloseIsNeutral` cover
+caller deadlines, validation cancellation and exactly-once early close.
+`TestOriginEmptyResponseRecoversWithoutRead` verifies that complete HEAD/empty
+responses recover even when the caller closes without reading.

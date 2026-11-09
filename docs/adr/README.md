@@ -136,3 +136,4 @@ acceptable in current law — it is a pointer, not a narrative.
 | [0010](./0010-coalesce-directed-block-loads.md) | Coalesce directed normal block loads across hops | accepted |
 | [0011](./0011-separate-root-fanout.md) | Configure root fanout independently of reader branching | accepted |
 | [0012](./0012-publish-reader-growth-immediately.md) | Publish reader growth immediately and refresh on bounded demand | accepted |
+| [0013](./0013-settle-canceled-peer-requests-neutrally.md) | Settle canceled peer requests without inferring health | accepted |
