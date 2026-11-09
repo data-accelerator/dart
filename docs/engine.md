@@ -112,8 +112,9 @@ stop redundant credential/source attempts; transport/path failure may fail over.
 returns terminal metadata service for root-eligible nodes
 and nil for non-root nodes. Non-root Size probes use a file-key-ranked root,
 endpoint-scoped singleflight and the existing credential/cancellation rules.
-Root-eligible nodes retain local endpoint probing. Cached metadata and blocks
-continue to work without a reachable root. Uncached frontend operations use
+Root-eligible nodes retain local endpoint probing. Validated cached blocks remain usable independently of current ownership or
+role; cold role restrictions run after the cache lookup. Cached metadata and
+blocks continue to work without a reachable root. Uncached frontend operations use
 the terminal origin transport below.
 
 `TestRolesColdReadAndRootFailover` uses real HTTP roots and a forbidden local
@@ -201,7 +202,8 @@ credential is not reused against a different caller's URL. Completed failures
 are not retained. Successful immutable bytes can be shared across URL aliases,
 including when cache admission declines them. `Serve` and `PeerLeaseSource`
 share immutable leased results, cloning references without copying payloads.
-Backend context errors remain shared same-URL failures while an inline leader's
+Both borrowed and owned-copy demand retry speculative admission skips using
+demand headroom. Backend context errors remain shared same-URL failures while an inline leader's
 client context is live. Same-URL takeover checks that client's cancellation,
 rather than classifying the backend error as a canceled leader.
 
@@ -447,7 +449,10 @@ attempt validates the full block before handing it to the requester. Reported
 source failures do not quarantine an honest relay; malformed data does. If no
 ancestor or supply-root candidate can serve, the read fails. The candidate
 sequence shares `fetch.FlightLimit(Fetcher)` (default ten minutes), in addition to each
-peer's timeout and the caller's earlier deadline.
+peer's timeout and the caller's earlier deadline. A hedge that cannot reserve a
+receive buffer has not contacted its target and does not mark it attempted.
+After contenders exit and release capacity, fallback may contact that untried
+root. Attempt accounting is synchronized across hedge workers.
 
 Together these bound abrupt node death: the dial timeout makes the first affected
 read fail in ~1 s, a dial failure opens the circuit on that single observation, and
@@ -584,6 +589,8 @@ Managed-memory regression coverage:
 |---|---|
 | `TestDelegatedSizeScopesRangeCapabilityToOrigin` / `TestConcurrentDelegatedSizeProbes` | real HTTP metadata roots preserve per-endpoint Range state, independent concurrent probes and cross-origin digest reuse |
 | `TestDelegatedProbeRecoveryAndCancellation` | failed/canceled delegated probes terminate and recover; successful results remain cached |
+| `TestRootOnlyWarmBlocksIgnorePlacement` | both peer APIs serve valid warm blocks after ownership changes, including cache-only requests, while invalid identity and cold non-owner relay still decline |
+| `TestRootFallbackAfterHedgeAdmissionDeclines` | one-buffer root hedge skips admission; after parent 404/source failure releases capacity, fallback contacts the healthy root exactly once |
 | `TestCrossHopReadersShareOnePeerTransfer` | R-hot/A-B-cold real HTTP overlap: one 4 MiB R-to-A payload across hops, with cache refusal, canceled waiter and last-lease release |
 | `TestReaderSnapshotChurnPreservesStrictOrder` | missing self, duplicate IDs, changing reader/member subsets and fanout preserve strict normal parent/backup order |
 | `TestNormalFlightCanReceiveFallbackSupply` | A waits on B while B falls back to supply from A; cache decline does not create a wait cycle |
@@ -598,7 +605,7 @@ Managed-memory regression coverage:
 | `TestReceiveBudgetFailureAndCancellation` | failed/truncated/canceled fills and failed writes release capacity |
 | `TestReceiveBudgetRangeIgnoredRetainsOneBuffer` | range-ignored results retain one accounted payload without publication |
 | `TestReceiveBudgetAdmission` | independent byte/load caps, reserved demand headroom, cancellation, bounded pressure failure and invalid options |
-| `TestDemandRetriesSkippedSpeculativeFlight` | a demand caller sharing a declined speculative flight retries with demand admission |
+| `TestDemandRetriesSkippedSpeculativeFlight` | borrowed, owned-block and PeerSource demand sharing a declined speculative flight retry with demand admission |
 | `TestBorrowedOriginUsesReceiveSlot` | receive/cache/sender share one payload; zero warm block allocation |
 | `TestBorrowedPressureBypassesPublication` | correct subrange and temporary accounting with a pinned full arena |
 | `TestBorrowedWriteFailureReleasesPins` | all queued/current pins and speculative reservations released on client error |
@@ -721,7 +728,7 @@ go test ./internal/engine/ -cover -count=1
 | `TestRangePrefetchKeepsPublishedCacheOnCancel` | completed valid prefetched blocks survive client cancellation; incomplete blocks do not enter cache |
 | `TestPrefetchOptions` | invalid limit values are rejected |
 | `TestWholeBlockRelayCommitsOnlyAfterValidation` | real partial parent responses commit no downstream byte before complete validation; short/failed parents fall back cleanly |
-| `TestWholeBlockRelayReportsCleanFailure` | an unrecoverable source failure yields a clean 500 without partial block/cache publication |
+| `TestWholeBlockRelayReportsCleanFailure` | an unrecoverable source failure yields a clean 503 without partial block/cache publication |
 
 | `TestRangePrefetchReservesUntilOriginFlightExits` | a canceled origin flight retains speculative admission through underlying cleanup |
 | `TestHedgedFetchCancelsAndJoinsContenders` | cancellation and a hedge win join all canceled contenders before returning |

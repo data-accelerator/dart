@@ -19,11 +19,6 @@ import (
 func (e *Engine) borrowBlock(ctx context.Context, url, objectID string, size, index int64, hop int) (store.Lease, error) {
 	start := time.Now()
 	r, err := e.readBorrowedBlock(ctx, url, objectID, size, index, hop)
-	if errors.Is(err, errSpeculativeReceive) && !isSpeculative(ctx) {
-		// Demand can join a speculative flight before its admission declines.
-		// Retry with demand's reserved headroom instead of inheriting that skip.
-		r, err = e.readBorrowedBlock(ctx, url, objectID, size, index, hop)
-	}
 	if err != nil {
 		return store.Lease{}, err
 	}
@@ -32,6 +27,18 @@ func (e *Engine) borrowBlock(ctx context.Context, url, objectID string, size, in
 }
 
 func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, size, index int64, hop int) (leasedRead, error) {
+	for {
+		r, err := e.loadBorrowedBlock(ctx, url, objectID, size, index, hop)
+		if !errors.Is(err, errSpeculativeReceive) || isSpeculative(ctx) {
+			return r, err
+		}
+		// Both borrowed and owned-copy demand can join speculative work that
+		// skips admission. Retry with demand headroom; another speculative
+		// leader winning admission in between must not turn a skip into failure.
+	}
+}
+
+func (e *Engine) loadBorrowedBlock(ctx context.Context, url, objectID string, size, index int64, hop int) (leasedRead, error) {
 	if index < 0 || index > e.cfg.MaxBlockIndex() || size <= 0 || e.cfg.BlockStart(index) >= size {
 		return leasedRead{}, ErrRangeNotSatisfiable
 	}
@@ -111,21 +118,6 @@ func (e *Engine) PeerLeaseSource() peer.LeaseSource {
 }
 
 func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool) (store.Lease, bool, error) {
-	if req.Supply {
-		if !e.role.CanRoot() {
-			return store.Lease{}, false, nil
-		}
-		ctx = supplyContext(ctx)
-	} else if !e.role.CanRead() {
-		if e.cluster == nil {
-			return store.Lease{}, false, nil
-		}
-		roots := hashring.Rank(req.Key.Chunk, e.cluster.Current().Roots())
-		if len(roots) == 0 || roots[0].ID != e.selfID {
-			return store.Lease{}, false, nil
-		}
-		ctx = supplyContext(ctx)
-	}
 	if !e.relayableRequest(req) {
 		e.mx.recordRelay(false)
 		return store.Lease{}, false, nil
@@ -150,6 +142,27 @@ func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool
 	if req.URL == "" || req.Hop >= maxHop {
 		e.mx.recordRelay(false)
 		return store.Lease{}, false, nil
+	}
+	// Roles restrict cold work; validated immutable cache hits do not depend
+	// on current placement or origin capability.
+	if req.Supply {
+		if !e.role.CanRoot() {
+			return store.Lease{}, false, nil
+		}
+		ctx = supplyContext(ctx)
+	} else if !e.role.CanRead() {
+		if e.cluster == nil {
+			return store.Lease{}, false, nil
+		}
+		view := e.cluster.Current()
+		if view == nil {
+			return store.Lease{}, false, nil
+		}
+		roots := hashring.Rank(req.Key.Chunk, view.Roots())
+		if len(roots) == 0 || roots[0].ID != e.selfID {
+			return store.Lease{}, false, nil
+		}
+		ctx = supplyContext(ctx)
 	}
 	ctx, flightKey := e.pinRouting(ctx, req.Key)
 	if !isSupply(ctx) && req.HasEpoch && flightKey.epoch != req.Epoch {

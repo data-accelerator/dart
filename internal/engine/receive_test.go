@@ -13,6 +13,7 @@ import (
 	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/fetch"
 	"github.com/data-accelerator/dart/internal/metrics"
+	"github.com/data-accelerator/dart/internal/peer"
 	"github.com/data-accelerator/dart/internal/store"
 )
 
@@ -309,47 +310,69 @@ func (s *gatedReserveStore) Reserve(ctx context.Context, _ store.BlockKey, _ int
 }
 
 func TestDemandRetriesSkippedSpeculativeFlight(t *testing.T) {
-	ctx, cancel := prefetchContext(t)
-	defer cancel()
-	var calls atomic.Int32
-	e := uncachedEngine(t, intoFetchFunc(func(_ context.Context, _ string, _, _ int64, dst []byte) (fetch.Range, error) {
-		calls.Add(1)
-		copy(dst, "0123456789abcdef")
-		return fetch.Range{Data: dst, Total: 16}, nil
-	}), 2, 1, 16)
-	resume := make(chan struct{})
-	gate := &gatedReserveStore{Store: e.store, entered: make(chan struct{}), resume: resume}
-	e.store = gate
-	oid, _ := chunk.ObjectID(prefetchURL)
-	skipped := make(chan error, 1)
-	go func() {
-		l, err := e.borrowBlock(speculativeContext(ctx), prefetchURL, oid, 16, 0, 0)
-		l.Release()
-		skipped <- err
-	}()
-	waitBlockEvent(t, ctx, gate.entered)
-	joined := &blockJoinContext{Context: ctx, joined: make(chan struct{})}
-	done := make(chan error, 1)
-	go func() {
-		l, err := e.borrowBlock(joined, prefetchURL, oid, 16, 0, 0)
-		if err == nil && string(l.Bytes()) != "0123456789abcdef" {
-			err = errors.New("wrong demand data")
-		}
-		l.Release()
-		done <- err
-	}()
-	waitBlockEvent(t, ctx, joined.joined)
-	close(resume)
-	if err := <-skipped; !errors.Is(err, errSpeculativeReceive) {
-		t.Fatal("speculation unexpectedly admitted", err)
-	}
-	if err := <-done; err != nil {
-		t.Fatal("demand inherited speculative refusal", err)
-	}
-	if calls.Load() != 1 {
-		t.Fatal("wrong number of origin fills", calls.Load())
-	}
-	if loads, n := receiveUsage(e); loads != 0 || n != 0 {
-		t.Fatal("capacity leak", loads, n)
+	for _, mode := range []string{"borrowed", "owned", "peer-source"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := prefetchContext(t)
+			defer cancel()
+			var calls atomic.Int32
+			e := uncachedEngine(t, intoFetchFunc(func(_ context.Context, _ string, _, _ int64, dst []byte) (fetch.Range, error) {
+				calls.Add(1)
+				copy(dst, "0123456789abcdef")
+				return fetch.Range{Data: dst, Total: 16}, nil
+			}), 2, 1, 16)
+			resume := make(chan struct{})
+			gate := &gatedReserveStore{Store: e.store, entered: make(chan struct{}), resume: resume}
+			e.store = gate
+			oid, _ := chunk.ObjectID(prefetchURL)
+			skipped := make(chan error, 1)
+			go func() {
+				l, err := e.borrowBlock(speculativeContext(ctx), prefetchURL, oid, 16, 0, 0)
+				l.Release()
+				skipped <- err
+			}()
+			waitBlockEvent(t, ctx, gate.entered)
+			joined := &blockJoinContext{Context: ctx, joined: make(chan struct{})}
+			done := make(chan error, 1)
+			go func() {
+				var l store.Lease
+				var err error
+				switch mode {
+				case "borrowed":
+					l, err = e.borrowBlock(joined, prefetchURL, oid, 16, 0, 0)
+				case "owned":
+					var data []byte
+					data, err = e.block(joined, prefetchURL, oid, 16, 0, 0)
+					l = store.HeapLease(data)
+				case "peer-source":
+					e.sizes[fetch.OriginKey(prefetchURL)] = sizeMeta{size: 16}
+					var data []byte
+					var held bool
+					data, held, err = e.PeerSource()(joined, peer.BlockRequest{Key: blockKeyFor(prefetchURL), URL: prefetchURL, Hop: 1})
+					if err == nil && !held {
+						err = errors.New("demand declined")
+					}
+					l = store.HeapLease(data)
+				}
+				if err == nil && string(l.Bytes()) != "0123456789abcdef" {
+					err = errors.New("wrong demand data")
+				}
+				l.Release()
+				done <- err
+			}()
+			waitBlockEvent(t, ctx, joined.joined)
+			close(resume)
+			if err := <-skipped; !errors.Is(err, errSpeculativeReceive) {
+				t.Fatal("speculation unexpectedly admitted", err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal("demand inherited speculative refusal", err)
+			}
+			if calls.Load() != 1 {
+				t.Fatal("wrong number of origin fills", calls.Load())
+			}
+			if loads, n := receiveUsage(e); loads != 0 || n != 0 {
+				t.Fatal("capacity leak", loads, n)
+			}
+		})
 	}
 }

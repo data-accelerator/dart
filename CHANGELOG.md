@@ -32,6 +32,11 @@ every release's upgrade notes.
 - Keep caller cancellation of delegated origin requests from opening a healthy
   supply root's circuit; internally imposed header timeouts still count as failures.
 
+- Serve valid cached blocks independently of current root-only ownership; retain
+  key/URL validation and cold role restrictions. Owned-copy demand retries skipped
+  speculative fills. Root hedges rejected before buffer admission remain eligible
+  for fallback after the active contender releases capacity.
+
 ### Upgrade notes
 
 - Coordinated upgrade required: peer block/roster paths use v2, roles participate

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/data-accelerator/dart/internal/cluster"
 	"github.com/data-accelerator/dart/internal/fetch"
@@ -54,6 +55,7 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 	ranked, _ := e.treeNodes(ctx, view, objectID, e.fileKey(objectID), key.Chunk)
 	primary, backup := e.hedgeTargets(ranked, view)
 	attempted := make(map[string]bool)
+	var attemptsMu sync.Mutex
 	rootAddr := ""
 	if m, ok := view.Get(roots[0].ID); ok {
 		rootAddr = m.Addr
@@ -64,6 +66,15 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 			return peerResult{err: err}
 		}
 		defer b.abort()
+		// A skipped hedge did not contact this peer. Once other contenders
+		// release their buffers, root fallback may still use that address.
+		attemptsMu.Lock()
+		already := attempted[addr]
+		attempted[addr] = true
+		attemptsMu.Unlock()
+		if already {
+			return peerResult{}
+		}
 		data, held, err := e.peer.GetInto(ctx, addr, peer.BlockRequest{Key: key, URL: url, Hop: hop + 1, Supply: supply, Epoch: view.Epoch(), HasEpoch: true}, b.bytes(), nil)
 		if err != nil || !held {
 			return peerResult{held: held, err: err}
@@ -74,19 +85,18 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 	}
 	var last error
 	if primary != "" {
-		attempted[primary] = true
-		if backup != "" {
-			attempted[backup] = true
-		}
 		r, ok := e.fetchHedgedResult(ctx, primary, backup, func(ctx context.Context, addr string) peerResult { return get(ctx, addr, addr == rootAddr) })
 		if ok {
 			return leasedRead{lease: r.lease, source: blockFromPeer}, nil
 		}
 		last = r.err
-		if errors.Is(last, peer.ErrUpstreamRefused) || errors.Is(last, ErrReceiveBudget) {
+		if errors.Is(last, peer.ErrUpstreamRefused) {
 			return leasedRead{}, last
 		}
 	}
+	// fetchHedgedResult has joined its workers: attempted is now read serially.
+	// A failed contender may have released the only buffer after its hedge
+	// skipped admission, so even an admission error can recover at an untried root.
 	for i, n := range roots {
 		if i >= maxHop {
 			break
@@ -104,7 +114,6 @@ func (e *Engine) loadRouted(ctx context.Context, url, objectID string, size, ind
 		if !ok || m.Addr == "" || attempted[m.Addr] {
 			continue
 		}
-		attempted[m.Addr] = true
 		r := get(ctx, m.Addr, true)
 		if r.err == nil && r.held {
 			return leasedRead{lease: r.lease, source: blockFromPeer}, nil
