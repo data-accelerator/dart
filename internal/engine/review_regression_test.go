@@ -82,8 +82,9 @@ func TestRootFallbackAfterHedgeAdmissionDeclines(t *testing.T) {
 			var once sync.Once
 			unblock := func() { once.Do(func() { close(release) }) }
 			parent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				parentCalls.Add(1)
-				close(parentEntered)
+				if parentCalls.Add(1) == 1 {
+					close(parentEntered)
+				}
 				select {
 				case <-release:
 				case <-r.Context().Done():
