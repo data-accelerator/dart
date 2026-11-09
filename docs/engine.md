@@ -590,7 +590,8 @@ Managed-memory regression coverage:
 | `TestDelegatedSizeScopesRangeCapabilityToOrigin` / `TestConcurrentDelegatedSizeProbes` | real HTTP metadata roots preserve per-endpoint Range state, independent concurrent probes and cross-origin digest reuse |
 | `TestDelegatedProbeRecoveryAndCancellation` | failed/canceled delegated probes terminate and recover; successful results remain cached |
 | `TestRootOnlyWarmBlocksIgnorePlacement` | both peer APIs serve valid warm blocks after ownership changes, including cache-only requests, while invalid identity and cold non-owner relay still decline |
-| `TestRootFallbackAfterHedgeAdmissionDeclines` | one-buffer root hedge skips admission; after parent 404/source failure releases capacity, fallback contacts the healthy root exactly once |
+| `TestRootFallbackAfterHedgeAdmissionDeclines` | arm the hedge only after the parent holds the sole receive buffer; after rejected hedge admission and parent 404/source failure, fallback contacts the healthy root exactly once |
+| `TestRootHedgeCanWinBeforeParentAdmission` | hold the parent before receive admission; the root hedge wins the sole buffer, returns correct bytes, and cancels the parent without any rejected admission or leaked capacity |
 | `TestCrossHopReadersShareOnePeerTransfer` | R-hot/A-B-cold real HTTP overlap: one 4 MiB R-to-A payload across hops, with cache refusal, canceled waiter and last-lease release |
 | `TestReaderSnapshotChurnPreservesStrictOrder` | missing self, duplicate IDs, changing reader/member subsets and fanout preserve strict normal parent/backup order |
 | `TestNormalFlightCanReceiveFallbackSupply` | A waits on B while B falls back to supply from A; cache decline does not create a wait cycle |
