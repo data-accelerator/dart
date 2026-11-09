@@ -24,8 +24,9 @@ type blockRead struct {
 // Relay depth must stay in the flight identity: joining a shallower request
 // when a skewed tree loops back would turn the hop bound into a wait cycle.
 type blockLoadKey struct {
-	block store.BlockKey
-	hop   int
+	block  store.BlockKey
+	hop    int
+	supply bool
 }
 
 // blockLoads is the owned-copy adapter over the same lifetime algorithm used

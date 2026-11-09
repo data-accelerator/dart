@@ -257,7 +257,7 @@ func TestRosterServedOnPeerListener(t *testing.T) {
 
 	// A block request must still reach the block server. RosterPath has no trailing
 	// slash, so it matches exactly and must not shadow the "/peer/" subtree.
-	resp2, err := http.Get(srv.URL + "/peer/v1/block/ff/0")
+	resp2, err := http.Get(srv.URL + "/peer/v2/block/ff/0")
 	if err != nil {
 		t.Fatalf("GET block: %v", err)
 	}

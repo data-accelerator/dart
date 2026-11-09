@@ -8,6 +8,7 @@ import (
 
 	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/fetch"
+	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/peer"
 	"github.com/data-accelerator/dart/internal/store"
 )
@@ -35,39 +36,31 @@ func (e *Engine) readBorrowedBlock(ctx context.Context, url, objectID string, si
 	} else if ok {
 		return leasedRead{lease: l, source: blockFromCache}, nil
 	}
-	r, err := e.borrowed.do(ctx, blockLoadKey{block: key, hop: hop}, url, false, func(ctx context.Context) (leasedRead, error) {
+	r, err := e.borrowed.do(ctx, blockLoadKey{block: key, hop: hop, supply: isSupply(ctx)}, url, false, func(ctx context.Context) (leasedRead, error) {
 		if l, ok, err := store.Acquire(e.store, key); err != nil {
 			return leasedRead{}, err
 		} else if ok {
 			return leasedRead{lease: l, source: blockFromCache}, nil
 		}
 		want := e.blockLen(size, index)
-		if e.p2p && hop < maxHop {
-			view := e.cluster.Current()
-			if view != nil {
-				ranked, _ := e.treeNodes(ctx, view, objectID, e.fileKey(objectID), key.Chunk)
-				primary, backup := e.hedgeTargets(ranked, view)
-				if primary != "" {
-					req := peer.BlockRequest{Key: key, URL: url, Hop: hop + 1}
-					result, ok := e.fetchHedgedResult(ctx, primary, backup, func(ctx context.Context, addr string) peerResult {
-						r, dst, cache, err := e.receiveBuffer(ctx, key, want)
-						if err != nil {
-							return peerResult{err: err}
-						}
-						defer r.Abort()
-						data, held, err := e.peer.GetInto(ctx, addr, req, dst, nil)
-						if err != nil || !held {
-							return peerResult{held: held, err: err}
-						}
-						e.mx.recordIngress(blockFromPeer, len(data))
-						l, err := e.finishBuffer(&r, key, data, cache)
-						return peerResult{lease: l, held: err == nil, err: err}
-					})
-					if ok {
-						return leasedRead{lease: result.lease, source: blockFromPeer}, nil
-					}
-				}
+		if isSupply(ctx) {
+			if !e.role.CanRoot() {
+				return leasedRead{}, errNoRoot
 			}
+		} else if e.p2p {
+			view := e.cluster.Current()
+			if view == nil {
+				return leasedRead{}, errNoRoot
+			}
+			roots := hashring.Rank(key.Chunk, view.Roots())
+			if len(roots) == 0 {
+				return leasedRead{}, errNoRoot
+			}
+			if roots[0].ID != e.selfID || !e.role.CanRoot() {
+				return e.loadRouted(ctx, url, objectID, size, index, hop, key, want, view, roots)
+			}
+		} else if !e.role.CanRoot() {
+			return leasedRead{}, errNoRoot
 		}
 		// Origin results can be shared across relay depths; peer flights cannot,
 		// because a skewed forwarding loop must continue toward the hop bound.
@@ -145,6 +138,21 @@ func (e *Engine) PeerLeaseSource() peer.LeaseSource {
 }
 
 func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool) (store.Lease, bool, error) {
+	if req.Supply {
+		if !e.role.CanRoot() {
+			return store.Lease{}, false, nil
+		}
+		ctx = supplyContext(ctx)
+	} else if !e.role.CanRead() {
+		if e.cluster == nil {
+			return store.Lease{}, false, nil
+		}
+		roots := hashring.Rank(req.Key.Chunk, e.cluster.Current().Roots())
+		if len(roots) == 0 || roots[0].ID != e.selfID {
+			return store.Lease{}, false, nil
+		}
+		ctx = supplyContext(ctx)
+	}
 	if !e.relayableRequest(req) {
 		e.mx.recordRelay(false)
 		return store.Lease{}, false, nil

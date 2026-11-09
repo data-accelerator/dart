@@ -117,16 +117,35 @@ func (e *Engine) readers(ctx context.Context, view *cluster.View, objectID strin
 // member that must fetch-on-behalf. If the reader set is unavailable or too
 // small to form a tree, it falls back to all Ready members.
 func (e *Engine) treeNodes(ctx context.Context, view *cluster.View, objectID string, fileKey, chunkKey uint64) ([]hashring.Node, bool) {
-	if rs := e.readers(ctx, view, objectID, fileKey); len(rs) > 1 {
-		nodes := make([]hashring.Node, 0, len(rs))
-		for _, id := range rs {
-			if m, ok := view.Get(id); ok && m.Addr != "" {
+	roots := hashring.Rank(chunkKey, view.Roots())
+	if len(roots) == 0 {
+		return nil, false
+	}
+	root := roots[0]
+	// Supply peers never JOIN as readers merely to answer a peer request.
+	if !e.role.CanRead() {
+		return []hashring.Node{root}, false
+	}
+	var nodes []hashring.Node
+	fromReaders := e.trackerClient != nil || e.trackerReg != nil
+	if fromReaders {
+		for _, id := range e.readers(ctx, view, objectID, fileKey) {
+			if m, ok := view.Get(id); ok && m.State == cluster.Ready && m.Role.CanRead() && m.Addr != "" {
 				nodes = append(nodes, hashring.Node{ID: m.ID, Weight: m.Weight})
 			}
 		}
-		if len(nodes) > 1 {
-			return hashring.Rank(chunkKey, nodes), true
+	} else {
+		nodes = view.Readers()
+	}
+	ordered := hashring.Rank(chunkKey, nodes)
+	out := make([]hashring.Node, 0, len(ordered)+1)
+	out = append(out, root)
+	seen := map[string]bool{root.ID: true}
+	for _, n := range ordered {
+		if !seen[n.ID] {
+			out = append(out, n)
+			seen[n.ID] = true
 		}
 	}
-	return hashring.Rank(chunkKey, view.Ready()), false
+	return out, fromReaders
 }

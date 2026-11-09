@@ -59,6 +59,8 @@ type Options struct {
 	Cluster cluster.Provider
 	Peer    *peer.Client
 	SelfID  string
+	// Role is the local node capability, independent of transient membership.
+	Role cluster.Role
 	// Fanout is the distribution-tree branching factor (children per node) used
 	// when routing a miss to the parent; default 2. Larger fanout = shallower
 	// tree (owner has more direct children).
@@ -108,6 +110,7 @@ type Options struct {
 type Engine struct {
 	borrowed leaseLoads
 	origins  leaseLoads
+	metadata *fetch.Coalescing
 	cfg      chunk.Config
 	store    store.Store
 	fetcher  fetch.Fetcher
@@ -117,6 +120,7 @@ type Engine struct {
 	cluster  cluster.Provider
 	peer     *peer.Client
 	selfID   string
+	role     cluster.Role
 	fanout   int
 	replicas int
 	p2p      bool
@@ -157,6 +161,9 @@ func New(opt Options) (*Engine, error) {
 	if err := opt.Chunk.Validate(); err != nil {
 		return nil, err
 	}
+	if !opt.Role.Valid() {
+		return nil, errors.New("engine: invalid node role")
+	}
 	if opt.Store == nil || opt.Fetcher == nil {
 		return nil, errors.New("engine: Store and Fetcher are required")
 	}
@@ -189,6 +196,7 @@ func New(opt Options) (*Engine, error) {
 		cluster:        opt.Cluster,
 		peer:           opt.Peer,
 		selfID:         opt.SelfID,
+		role:           opt.Role,
 		fanout:         opt.Fanout,
 		mx:             opt.Metrics,
 		sizes:          make(map[string]sizeMeta),
@@ -204,6 +212,7 @@ func New(opt Options) (*Engine, error) {
 		rs:            make(map[string]*readerSet),
 	}
 	limit := fetch.FlightLimit(opt.Fetcher)
+	e.metadata = &fetch.Coalescing{F: metadataFetcher{e: e}, MaxFlight: limit}
 	e.borrowed.maxFlight = limit
 	e.origins.maxFlight = limit
 	e.loads.leaseLoads.maxFlight = limit
@@ -244,7 +253,9 @@ func (e *Engine) Size(ctx context.Context, url string) (int64, error) {
 	// is inside the signature), so HEAD would return 403. See fetch.Fetcher.
 	var r fetch.Range
 	var err error
-	if p, ok := e.fetcher.(fetch.Prober); ok {
+	if !e.role.CanRoot() {
+		r, err = e.metadata.Probe(ctx, url)
+	} else if p, ok := e.fetcher.(fetch.Prober); ok {
 		// Content-keyed singleflight must not merge endpoint capabilities.
 		r, err = p.Probe(ctx, url)
 	} else {
@@ -363,7 +374,7 @@ func (e *Engine) block(ctx context.Context, url, objectID string, size, blockInd
 		return data, nil
 	}
 	start := time.Now()
-	r, _, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop}, url, func() (blockRead, error) {
+	r, _, err := e.loads.do(ctx, blockLoadKey{block: key, hop: hop, supply: isSupply(ctx)}, url, func() (blockRead, error) {
 		// A previous leader can publish between our first miss and flight
 		// admission. Recheck after becoming leader, without holding the map lock.
 		if data, ok, err := e.store.Get(key); err != nil {
@@ -448,7 +459,7 @@ func (e *Engine) classOf(chunkKey uint64) store.Class {
 	if view == nil {
 		return store.Borrowed
 	}
-	ranked := hashring.Rank(chunkKey, view.Ready())
+	ranked := hashring.Rank(chunkKey, view.Roots())
 	for i, n := range ranked {
 		if i >= e.replicas {
 			break

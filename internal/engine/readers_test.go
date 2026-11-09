@@ -73,12 +73,14 @@ func TestTreeNodesPrefersReaderSet(t *testing.T) {
 		t.Fatalf("tree was not built from the reader set: %v", nodeIDsOf(nodes))
 	}
 	got := nodeIDsOf(nodes)
-	if len(got) != 2 {
-		t.Fatalf("tree candidates = %v, want exactly the 2 readers (%s, %s)", got, self, other)
+	root := hashring.Rank(12345, view.Roots())[0].ID
+	expected := map[string]bool{root: true, self: true, other: true}
+	if len(got) != len(expected) || got[0] != root {
+		t.Fatalf("tree %v, want owner %s plus readers", got, root)
 	}
 	for _, id := range got {
-		if id != self && id != other {
-			t.Errorf("non-reader %q in tree candidates %v", id, got)
+		if !expected[id] {
+			t.Fatalf("unrelated member %s included", id)
 		}
 	}
 }
@@ -121,11 +123,11 @@ func TestTreeNodesFallsBackToAllMembers(t *testing.T) {
 	}
 	reg.Join("solo", "A", 0)
 	nodes2, fromReaders2 := e2.treeNodes(context.Background(), prov.Current(), "solo", e2.fileKey("solo"), 3)
-	if fromReaders2 {
-		t.Error("a single reader should not form a reader-set tree")
+	if !fromReaders2 {
+		t.Error("tracker mode must retain the owner even with a single reader")
 	}
-	if len(nodes2) != 3 {
-		t.Errorf("candidates = %v, want all 3 Ready members", nodeIDsOf(nodes2))
+	if len(nodes2) != 1 || nodes2[0].ID != hashring.Rank(3, prov.Current().Roots())[0].ID {
+		t.Errorf("candidates = %v, want direct owner when reader snapshot is unavailable", nodeIDsOf(nodes2))
 	}
 }
 

@@ -114,7 +114,7 @@ func TestWholeBlockRelayCommitsOnlyAfterValidation(t *testing.T) {
 
 func blockPathForTest(url string) string {
 	key := blockKeyFor(url)
-	return "/peer/v1/block/" + strconv.FormatUint(key.Chunk, 16) + "/0"
+	return "/peer/v2/block/" + strconv.FormatUint(key.Chunk, 16) + "/0"
 }
 
 func TestWholeBlockRelayReportsCleanFailure(t *testing.T) {
@@ -134,7 +134,7 @@ func TestWholeBlockRelayReportsCleanFailure(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
-	if err != nil || resp.StatusCode != 500 || string(body) != "source error\n" {
+	if err != nil || resp.StatusCode != http.StatusServiceUnavailable || string(body) != "upstream unavailable\n" || resp.Header.Get(peer.HeaderSourceFailure) != "1" {
 		t.Fatalf("response %d %q %v", resp.StatusCode, body, err)
 	}
 	if e.store.Has(blockKeyFor(origin.URL)) {

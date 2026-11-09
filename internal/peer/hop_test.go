@@ -16,7 +16,7 @@ import (
 // start delayed the loop-safety cutoff (a huge negative one effectively
 // forever) exactly when membership skew creates a relay cycle.
 func TestServerHopValidation(t *testing.T) {
-	blockPath := "/peer/v1/block/abcdef/7"
+	blockPath := "/peer/v2/block/abcdef/7"
 
 	servers := map[string]func(record func(hop int)) http.Handler{
 		"buffered": func(record func(hop int)) http.Handler {

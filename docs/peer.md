@@ -22,7 +22,7 @@ this package does not decide who to contact.
 ## 2. Wire form
 
 ```
-GET /peer/v1/block/<chunkKey-hex>/<blockIndex>
+GET /peer/v2/block/<chunkKey-hex>/<blockIndex>
 X-DART-Origin: <upstream url>   (optional; enables relay fetch-on-behalf)
 X-DART-Hop:    <n>              (relay depth, for loop safety)
 ```
@@ -375,7 +375,7 @@ data-probe failure.
 
 ## 6. Determinism / Stability Contract
 
-- The wire path (`/peer/v1/block/<hex>/<dec>`) is part of the peer protocol.
+- The wire path (`/peer/v2/block/<hex>/<dec>`) is part of the peer protocol.
   Changing it is a peer-protocol version bump.
 - Peer-plane traffic is plaintext by design; encryption is a CNI concern.
 - ADR-0008 requires full validated engine blocks before peer success is committed.
@@ -495,3 +495,23 @@ boundary, not implicit compatibility with the old v1 discovery protocol.
 
 `TestRosterRolesBothDirections` verifies caller roles and reconstructed responder
 roles over real HTTP; `TestRosterRejectsUnknownRoles` verifies both ingress paths.
+
+### Terminal supply and metadata
+
+ADR-0009's block endpoint uses v2. `BlockRequest.Supply` is encoded as
+`HeaderSupply` (`X-DART-Supply: 1`); other nonempty values are rejected before
+source invocation. The engine enforces terminal cache/origin service and root
+eligibility. This flag is part of routing, not an authorization boundary.
+
+`MetadataPath` (`/peer/v2/metadata`) accepts GET with `HeaderOrigin`.
+`MetadataServer.Probe` returns `Metadata` (Size and RangeUnsupported); the callback
+must be terminal and root-eligible. `Client.Probe` applies its timeout, bounds the
+JSON response to 4096 bytes and rejects missing or inconsistent fields. Metadata
+is endpoint-specific even when block bytes share a digest identity.
+
+`SourceFailureError` marks a healthy source reporting an upstream/path failure.
+`HeaderSourceFailure` carries it as `X-DART-Source-Failure: 1`; clients return
+`ErrSourceUnavailable` while preserving the relay's breaker health. HTTP origin
+statuses retain `HeaderUpstreamStatus`, including a typed fetch.StatusError for
+credential retry logic. `TestSourceFailureDoesNotQuarantineRelay` verifies this
+boundary over a real HTTP connection.

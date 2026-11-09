@@ -75,8 +75,8 @@ func TestEngineP2PPeerHit(t *testing.T) {
 	}
 }
 
-// TestEngineP2PPeerMissFallsBackToOrigin: an empty peer returns 404, so the
-// engine falls back to origin and still serves correct bytes.
+// TestEngineP2PPeerMissFallsBackToOrigin pins the revised role contract: a
+// requester outside placement must not promote itself when its only peer misses.
 func TestEngineP2PPeerMissFallsBackToOrigin(t *testing.T) {
 	content := blob(100)
 	var cnt int64
@@ -97,15 +97,14 @@ func TestEngineP2PPeerMissFallsBackToOrigin(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := ce.Serve(context.Background(), &buf, origin.URL, 0, 99); err != nil {
-		t.Fatalf("Serve: %v", err)
+	if err := ce.Serve(context.Background(), &buf, origin.URL, 0, 99); err == nil {
+		t.Fatal("non-member silently promoted itself to supply root")
 	}
-	if !bytes.Equal(buf.Bytes(), content) {
-		t.Errorf("bytes mismatch")
+	if buf.Len() != 0 {
+		t.Fatal("unavailable block delivered bytes")
 	}
-	// Peer missed, so origin served the blocks: more than just the size probe.
-	if got := atomic.LoadInt64(&cnt); got <= 1 {
-		t.Errorf("origin requests = %d, want > 1 (peer miss -> origin fallback)", got)
+	if got := atomic.LoadInt64(&cnt); got != 1 {
+		t.Fatalf("origin requests=%d, want metadata only", got)
 	}
 }
 

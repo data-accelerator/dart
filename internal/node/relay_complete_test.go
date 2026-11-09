@@ -65,7 +65,7 @@ func TestNodePeerWaitsForCompleteBlock(t *testing.T) {
 	first := make(chan struct{})
 	var firstOnce sync.Once
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotFirstResponseByte: func() { firstOnce.Do(func() { close(first) }) }})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/peer/v1/block/%x/0", srv.URL, key), nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/peer/v2/block/%x/0", srv.URL, key), nil)
 	req.Header.Set(peer.HeaderOrigin, url)
 	done := make(chan error, 1)
 	go func() {

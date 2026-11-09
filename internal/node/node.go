@@ -619,7 +619,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 			F:   &fetch.HTTPFetcher{Client: &http.Client{Transport: upstreamRT}},
 			Key: objectID,
 		},
-		Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
+		Role: cfg.role, Namespace: cfg.namespace, Fanout: cfg.fanout, Replicas: cfg.replicas,
 		Hedge: cfg.hedge, HedgeRatio: cfg.hedgeRatio,
 		PrefetchWindow: cfg.prefetchWindow, PrefetchBytes: cfg.prefetchBytes, PrefetchLoads: cfg.prefetchLoads,
 		Metrics: engine.NewMetrics(reg),
@@ -747,6 +747,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 			mux = http.NewServeMux()
 		}
 		mux.Handle("/peer/", blocks)
+		mux.Handle(peer.MetadataPath, &peer.MetadataServer{Probe: e.ProbeSource()})
 		if dyn != nil {
 			// Membership exchange rides the peer listener. Learn makes it
 			// bidirectional: whoever asks us also tells us who they are, so a node

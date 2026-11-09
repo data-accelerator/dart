@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -232,6 +233,7 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 		}
 	}
 
+	var lastError error
 	for contenders > 0 {
 		select {
 		case <-timerC:
@@ -257,6 +259,10 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 				return r, true
 			}
 			r.lease.Release()
+			lastError = r.err
+			if errors.Is(r.err, peer.ErrUpstreamRefused) {
+				return peerResult{err: r.err}, false
+			}
 			// Definite failure: fail over now, regardless of the hedge budget.
 			if backupUsable && !backupLaunched {
 				timerC = nil
@@ -266,10 +272,10 @@ func (e *Engine) fetchHedgedResult(ctx context.Context, primary, backup string, 
 				e.mx.recordFailover()
 			}
 		case <-ctx.Done():
-			return peerResult{}, false
+			return peerResult{err: ctx.Err()}, false
 		}
 	}
-	return peerResult{}, false
+	return peerResult{err: lastError}, false
 }
 
 // hedgeTargets picks the primary (tree parent) and a backup for a chunk. The

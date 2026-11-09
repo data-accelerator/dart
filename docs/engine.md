@@ -622,3 +622,30 @@ go test ./internal/engine/ -cover -count=1
 - **Mid-stream errors**: once headers are sent, a block error can only truncate
   the body (client detects via Content-Length); prefetching the first block
   before sending headers could turn some of these into clean error statuses.
+
+### Owner-rooted role routing
+
+ADR-0009 fixes the preferred root to the first HRW candidate from `View.Roots`.
+`Options.Role` is the local capability. Active ordinary/non-root readers form the
+ordered descendants; other root-only peers never enter the tree. With tracking
+configured, an unavailable reader snapshot routes directly to the owner. With
+tracking disabled, the descendants are the Ready reader-eligible members.
+
+A root supply request terminates at cache/origin. A non-root never falls through
+to local origin; failed ancestors can be bypassed toward root candidates, with
+at most the existing hop-bound count of root candidates under the shared flight
+lifetime. Supply mode and relay depth are both in block-flight identity, so a
+backup root does not join an outer relay waiting for it. A healthy owner miss
+never probes another root or a reader. Source refusals preserve their status and
+stop redundant credential/source attempts; transport/path failure may fail over.
+
+`Engine.ProbeSource` returns terminal metadata service for root-eligible nodes
+and nil for non-root nodes. Non-root Size probes use a file-key-ranked root,
+endpoint-scoped singleflight and the existing credential/cancellation rules.
+Root-eligible nodes retain local endpoint probing. Cached metadata and blocks
+continue to work without a reachable root. This metadata/block support does not
+alone implement full Registry or Range-unsupported frontend delegation.
+
+`TestRolesColdReadAndRootFailover` uses real HTTP roots and a forbidden local
+fetcher to verify delegated metadata, cold P2P reads, no replica query on owner
+miss, backup supply, warm reads without roots and bounded cold failure.

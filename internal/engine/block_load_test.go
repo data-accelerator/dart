@@ -462,7 +462,7 @@ func TestCoalescedPeerRefusalRetriesCallerCredential(t *testing.T) {
 	if err := <-leader; !errors.As(err, &status) || status.Code != http.StatusForbidden {
 		t.Fatalf("expired caller = %v", err)
 	}
-	if err := <-waiter; err != nil || parentCalls.Load() != 2 || refusedOrigin.Load() != 1 {
+	if err := <-waiter; err != nil || parentCalls.Load() != 2 || refusedOrigin.Load() != 0 {
 		t.Fatalf("renewed caller=%v parent=%d refused origin=%d", err, parentCalls.Load(), refusedOrigin.Load())
 	}
 	if client.Breaker.State(strings.TrimPrefix(parent.URL, "http://")) != peer.BreakerClosed {
