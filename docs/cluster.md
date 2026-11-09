@@ -23,7 +23,7 @@ keeping `client-go` out of this module.
 | Term | Meaning |
 |---|---|
 | `State` | Member lifecycle: `Joining → Ready → Suspect → Leaving`. **Reserved transitions**: today every producer sets `Ready` only (`DynamicProvider.Learn` forces it; the seeders have no member-state wire field), so `Live()` == `Ready()` in practice. The non-Ready states, their dedup rank, and their placement exclusions are the contract future producers (drain-on-shutdown, join grace) will code against — they are not emitted yet. |
-| `Member` | One node: stable `ID`, capacity `Weight`, `State`. |
+| `Member` | One node: stable `ID`, capacity `Weight`, authoritative `Role`, local `State`. |
 | `View` | Immutable membership snapshot at a given `Epoch`; safe to share across goroutines. |
 | `Epoch` | Deterministic 64-bit hash of the canonical membership; an agreement/change token, not a monotonic counter. |
 | `Provider` | Source of Views over time (`Current` + `Subscribe`). |
@@ -53,6 +53,7 @@ type Member struct {
     Addr   string  // peer-transport address host:port; auxiliary, NOT part of the epoch
     Weight float64 // relative cache capacity; <=0 treated as 1 by hashring; stored verbatim
     State  State
+    Role   Role   // Ordinary=0, RootOnly=1, NonRoot=2; authoritative
 }
 ```
 
@@ -60,6 +61,11 @@ type Member struct {
 deliberately excluded from the epoch: it does not affect placement ordering, and
 a stale `Addr` only causes a fallback to origin (safe under read-only
 semantics). It is retrievable via `Get`.
+
+Roles are defined by [ADR-0009](./adr/0009-root-eligible-peer-roles.md).
+`Role.Valid` rejects unknown values; `CanRoot` permits Ordinary and RootOnly,
+while `CanRead` permits Ordinary and NonRoot. `String` returns `ordinary`,
+`root-only`, `non-root`, or `unknown`. These methods are pure and goroutine-safe.
 
 ### 3.3 `type View` and `func NewView(members []Member) *View`
 
@@ -81,6 +87,8 @@ Methods (all on an immutable receiver; safe for concurrent use):
 | `Members() []Member` | **copy** of all members in canonical order (caller owns it) | O(n) |
 | `Get(id string) (Member, bool)` | member by ID via binary search | O(log n) |
 | `Ready() []hashring.Node` | Ready members as hashring nodes, sorted by ID (**shared, read-only**) | O(1) |
+| `Roots() []hashring.Node` | Ready members whose role permits supplying a root (**shared, read-only**) | O(1) |
+| `Readers() []hashring.Node` | Ready members whose role permits participation below a root (**shared, read-only**) | O(1) |
 | `Live() []hashring.Node` | Ready+Suspect members as hashring nodes, sorted by ID (**shared, read-only**) | O(1) |
 
 `Ready()`/`Live()` return internal slices precomputed at construction. They are
@@ -236,12 +244,13 @@ guess costs a hop, never correctness.
 
 ## 6. Determinism / Stability Contract
 
-- The epoch serialization (FNV-1a over `ID`, `0x1F`, big-endian float64 weight
-  bits, `0x1E`, per canonical member, then fmix64) is **part of the wire
+- The epoch serialization (FNV-1a over ASCII `dart-roles-v1` plus NUL, then
+  `ID`, `0x1F`, big-endian float64 weight bits, a role byte, `0x1E` per
+  canonical member, then fmix64) is **part of the wire
   protocol** (`X-DART-Epoch`). Changing it changes every epoch and must be
   treated as a protocol change. It changed once, in 2026-08, when `State` was
   removed from the hash.
-- The epoch covers only the **authoritative** fields: `ID` and `Weight`. `Addr` is
+- The epoch covers only the **authoritative** fields: `ID`, `Weight`, and `Role`. `Addr` is
   routing metadata, and `State` is a *local* judgement about liveness. Hashing
   either would make two nodes holding the same membership compute different
   epochs, and the epoch would stop being able to answer the one question it
@@ -287,6 +296,9 @@ go test ./internal/cluster/ -cover -count=1
 | `TestEpochGolden` | epoch matches an independent Python reference (serialization pinned) |
 | `TestEpochAgainstPythonReference` | CI diffs the epoch goldens against the tracked Python script |
 | `TestEpochDeterministicUnderShuffle` | epoch independent of input order |
+| `TestRolePlacementAndEpoch` | role-filtered candidates, independent mixed-role epoch golden, role mutation and permutation |
+| `TestRoleConflictCanonicalization` | duplicate role reports canonicalize independently of input order |
+| `TestRoleCapabilities` | role names, eligibility and unknown-role rejection |
 | `TestEpochChangesOnMutation` | an id or weight change bumps the epoch; a state change does not |
 | **`TestEpochExcludesState`** | **any combination of states yields one epoch, so the epoch can serve as a convergence token** |
 | `TestReadyLiveFilters` | Ready=Ready only, Live=Ready+Suspect, sorted, weights carried |
@@ -331,3 +343,17 @@ go test ./internal/cluster/ -cover -count=1
   merge deterministic (a tie-break, or preferring the address a node reports for
   itself over hearsay) needs a decision on which report should win, and is
   deliberately left open rather than guessed at.
+
+### Direct role authority
+
+`DynamicProvider.LearnMember` accepts a direct self-report, validates its role
+and identity, and refreshes contact. Once a role is directly confirmed, third-party
+`Learn` calls cannot overwrite it. A later direct report can change it. The
+identity-only `LearnPeer` adapter refreshes known contact/address without changing
+the role. This remains within the trusted-network model, not authentication.
+Hearsay address updates still do not extend liveness. `ParseRole` accepts exactly
+`ordinary`, `root-only`, and `non-root`; unknown names return an error.
+
+`TestDirectRoleSurvivesStaleHearsay` pins the authority rule and subsequent direct
+changes. `TestUnknownRoleRejectedAtDiscovery` verifies that invalid reports are
+excluded and reported through OnError.

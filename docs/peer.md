@@ -304,10 +304,10 @@ Genuine relay faults (a `500` with no such header) still spend failure budget, s
 the breaker keeps working; a control test asserts that.
 
 
-### 3.7 Membership exchange: `GET /peer/v1/roster`
+### 3.7 Membership exchange: `GET /peer/v2/roster`
 
 ```go
-const RosterPath = "/peer/v1/roster"
+const RosterPath = "/peer/v2/roster"
 const HeaderPeerAddr = "X-DART-Peer-Addr"
 type Roster struct { Epoch string; Members []RosterMember }
 type RosterMember struct { ID, Addr string; Weight float64 }
@@ -478,3 +478,20 @@ go test ./internal/peer/ -race -count=1
 Half-open regression tests: `TestHalfOpenProbesWaitForSiblingOutcome` covers
 concurrent recovery and a sibling hard-failure veto;
 `TestHalfOpenRosterSuccessCannotConsumeDataProbe` covers roster slot ownership.
+
+### Role-aware roster exchange
+
+As specified by ADR-0009, `RosterMember.Role` carries the numeric cluster role.
+`HeaderPeerRole` (`X-DART-Peer-Role`) and `HeaderPeerWeight`
+(`X-DART-Peer-Weight`) carry the caller's self-report; the response role header
+also preserves self-role information when the body omits the responder entry.
+`RosterServer.Role` supplies that fallback. `RosterServer.LearnMember` receives
+validated direct reports and takes precedence over the identity-only `Learn`
+adapter. `Client.FetchRosterMember` sends the complete report, preserving the
+existing timeout and discovery breaker-admission bypass. `FetchRoster` remains
+an ordinary-role convenience wrapper. Unknown numeric roles and invalid caller
+weights are rejected before learning. The v2 roster path is a coordinated-upgrade
+boundary, not implicit compatibility with the old v1 discovery protocol.
+
+`TestRosterRolesBothDirections` verifies caller roles and reconstructed responder
+roles over real HTTP; `TestRosterRejectsUnknownRoles` verifies both ingress paths.

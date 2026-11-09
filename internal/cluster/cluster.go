@@ -18,6 +18,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"sort"
 
@@ -75,6 +76,53 @@ func (s State) String() string {
 	}
 }
 
+// Role defines the positions a member may occupy in a distribution tree.
+// Numeric values are part of the membership wire and epoch contracts.
+type Role uint8
+
+const (
+	Ordinary Role = iota // may supply a root or participate below it
+	RootOnly             // may supply a root; accepts no local client traffic
+	NonRoot              // participates below a root; never accesses origin
+)
+
+// Valid reports whether r is a defined role.
+func (r Role) Valid() bool { return r <= NonRoot }
+
+// CanRoot reports whether r permits origin supply.
+func (r Role) CanRoot() bool { return r == Ordinary || r == RootOnly }
+
+// CanRead reports whether r permits participation below a root.
+func (r Role) CanRead() bool { return r == Ordinary || r == NonRoot }
+
+// String returns the configuration name, or "unknown" for an invalid role.
+func (r Role) String() string {
+	switch r {
+	case Ordinary:
+		return "ordinary"
+	case RootOnly:
+		return "root-only"
+	case NonRoot:
+		return "non-root"
+	default:
+		return "unknown"
+	}
+}
+
+// ParseRole accepts the three explicit configuration names.
+func ParseRole(name string) (Role, error) {
+	switch name {
+	case "ordinary":
+		return Ordinary, nil
+	case "root-only":
+		return RootOnly, nil
+	case "non-root":
+		return NonRoot, nil
+	default:
+		return 0, fmt.Errorf("unknown node role %q (want ordinary, root-only, or non-root)", name)
+	}
+}
+
 // Member is a single cluster member.
 type Member struct {
 	// ID is the stable node identity (e.g. Kubernetes nodeName or a persistent
@@ -90,6 +138,8 @@ type Member struct {
 	// are treated as 1 by the hashring; they are preserved verbatim here (and
 	// thus contribute to the epoch as-is).
 	Weight float64
+	// Role is an authoritative, epoch-covered tree-position capability.
+	Role Role
 	// State is the member's lifecycle state.
 	//
 	// State is deliberately NOT part of the epoch. Liveness is *locally derived*:
@@ -107,14 +157,16 @@ type Member struct {
 // either return copies or return internal slices that MUST be treated as
 // read-only (documented per method). Construct one with NewView.
 type View struct {
+	roots   []hashring.Node
+	readers []hashring.Node
 	epoch   uint64
-	members []Member        // canonical: sorted by (ID,State,Weight), unique ID
+	members []Member        // canonical: sorted by (ID,State,Weight,Role), unique ID
 	ready   []hashring.Node // precomputed Ready members (sorted by ID)
 	live    []hashring.Node // precomputed Ready+Suspect members (sorted by ID)
 }
 
 // NewView builds an immutable View from the given members. The input is copied
-// and canonicalized: sorted by (ID, state rank desc, Weight) and de-duplicated
+// and canonicalized: sorted by (ID, state rank desc, Weight, Role) and de-duplicated
 // by ID (keeping the first entry in that deterministic order), so the resulting
 // View — and its epoch — are independent of the input order. The input slice is
 // not modified.
@@ -133,7 +185,10 @@ func NewView(members []Member) *View {
 		if ra, rb := stateRank(cp[a].State), stateRank(cp[b].State); ra != rb {
 			return ra > rb
 		}
-		return cp[a].Weight < cp[b].Weight
+		if cp[a].Weight != cp[b].Weight {
+			return cp[a].Weight < cp[b].Weight
+		}
+		return cp[a].Role < cp[b].Role
 	})
 	// De-duplicate by ID, keeping the first (deterministic after the sort).
 	canon := cp[:0]
@@ -151,6 +206,12 @@ func NewView(members []Member) *View {
 	for _, m := range canon {
 		switch m.State {
 		case Ready:
+			if m.Role.CanRoot() {
+				v.roots = append(v.roots, hashring.Node{ID: m.ID, Weight: m.Weight})
+			}
+			if m.Role.CanRead() {
+				v.readers = append(v.readers, hashring.Node{ID: m.ID, Weight: m.Weight})
+			}
 			v.ready = append(v.ready, hashring.Node{ID: m.ID, Weight: m.Weight})
 			v.live = append(v.live, hashring.Node{ID: m.ID, Weight: m.Weight})
 		case Suspect:
@@ -180,11 +241,12 @@ func ValidMemberID(s string) bool {
 }
 
 // computeEpoch is a deterministic 64-bit hash of the *authoritative* part of the
-// canonical membership: FNV-1a over each member's (ID, 0x1F, big-endian float64
-// bits of weight, 0x1E), then an fmix64 finalizer. members MUST already be
+// canonical membership: FNV-1a over "dart-roles-v1" plus NUL, then each member's
+// (ID, 0x1F, big-endian float64 weight bits, one role byte, 0x1E), followed
+// by an fmix64 finalizer. members MUST already be
 // canonical.
 //
-// Only ID and Weight participate. Addr is routing metadata, and State is locally
+// Only ID, Weight and Role participate. Addr is routing metadata, and State is locally
 // derived (see Member.State) — hashing either would make two nodes with the same
 // membership disagree on the epoch, which is precisely what the epoch exists to
 // rule out.
@@ -199,6 +261,9 @@ func computeEpoch(members []Member) uint64 {
 	)
 	h := uint64(offset64)
 	mix := func(b byte) { h ^= uint64(b); h *= prime64 }
+	for _, b := range []byte("dart-roles-v1\x00") {
+		mix(b)
+	}
 	var num [8]byte
 	for _, m := range members {
 		for i := 0; i < len(m.ID); i++ {
@@ -209,6 +274,7 @@ func computeEpoch(members []Member) uint64 {
 		for _, b := range num {
 			mix(b)
 		}
+		mix(byte(m.Role))
 		mix(0x1E)
 	}
 	return fmix64(h)
@@ -256,3 +322,11 @@ func (v *View) Ready() []hashring.Node { return v.ready }
 // for read attempts that may still reach a briefly-unreachable holder. The
 // returned slice is shared and immutable — do NOT mutate it.
 func (v *View) Live() []hashring.Node { return v.live }
+
+// Roots returns Ready members eligible for owner placement, sorted by ID.
+// The returned slice is shared and must not be mutated.
+func (v *View) Roots() []hashring.Node { return v.roots }
+
+// Readers returns Ready members eligible below a root, sorted by ID.
+// The returned slice is shared and must not be mutated.
+func (v *View) Readers() []hashring.Node { return v.readers }

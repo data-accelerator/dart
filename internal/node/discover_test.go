@@ -93,7 +93,7 @@ func TestRosterFetcherAdapter(t *testing.T) {
 			return peer.Roster{
 				Epoch: "42",
 				Members: []peer.RosterMember{
-					{ID: "node-b", Addr: "10.0.0.2:9000", Weight: 2},
+					{ID: "node-b", Addr: "10.0.0.2:9000", Weight: 2, Role: cluster.RootOnly},
 					{ID: "node-c", Addr: "10.0.0.3:9000"}, // weight omitted -> 1
 					{ID: "", Addr: "10.0.0.4:9000"},       // no identity: unusable
 					{ID: "node-e", Addr: ""},              // no address: unusable
@@ -120,6 +120,9 @@ func TestRosterFetcherAdapter(t *testing.T) {
 	}
 	if len(byID) != 2 {
 		t.Fatalf("got %d usable members (%v), want 2", len(byID), byID)
+	}
+	if byID["node-b"].Role != cluster.RootOnly {
+		t.Fatal("adapter lost root-only role")
 	}
 	if byID["node-b"].Weight != 2 {
 		t.Errorf("weight lost: %+v", byID["node-b"])

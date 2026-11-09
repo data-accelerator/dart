@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
+
+	"github.com/data-accelerator/dart/internal/cluster"
 )
 
 // RosterPath is the URL path of the membership-exchange endpoint.
-const RosterPath = "/peer/v1/roster"
+const RosterPath = "/peer/v2/roster"
 
 // HeaderPeerAddr carries the caller's *advertised* peer address on a roster
 // request.
@@ -18,6 +21,12 @@ const RosterPath = "/peer/v1/roster"
 // It cannot be derived from the connection: RemoteAddr's port is the caller's
 // ephemeral source port, not the address it accepts block requests on.
 const HeaderPeerAddr = "X-DART-Peer-Addr"
+
+// HeaderPeerRole carries the self-reported numeric tree role in roster exchange.
+const HeaderPeerRole = "X-DART-Peer-Role"
+
+// HeaderPeerWeight carries the caller's placement weight in roster exchange.
+const HeaderPeerWeight = "X-DART-Peer-Weight"
 
 // maxRosterBody bounds a roster response. A roster is small — a few tens of bytes
 // per member — and this exists so a misbehaving or hostile peer cannot make us
@@ -32,9 +41,10 @@ const maxRosterBody = 4 << 20
 // transient failures and cause membership to flap cluster-wide. See
 // cluster.Member.State.
 type RosterMember struct {
-	ID     string  `json:"id"`
-	Addr   string  `json:"addr"`
-	Weight float64 `json:"weight,omitempty"`
+	ID     string       `json:"id"`
+	Addr   string       `json:"addr"`
+	Weight float64      `json:"weight,omitempty"`
+	Role   cluster.Role `json:"role"`
 }
 
 // Roster is the membership snapshot exchanged between peers.
@@ -54,6 +64,8 @@ type Roster struct {
 type RosterServer struct {
 	// NodeID is this node's stable identity, echoed in HeaderNode.
 	NodeID string
+	// Role is used for self-identification when Src omits the local entry.
+	Role cluster.Role
 	// Src returns the roster to serve. Required.
 	Src func() Roster
 	// Learn, if set, is called with a caller's identity and advertised address.
@@ -64,6 +76,8 @@ type RosterServer struct {
 	// rosters only ever flowed towards the caller it could stay permanently
 	// isolated. Learning from inbound requests closes that.
 	Learn func(id, addr string)
+	// LearnMember receives a direct self-report and takes precedence over Learn.
+	LearnMember func(RosterMember)
 }
 
 func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -76,13 +90,45 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no roster source", http.StatusInternalServerError)
 		return
 	}
-	if s.Learn != nil {
-		if id, addr := r.Header.Get(HeaderNode), r.Header.Get(HeaderPeerAddr); id != "" && addr != "" {
+	role, err := parseRosterRole(r.Header.Get(HeaderPeerRole))
+	if err != nil {
+		http.Error(w, "invalid peer role", http.StatusBadRequest)
+		return
+	}
+	weight := 1.0
+	if raw := r.Header.Get(HeaderPeerWeight); raw != "" {
+		weight, err = strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(weight) || math.IsInf(weight, 0) {
+			http.Error(w, "invalid peer weight", http.StatusBadRequest)
+			return
+		}
+		if weight <= 0 {
+			weight = 1
+		}
+	}
+	if id, addr := r.Header.Get(HeaderNode), r.Header.Get(HeaderPeerAddr); id != "" && addr != "" {
+		if s.LearnMember != nil {
+			s.LearnMember(RosterMember{ID: id, Addr: addr, Weight: weight, Role: role})
+		} else if s.Learn != nil {
 			s.Learn(id, addr)
 		}
 	}
-
 	roster := s.Src()
+	selfRole := s.Role
+	for _, m := range roster.Members {
+		if !m.Role.Valid() {
+			http.Error(w, "invalid roster role", http.StatusInternalServerError)
+			return
+		}
+		if m.ID == s.NodeID {
+			selfRole = m.Role
+		}
+	}
+	if !selfRole.Valid() {
+		http.Error(w, "invalid self role", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set(HeaderPeerRole, strconv.Itoa(int(selfRole)))
 	body, err := json.Marshal(roster)
 	if err != nil {
 		http.Error(w, "encode roster", http.StatusInternalServerError)
@@ -123,6 +169,16 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // reachability without waiting for a block request. Outstanding data probes still
 // own their slots and must finish before their circuit can recover.
 func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string) (Roster, string, error) {
+	return c.FetchRosterMember(ctx, addr, RosterMember{ID: selfID, Addr: selfAddr, Weight: 1})
+}
+
+// FetchRosterMember exchanges a complete self-report with a role-aware peer.
+// It preserves FetchRoster's discovery admission and bounded request lifetime.
+func (c *Client) FetchRosterMember(ctx context.Context, addr string, self RosterMember) (Roster, string, error) {
+	if !self.Role.Valid() {
+		return Roster{}, "", fmt.Errorf("peer: invalid self role %d", self.Role)
+	}
+	selfID, selfAddr := self.ID, self.Addr
 	var permit breakerPermit
 	if c.Breaker != nil {
 		permit, _ = c.Breaker.begin(addr, false)
@@ -142,6 +198,8 @@ func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string)
 		req.Header.Set(HeaderPeerAddr, selfAddr)
 	}
 
+	req.Header.Set(HeaderPeerRole, strconv.Itoa(int(self.Role)))
+	req.Header.Set(HeaderPeerWeight, strconv.FormatFloat(self.Weight, 'g', -1, 64))
 	resp, err := c.http().Do(req)
 	if err != nil {
 		c.record(addr, permit, classify(err))
@@ -174,9 +232,20 @@ func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string)
 	// add it. That entry is the whole point of the exchange for a caller that only
 	// has an address, so it is worth reconstructing rather than discarding the
 	// response.
+	for _, m := range roster.Members {
+		if !m.Role.Valid() {
+			c.record(addr, permit, outcomeSoftFail)
+			return Roster{}, "", fmt.Errorf("peer: invalid roster role %d", m.Role)
+		}
+	}
+	selfRole, err := parseRosterRole(resp.Header.Get(HeaderPeerRole))
+	if err != nil {
+		c.record(addr, permit, outcomeSoftFail)
+		return Roster{}, "", err
+	}
 	responder := resp.Header.Get(HeaderNode)
 	if responder != "" && !rosterHas(roster, responder) {
-		roster.Members = append(roster.Members, RosterMember{ID: responder, Addr: addr, Weight: 1})
+		roster.Members = append(roster.Members, RosterMember{ID: responder, Addr: addr, Weight: 1, Role: selfRole})
 	}
 	c.record(addr, permit, outcomeAnswered)
 	return roster, responder, nil
@@ -189,4 +258,16 @@ func rosterHas(r Roster, id string) bool {
 		}
 	}
 	return false
+}
+
+func parseRosterRole(raw string) (cluster.Role, error) {
+	if raw == "" {
+		return cluster.Ordinary, nil
+	}
+	n, err := strconv.ParseUint(raw, 10, 8)
+	r := cluster.Role(n)
+	if err != nil || !r.Valid() {
+		return 0, fmt.Errorf("peer: invalid role %q", raw)
+	}
+	return r, nil
 }

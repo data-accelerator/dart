@@ -241,3 +241,16 @@ fallback produces a complete Content-Length response.
   run / `deploy/verify.sh`), as before the extraction.
 - Scheme dispatch cuts at the first `:`; a spec therefore cannot itself start
   with something that looks like a scheme prefix (no current scheme needs one).
+
+### Tree-role assembly
+
+ADR-0009 defines `-role ordinary|root-only|non-root` (default `ordinary`).
+Restricted roles require P2P configuration. Discovery advertises the configured
+role in both directions. Static lists use `id@host:port#role`, with an omitted
+suffix meaning ordinary; every node must configure the same membership roles,
+and the local entry must agree with `-role`. Root-only assembly does not create
+a client listener; peer and operational handlers remain available.
+`TestRoleConfiguration` covers flag/static-role parsing and IPv6 addresses;
+`TestRootOnlyHasNoClientHandler` checks root-only assembly and inconsistent or
+standalone role rejection. These assembly rules accompany the engine routing
+contract; a role must not be used as a substitute for source-access enforcement.

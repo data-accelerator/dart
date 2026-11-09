@@ -67,7 +67,7 @@ func TestEpochCollisionInputsRejected(t *testing.T) {
 	// framing bytes stay valid FNV input) — the guard is that no node can
 	// *introduce* such an ID. Assert both sides of that boundary.
 	w1 := [8]byte{0x3f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00} // 1.0 big-endian
-	crafted := "a" + string([]byte{0x1f}) + string(w1[:]) + string([]byte{0x1e}) + "b"
+	crafted := "a" + string([]byte{0x1f}) + string(w1[:]) + string([]byte{byte(Ordinary), 0x1e}) + "b"
 	if ValidMemberID(crafted) {
 		t.Fatal("the crafted collision ID must fail alphabet validation")
 	}

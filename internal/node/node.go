@@ -59,6 +59,7 @@ type config struct {
 	prefetchLoads    int
 	namespace        string
 	selfID           string
+	role             cluster.Role
 	peerListen       string
 	peers            string
 	fanout           int
@@ -209,7 +210,9 @@ func Run(args []string, out io.Writer, version string, schemes ...DiscoverySchem
 	// contract). A deferred close would run even on the abandon path.
 
 	ss := newServerSet()
-	ss.add(cfg.listen, n.client)
+	if n.client != nil {
+		ss.add(cfg.listen, n.client)
+	}
 	if n.peer != nil {
 		ss.add(cfg.peerListen, n.peer)
 	}
@@ -416,6 +419,14 @@ func parseFlags(args []string, out io.Writer, schemes []DiscoveryScheme) (config
 	fs := flag.NewFlagSet("dart", flag.ContinueOnError)
 	fs.SetOutput(out)
 	var cfg config
+	fs.Func("role", "tree role: ordinary, root-only, or non-root", func(raw string) error {
+		role, err := cluster.ParseRole(raw)
+		if err != nil {
+			return err
+		}
+		cfg.role = role
+		return nil
+	})
 	fs.BoolVar(&cfg.showVersion, "version", false, "print the version and exit")
 	fs.StringVar(&cfg.listen, "listen", ":8080", "client listen address")
 	fs.StringVar(&cfg.origin, "origin", "", "fixed upstream origin URL; empty enables prefix passthrough")
@@ -500,10 +511,22 @@ func parsePeers(s string) ([]cluster.Member, error) {
 		if !ok || id == "" || addr == "" {
 			return nil, fmt.Errorf("bad peer %q (want id@host:port)", tok)
 		}
+		role := cluster.Ordinary
+		if host, raw, hasRole := strings.Cut(addr, "#"); hasRole {
+			var err error
+			role, err = cluster.ParseRole(raw)
+			if err != nil {
+				return nil, err
+			}
+			addr = host
+			if addr == "" {
+				return nil, fmt.Errorf("peer %q has no address", tok)
+			}
+		}
 		if !cluster.ValidMemberID(id) {
 			return nil, fmt.Errorf("bad peer %q: id must be visible ASCII without spaces or control bytes (epoch-framing safety)", tok)
 		}
-		ms = append(ms, cluster.Member{ID: id, Addr: addr, Weight: 1, State: cluster.Ready})
+		ms = append(ms, cluster.Member{ID: id, Addr: addr, Weight: 1, State: cluster.Ready, Role: role})
 	}
 	if len(ms) == 0 {
 		return nil, fmt.Errorf("no peers parsed from %q", s)
@@ -513,7 +536,8 @@ func parsePeers(s string) ([]cluster.Member, error) {
 
 // node holds a built DART node's handlers and the resource closer.
 type node struct {
-	client   http.Handler // client data plane (required)
+	client   http.Handler // client data plane; nil for root-only
+	frontend http.Handler // underlying frontend for delegated root operations
 	peer     http.Handler // peer block server; nil when P2P is off
 	admin    http.Handler // metrics/admin; nil when -admin is empty
 	closer   io.Closer    // releases the store and any disk-cache directory lock
@@ -536,6 +560,12 @@ func (cs closers) Close() error {
 
 // build constructs the store, engine, and handlers from cfg.
 func build(cfg config, out io.Writer) (*node, error) {
+	if !cfg.role.Valid() {
+		return nil, fmt.Errorf("invalid node role %d", cfg.role)
+	}
+	if cfg.role != cluster.Ordinary && cfg.peers == "" && cfg.discover == "" {
+		return nil, fmt.Errorf("role %s requires -peers or -discover", cfg.role)
+	}
 	cc := chunk.Config{ChunkSize: cfg.chunkSize, BlockSize: cfg.blockSize}
 	if err := cc.Validate(); err != nil {
 		return nil, err
@@ -637,9 +667,9 @@ func build(cfg config, out io.Writer) (*node, error) {
 				return nil, err
 			}
 			dyn = cluster.NewDynamicProvider(cluster.DynamicConfig{
-				Self:            cluster.Member{ID: cfg.selfID, Addr: selfAddr, Weight: 1},
+				Self:            cluster.Member{ID: cfg.selfID, Addr: selfAddr, Weight: 1, Role: cfg.role},
 				Seeder:          seeder,
-				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr},
+				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr, selfRole: cfg.role},
 				RefreshInterval: cfg.discoverInterval,
 				ForgetAfter:     cfg.forgetAfter,
 				OnError:         newThrottledLogger(out),
@@ -650,6 +680,12 @@ func build(cfg config, out io.Writer) (*node, error) {
 			if err != nil {
 				closer.Close()
 				return nil, err
+			}
+			for _, m := range members {
+				if m.ID == cfg.selfID && m.Role != cfg.role {
+					closer.Close()
+					return nil, fmt.Errorf("self role %s disagrees with static peer role %s", cfg.role, m.Role)
+				}
 			}
 			eopt.Cluster = cluster.NewStaticProvider(members...)
 		}
@@ -692,8 +728,12 @@ func build(cfg config, out io.Writer) (*node, error) {
 	}
 
 	n := &node{
-		client: clientH,
-		closer: closer,
+		client:   clientH,
+		frontend: clientH,
+		closer:   closer,
+	}
+	if cfg.role == cluster.RootOnly {
+		n.client = nil
 	}
 	if p2p {
 		// Serve only fully obtained, validated blocks. Client-range prefetch
@@ -713,8 +753,11 @@ func build(cfg config, out io.Writer) (*node, error) {
 			// with nothing to seed from still joins.
 			mux.Handle(RosterRoute, &peer.RosterServer{
 				NodeID: cfg.selfID,
+				Role:   cfg.role,
 				Src:    func() peer.Roster { return rosterOf(dyn) },
-				Learn:  dyn.LearnPeer,
+				LearnMember: func(m peer.RosterMember) {
+					dyn.LearnMember(cluster.Member{ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: m.Role})
+				},
 			})
 		}
 		n.peer = mux
