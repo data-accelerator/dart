@@ -222,11 +222,12 @@ func TestReaderRefreshLeaseBounds(t *testing.T) {
 func TestReaderRefreshBackoffAndLeaseReset(t *testing.T) {
 	var calls atomic.Int32
 	e, view, _ := refreshClient(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		json.NewEncoder(w).Encode(tracker.JoinResponse{Readers: []string{"reader"}, TTLMs: 6000})
+		n := calls.Add(1)
+		// Change both the published list and its epoch on every refresh.
+		json.NewEncoder(w).Encode(tracker.JoinResponse{Readers: []string{"reader", strings.Repeat("A", int(n))}, TTLMs: 6000, EpochS: uint64(n)})
 	})
-	// Every successful refresh advances solely with time, even if the response
-	// is unchanged. A changed reader list must not reset this schedule either.
+	// Every successful refresh advances solely with time. Changing the reader
+	// list and publication epoch must not reset this schedule.
 	for _, want := range []time.Duration{50, 100, 200, 400, 800, 1600, 3000, 3000} {
 		e.readers(context.Background(), view, "object", 1)
 		s := e.rs["object"]
