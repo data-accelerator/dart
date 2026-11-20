@@ -145,10 +145,8 @@ func TestRosterOfRendersCurrentView(t *testing.T) {
 		Self:   cluster.Member{ID: "self", Addr: "10.0.0.1:9000"},
 		Seeder: cluster.StaticSeeder{},
 	})
-	d.Learn(
-		cluster.Member{ID: "peer1", Addr: "10.0.0.2:9000", Weight: 3},
-		cluster.Member{ID: "addrless", Addr: ""},
-	)
+	d.LearnMember(cluster.Member{ID: "peer1", Addr: "10.0.0.2:9000", Weight: 3})
+	d.LearnMember(cluster.Member{ID: "addrless", Addr: ""})
 	d.Refresh(context.Background())
 
 	r := rosterOf(d)

@@ -175,19 +175,32 @@ which is what makes a truncated DNS answer or a partial seed list survivable.
 | `Current() *View` / `Subscribe() (<-chan *View, func())` | the `Provider` interface: latest view / view-change feed (unsubscribe via the returned func). |
 | `Run(ctx)` | the background loop: periodic `Refresh` on `RefreshInterval` until `ctx` is canceled. Start it before serving traffic so the first view is in place. |
 | `Refresh(ctx) *View` | one synchronous gather + publish cycle; also callable on demand. |
-| `Learn(members ...Member)` | hearsay ingest: invalid IDs are rejected (§3.3.1) and reported via `OnError`; self entries ignored; valid members are learned immediately. Safe for concurrent use. |
+| `Learn(members ...Member)` | hearsay ingest: invalid IDs are rejected (§3.3.1) and reported via `OnError`; self entries ignored; valid unknown identities become unpublished probe candidates. Safe for concurrent use. |
 | `LearnPeer(id, addr string)` | records an inbound contact from `id` at `addr` — refreshes that member's liveness clock (only *direct* contact does) and adopts the newest address. |
 | `Roster() []Member` | the full member list we answer roster fetches with (self included). |
 
-### Adding and forgetting are not symmetric
+### Direct admission and delayed forgetting
 
-- **Adding** happens immediately, on hearsay. Being wrong costs a request sent to a
-  node that turns out not to hold the block, which is safe.
+- **Admission** requires direct contact with the identity, either its inbound
+  self-report or an identified roster response. Third-party entries are retained
+  as unpublished candidates and probed on the next refresh. They do not enter
+  `Current()`, subscriptions, placement, or the served `Roster()` before confirmation.
+  A candidate expires after `ForgetAfter`; later hearsay can recreate a candidate,
+  but cannot publish it. This also applies after restart, with no persisted state.
+  See [ADR-0014](./adr/0014-confirm-discovered-members-directly.md).
 - **Forgetting** waits for `ForgetAfter` (default 60s) of no direct contact, because
   removing a member re-runs placement, moves ownership of ~1/N of the keyspace and
   re-forms the distribution tree. Routing around an unreachable peer already happens
   in about a second, locally, via the circuit breaker — so removal can afford to be
   slow, and should be.
+
+A departed ID can coexist with its replacement during the grace period, including
+when both advertise the same endpoint. Once expired, it stays absent unless it
+provides new direct evidence. Address equality is never identity equivalence.
+Indirect discovery may take an extra refresh before admission. Inbound contact
+still admits peers under asymmetric reachability. Full removal across a mixed
+cluster requires upgrading every observer; older observers retain their own
+admission policy. The wire fields and epoch encoding are unchanged.
 
 ### Only direct contact refreshes the liveness clock
 
@@ -247,6 +260,10 @@ guess costs a hop, never correctness.
 - Verified with `-race` (concurrent readers + writers + a draining subscriber).
 
 ## 6. Determinism / Stability Contract
+
+- Dynamic membership requires direct identity confirmation before publication.
+  Hearsay supplies candidate addresses only; it cannot revive an expired member.
+  Static providers remain explicit caller-configured membership (ADR-0014).
 
 - The epoch serialization (FNV-1a over ASCII `dart-roles-v1` plus NUL, then
   `ID`, `0x1F`, big-endian float64 weight bits, a role byte, `0x1E` per
@@ -323,6 +340,8 @@ go test ./internal/cluster/ -cover -count=1
 | `TestSubscribeCoalesces` | slow consumer sees only the latest; producer never blocks; buffer ≤1 |
 | `TestUnsubscribe` | cancel stops delivery and is idempotent |
 | `TestConcurrentSetAndCurrent` | lock-free reads under concurrent writers + subscriber (`-race`) |
+| `TestDynamicExpiredIdentityDoesNotResurrect` | staggered expiration, departed/replaced IDs, repeated stale rosters, restarted observers and inbound rejoin |
+| `TestDynamicHearsayCandidateRequiresDirectContact` | transitive candidates stay unpublished until a direct probe confirms them |
 | `TestDynamicConfirmCreditsResponderNotAddress` | liveness credit goes to the answering member's ID, not the dialed address; a dead member whose address was recycled is forgotten after `ForgetAfter` |
 | `TestDynamicUnidentifiedResponderEarnsNoCredit` | an anonymous responder refreshes nobody's clock |
 

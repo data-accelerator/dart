@@ -218,6 +218,10 @@ go test ./internal/node/ -race -count=1
 
 ### Test list (property each guards)
 
+`TestDiscoveryIdentityReplacementOverHTTP` exercises roster response identity,
+wire decoding and dynamic admission together: AZ replaced by B expires despite
+stale rosters, a restarted observer excludes AZ, and a real AZ rejoin succeeds.
+
 Discovery regression coverage for ADR-0009 includes
 `TestDiscoveryMixedRolesConvergeAndChange`: real HTTP roster exchange, DNS/static
 seeds, inbound-only discovery, restart role changes and epoch convergence.

@@ -99,19 +99,24 @@ type DynamicProvider struct {
 	known map[string]*tracked // by member ID
 }
 
-// tracked is a known peer plus the bookkeeping that decides when to forget it.
+// tracked is a member or a discovery candidate plus its expiration bookkeeping.
 type tracked struct {
 	member Member
+	// confirmed distinguishes direct evidence from a third-party probe candidate.
+	// Only confirmed entries are published or relayed to other peers.
+	confirmed bool
 	// directRole prevents third-party hearsay from reverting a self-reported role.
 	directRole bool
 	// lastContact is when we last had *direct* evidence this member exists: a
-	// successful roster fetch from it, or a request it made to us.
+	// successful roster fetch from it, or a request it made to us. For an
+	// unconfirmed candidate it is the first-seen time, bounding probe retention.
 	//
 	// It is deliberately not refreshed by hearsay. Members learned from a peer's
-	// roster are added, but their clock is not reset, because every surviving peer
+	// roster become candidates, but their clock is not reset, because a peer
 	// keeps listing a dead node in its own roster for as long as it remembers it —
 	// so if hearsay refreshed the clock, two survivors would refresh each other's
-	// memory of the dead node indefinitely and it would never be forgotten. Only
+	// memory of the dead node indefinitely and it would never be forgotten.
+	// Expired entries can be relearned only as unpublished candidates. Only
 	// something we observed ourselves counts as evidence of life.
 	lastContact time.Time
 }
@@ -251,17 +256,14 @@ func (d *DynamicProvider) confirm(responderID string) {
 	defer d.mu.Unlock()
 	if t, ok := d.known[responderID]; ok {
 		t.lastContact = now
+		t.confirmed = true
 	}
 }
 
-// Learn records members reported by a peer's roster. This is *hearsay*: it is
-// enough to add a member, which is how one reachable neighbour is enough to find
-// the whole cluster, but it does not refresh the liveness clock of a member we
-// already know. See tracked.lastContact for why that distinction is load-bearing.
-//
-// Adding is immediate and unconditional, in contrast to forgetting. Adding costs
-// one placement recomputation; the risk of being wrong is a request sent to a node
-// that turns out not to hold the block, which is safe.
+// Learn records third-party roster entries as probe candidates. New candidates
+// are not members until direct contact confirms their identity. Hearsay updates
+// addresses but never refreshes an existing entry's expiration clock. Candidates
+// are probed on the next refresh and expire on the same schedule as members.
 func (d *DynamicProvider) Learn(members ...Member) {
 	if len(members) == 0 {
 		return
@@ -295,7 +297,7 @@ func (d *DynamicProvider) Learn(members ...Member) {
 		m.State = Ready
 		t, ok := d.known[m.ID]
 		if !ok {
-			// New to us. Give it a full grace period to be confirmed directly.
+			// New candidate: retain its address for probing, without publishing it.
 			d.known[m.ID] = &tracked{member: m, lastContact: now}
 			continue
 		}
@@ -339,8 +341,9 @@ func (d *DynamicProvider) LearnPeer(id, addr string) {
 	if t, ok := d.known[id]; ok {
 		t.member.Addr = addr
 		t.lastContact = now
+		t.confirmed = true
 	} else {
-		d.known[id] = &tracked{member: Member{ID: id, Addr: addr, Weight: 1, State: Ready}, lastContact: now}
+		d.known[id] = &tracked{member: Member{ID: id, Addr: addr, Weight: 1, State: Ready}, confirmed: true, lastContact: now}
 	}
 	d.mu.Unlock()
 }
@@ -363,7 +366,7 @@ func (d *DynamicProvider) LearnMember(m Member) {
 	m.State = Ready
 	now := d.cfg.Now()
 	d.mu.Lock()
-	d.known[m.ID] = &tracked{member: m, directRole: true, lastContact: now}
+	d.known[m.ID] = &tracked{member: m, confirmed: true, directRole: true, lastContact: now}
 	d.mu.Unlock()
 }
 
@@ -384,7 +387,9 @@ func (d *DynamicProvider) publish() *View {
 			delete(d.known, id)
 			continue
 		}
-		members = append(members, t.member)
+		if t.confirmed {
+			members = append(members, t.member)
+		}
 	}
 	d.mu.Unlock()
 
