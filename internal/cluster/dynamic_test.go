@@ -378,10 +378,11 @@ func TestDynamicTransitiveDiscovery(t *testing.T) {
 		Seeder:  StaticSeeder{"10.0.0.2:9000"},
 		Fetcher: f,
 	})
-	v := d.Refresh(context.Background())
+	d.Refresh(context.Background())      // Learn candidate addresses.
+	v := d.Refresh(context.Background()) // Confirm their identities directly.
 	for _, id := range []string{"node-a", "node-b", "node-c", "node-d"} {
 		if !hasID(v, id) {
-			t.Errorf("view %v is missing %s after one refresh", ids(v), id)
+			t.Errorf("view %v is missing %s after candidate probing", ids(v), id)
 		}
 	}
 }
@@ -528,7 +529,8 @@ func TestDynamicWireStateIgnored(t *testing.T) {
 		Seeder:  StaticSeeder{"10.0.0.2:9000"},
 		Fetcher: f,
 	})
-	v := d.Refresh(context.Background())
+	d.Refresh(context.Background())      // Learn candidate addresses.
+	v := d.Refresh(context.Background()) // Confirm their identities directly.
 
 	for _, id := range []string{"node-b", "node-c"} {
 		m, ok := v.Get(id)
@@ -673,7 +675,9 @@ func TestDynamicConfirmCreditsResponderNotAddress(t *testing.T) {
 		ForgetAfter: time.Minute,
 	})
 
-	// Both X and Y are learned from the first roster.
+	// X was previously confirmed at this address before Y replaced it.
+	d.LearnMember(Member{ID: "X", Addr: "10.0.0.9:9000"})
+	// Both remain during the grace period, but only Y receives fresh credit.
 	if v := d.Refresh(context.Background()); !hasID(v, "X") || !hasID(v, "Y") {
 		t.Fatalf("initial view %v, want both X and Y learned", ids(v))
 	}
@@ -710,8 +714,9 @@ func TestDynamicUnidentifiedResponderEarnsNoCredit(t *testing.T) {
 		ForgetAfter: time.Minute,
 	})
 
+	d.LearnMember(Member{ID: "X", Addr: "10.0.0.9:9000"})
 	if v := d.Refresh(context.Background()); !hasID(v, "X") {
-		t.Fatalf("X not learned: %v", ids(v))
+		t.Fatalf("confirmed X missing during grace period: %v", ids(v))
 	}
 	for i := 0; i < 3; i++ {
 		c.advance(30 * time.Second)

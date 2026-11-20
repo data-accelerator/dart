@@ -28,7 +28,7 @@ func TestHearsayAddrChangeDoesNotRefreshLiveness(t *testing.T) {
 		ForgetAfter: time.Minute,
 		Now:         func() time.Time { return now },
 	})
-	d.Learn(Member{ID: "x", Addr: "10.0.0.2:9000"})
+	d.LearnMember(Member{ID: "x", Addr: "10.0.0.2:9000"})
 
 	// Control: same-address hearsay must not refresh.
 	now = base.Add(30 * time.Second)
@@ -47,24 +47,16 @@ func TestHearsayAddrChangeDoesNotRefreshLiveness(t *testing.T) {
 		t.Fatal("address-change hearsay refreshed lastContact")
 	}
 
-	// Flip-flopping hearsay must not prevent forgetting: 200 rounds of
-	// conflicting address reports at 30s spacing (half of ForgetAfter) with
-	// zero direct contact must still expire x. (Hearsay may legitimately
-	// re-add it afterwards — adding is immediate and cheap — so assert the
-	// oscillation, not the end state: pre-fix, lastContact never lapsed and x
-	// was present in every single round.)
+	// Repeated conflicting reports must neither extend the original grace
+	// period nor restore the expired identity to published membership.
 	addrs := []string{"10.0.0.2:9000", "10.0.0.3:9000"}
-	forgotten := false
 	for i := 0; i < 200; i++ {
 		now = now.Add(30 * time.Second)
 		d.Learn(Member{ID: "x", Addr: addrs[i%2]})
 		d.Refresh(context.Background())
-		if _, ok := d.Current().Get("x"); !ok {
-			forgotten = true
+		if now.Sub(base) > time.Minute && hasID(d.Current(), "x") {
+			t.Fatal("expired x reappeared through conflicting hearsay")
 		}
-	}
-	if !forgotten {
-		t.Fatal("x stayed in membership for 100 minutes of flip-flopping hearsay with zero direct contact")
 	}
 }
 
