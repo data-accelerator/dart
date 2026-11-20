@@ -7,6 +7,29 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+## [v0.4.1] — 2026-11-20
+
+### Fixed
+
+- Prevent stale roster gossip from resurrecting expired member IDs (#108, #109,
+  ADR-0014). Third-party identities remain unpublished probe candidates until
+  directly confirmed. This fixes persistent AZ-to-B duplicates after identity
+  replacement and offline members repeatedly returning to the membership list.
+  Genuine inbound/outbound rejoins and the existing forgetting grace period remain.
+
+### Upgrade notes
+
+- Peer v2 fields, epoch encoding, placement hashes and flags are unchanged from
+  v0.4.0. Upgrade every node to obtain cluster-wide convergence: older observers
+  can still re-admit stale identities. Indirect discovery may take one extra
+  refresh before publication. Previously confirmed departed IDs remain visible
+  until the forgetting grace period expires (default 60 seconds, plus refresh).
+- Helm chart 0.4.1 targets appVersion v0.4.1; image.tag remains `dev` for source
+  builds. Build and deploy version-stamped images from this tag. No container
+  registry images are published by this release.
+- Upgrades from v0.3.x still require the coordinated drain and replacement
+  procedure described in docs/k8s.md; do not mix peer v1 and v2 nodes.
+
 ## [v0.4.0] — 2026-11-09
 
 ### Added
