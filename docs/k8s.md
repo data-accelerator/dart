@@ -92,6 +92,22 @@ Kubernetes node name, so these node pools must be disjoint: two DART instances o
 one node need distinct stable identities and a separately configured deployment.
 Do not attach legacy v1 nodes to the role-aware cluster during upgrade.
 
+### Upgrading from v0.4.0 to v0.4.1
+
+Build images from tag v0.4.1 with `--build-arg VERSION=v0.4.1` (add
+`--target dart-k8s` for EndpointSlice discovery), and deploy chart 0.4.1 with
+`image.tag=v0.4.1` and your image repository. The default tag remains `dev`;
+this release does not publish container registry images.
+
+Peer v2 fields and epoch encoding are unchanged. Replace every observer to stop
+stale roster identities from re-entering membership cluster-wide (ADR-0014);
+v0.4.0 observers retain the old admission behavior during a mixed rollout.
+A departed ID can remain until the default 60-second forgetting grace period
+expires and refresh publishes the new view. New indirect discoveries may need
+one additional refresh for direct confirmation. Check `/admin/members` on every
+node after the grace period, including after any self-ID replacement, and verify
+`/healthz` and successful artifact reads. Cache backends restart cold.
+
 ### Upgrading from v0.3.0 to v0.4.0
 
 This is a coordinated upgrade, including all-ordinary clusters. Peer block and
