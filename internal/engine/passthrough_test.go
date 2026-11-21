@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"io"
 	"net/http"
@@ -68,10 +71,25 @@ func TestHandlerPassthroughForRangeBlindOrigin(t *testing.T) {
 // the client receives exactly what the origin answered — a Range-ignoring
 // origin means a full-body 200 even to a ranged request.
 func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
-	content := blob(100)
+	var encoded bytes.Buffer
+	gz := gzip.NewWriter(&encoded)
+	deflated := zlib.NewWriter(gz)
+	if _, err := deflated.Write(blob(100)); err != nil {
+		t.Fatal(err)
+	}
+	if err := deflated.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content := encoded.Bytes()
 	var sawRange string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawRange = r.Header.Get("Range")
+		w.Header().Set("Content-Type", "application/vnd.example.blob")
+		w.Header().Add("Content-Encoding", "deflate")
+		w.Header().Add("Content-Encoding", "gzip")
 		w.WriteHeader(http.StatusOK)
 		w.Write(content)
 	}))
@@ -86,8 +104,15 @@ func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://dart/blob", nil)
 	req.Header.Set("Range", "bytes=10-19")
 	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/octet-stream") // registry fallback
 	h.ServeHTTP(rec, req)
 	resp := rec.Result()
+	if values := resp.Header.Values("Content-Type"); len(values) != 1 || values[0] != "application/vnd.example.blob" {
+		t.Fatalf("origin content type did not replace the registry default: %v", values)
+	}
+	if got := strings.Join(resp.Header.Values("Content-Encoding"), ","); got != "deflate,gzip" {
+		t.Fatalf("content encodings = %q, want deflate,gzip in origin order", got)
+	}
 	if sawRange != "bytes=10-19" {
 		t.Errorf("origin saw Range %q, want bytes=10-19", sawRange)
 	}
@@ -96,8 +121,22 @@ func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
 		t.Errorf("status = %s, want the origin's verbatim 200", resp.Status)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if len(body) != len(content) {
-		t.Errorf("body = %d bytes, want the full %d", len(body), len(content))
+	directReq, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directReq.Header.Set("Range", "bytes=10-19")
+	direct, err := srv.Client().Do(directReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer direct.Body.Close()
+	want, err := io.ReadAll(direct.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != direct.StatusCode || strings.Join(direct.Header.Values("Content-Encoding"), ",") != "deflate,gzip" || !bytes.Equal(body, want) || !bytes.Equal(want, content) {
+		t.Fatalf("passthrough did not preserve the direct origin response: got %d bytes, origin %d", len(body), len(want))
 	}
 }
 
