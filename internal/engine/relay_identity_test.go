@@ -15,6 +15,39 @@ import (
 	"github.com/data-accelerator/dart/internal/store"
 )
 
+func TestRelayUsesConfiguredDigestLayout(t *testing.T) {
+	content := blob(16)
+	var calls int64
+	origin := countingOrigin(t, content, &calls)
+	rawURL := origin.URL + "/blobs/sha256/ab/" + strings.Repeat("ab", 32) + "/data"
+	e, err := New(Options{Chunk: testCfg(), Store: openStoreAt(t), Fetcher: newFetcher(), DigestLayout: chunk.LayoutOCIOnly})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultID, _ := chunk.ObjectID(rawURL)
+	urlID, _ := chunk.ObjectIDLayout(rawURL, chunk.LayoutOCIOnly)
+	wrong := store.BlockKey{Chunk: chunk.ChunkKey("dart", defaultID, 0)}
+	right := store.BlockKey{Chunk: chunk.ChunkKey("dart", urlID, 0)}
+	if right == wrong {
+		t.Fatal("fixture must resolve differently in the two layouts")
+	}
+	ctx := context.Background()
+	source := e.PeerLeaseSource()
+	lease, ok, err := source(ctx, peer.BlockRequest{Key: wrong, URL: rawURL})
+	lease.Release()
+	if err != nil || ok || atomic.LoadInt64(&calls) != 0 {
+		t.Fatalf("other layout's key: held=%v err=%v origin calls=%d", ok, err, atomic.LoadInt64(&calls))
+	}
+	lease, ok, err = source(ctx, peer.BlockRequest{Key: right, URL: rawURL})
+	defer lease.Release()
+	if err != nil || !ok || !bytes.Equal(lease.Bytes(), content) {
+		t.Fatalf("cold relay: held=%v err=%v bytes=%x", ok, err, lease.Bytes())
+	}
+	if !e.store.Has(right) || e.store.Has(wrong) {
+		t.Fatal("cold relay published the block under the wrong key")
+	}
+}
+
 func TestRelayDeclinesInconsistentKeyURL(t *testing.T) {
 	for _, warm := range []bool{false, true} {
 		name := "buffered/cold"

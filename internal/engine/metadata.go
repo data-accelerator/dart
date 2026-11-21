@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 
-	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/fetch"
 	"github.com/data-accelerator/dart/internal/hashring"
 	"github.com/data-accelerator/dart/internal/peer"
@@ -21,7 +20,7 @@ func (f metadataFetcher) Fetch(ctx context.Context, url string, _, _ int64) (fet
 	if view == nil {
 		return fetch.Range{}, errNoRoot
 	}
-	oid, _ := chunk.ObjectID(url)
+	oid := e.objectID(url)
 	roots := hashring.Rank(e.fileKey(oid), view.Roots())
 	var last error = errNoRoot
 	for i, n := range roots {

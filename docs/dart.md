@@ -274,6 +274,7 @@ go test ./cmd/dart/ ./internal/node/ -race -count=1
 | `TestResolverPrefixPassthrough` | prefix stripping; scheme required; missing prefix errors |
 | `TestResolverPreservesDoubleSlash` | embedded `https://` not collapsed (RequestURI, not URL.Path) |
 | `TestNewHandlerValidation` | invalid chunk config / cache < block rejected |
+| `TestOCIDigestOnlySeparatesPrefixReads` | OCI-only reads distinguish immutable objects with the same Distribution-shaped suffix |
 | `TestEndToEndPrefix` | client → dart → origin range fetch, 206, exact bytes, non-chunked |
 | `TestParseFlagsDefaults` | flag defaults and parsing |
 | `TestRootFanoutFlagsAndRouting` | root=1 default, explicit root degree, invalid CLI values, real peer selection through node assembly and parent-miss fallback to terminal root |

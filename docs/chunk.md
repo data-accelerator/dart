@@ -183,6 +183,13 @@ the layout ON acceptable. `LayoutOCIOnly` (`dart -oci-digest-only`) turns it off
 for a non-standard backing store; identity then falls back to the canonical URL,
 which costs dedup but cannot conflate anything.
 
+Use the same layout on every peer. The node applies it to block addressing,
+fetch coalescing, root and reader selection, and peer key validation. Endpoint
+metadata remains keyed by origin as described in [ADR-0004](./adr/0004-preserve-escaped-origin-identities.md).
+When upgrading a cluster using `-oci-digest-only`, upgrade the nodes together.
+Earlier releases inferred Distribution digests on the block path even with
+this flag set. Restarting clears the affected entries.
+
 **The query is always excluded.** That is load-bearing rather than tidy: a
 presigned signature differs on every request, so including it would give one
 object a new identity each time — and would also leak a credential into the key.

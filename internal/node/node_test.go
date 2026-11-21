@@ -89,6 +89,36 @@ func TestNewHandlerValidation(t *testing.T) {
 	}
 }
 
+// A nonstandard origin can have Distribution-shaped paths that only identify
+// bytes within each prefix. In OCI-only mode the two blocks must stay distinct.
+func TestOCIDigestOnlySeparatesPrefixReads(t *testing.T) {
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := "aaaaaaaaaaaaaaaa"
+		if strings.HasPrefix(r.URL.Path, "/second/") {
+			body = "bbbbbbbbbbbbbbbb"
+		}
+		http.ServeContent(w, r, "blob", time.Time{}, strings.NewReader(body))
+	}))
+	defer origin.Close()
+	cfg := config{cacheDir: t.TempDir(), cacheSize: 1024, chunkSize: 64, blockSize: 16, prefix: "dart", ociDigestOnly: true}
+	n, err := build(cfg, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.closer.Close()
+
+	suffix := "/blobs/sha256/ab/" + strings.Repeat("ab", 32) + "/data"
+	for _, tc := range []struct{ prefix, want string }{{"first", "aaaaaaaaaaaaaaaa"}, {"second", "bbbbbbbbbbbbbbbb"}} {
+		req := httptest.NewRequest(http.MethodGet, "/dart/"+origin.URL+"/"+tc.prefix+suffix, nil)
+		req.Header.Set("Range", "bytes=0-15")
+		rec := httptest.NewRecorder()
+		n.client.ServeHTTP(rec, req)
+		if rec.Code != http.StatusPartialContent || rec.Body.String() != tc.want {
+			t.Errorf("%s: status=%d body=%q, want 206 %q", tc.prefix, rec.Code, rec.Body.String(), tc.want)
+		}
+	}
+}
+
 // TestEndToEndPrefix wires a real origin behind a dart handler and fetches a
 // range through the prefix-passthrough path.
 func TestEndToEndPrefix(t *testing.T) {

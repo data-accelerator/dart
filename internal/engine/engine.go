@@ -43,6 +43,9 @@ import (
 type Options struct {
 	// Chunk is the object/chunk/block grid. Must be valid (see chunk.Config).
 	Chunk chunk.Config
+	// DigestLayout selects the content identity used for blocks, placement and relay
+	// validation. Its zero value is chunk.LayoutDistribution.
+	DigestLayout chunk.DigestLayout
 	// Store is the block cache. Required.
 	Store store.Store
 	// Fetcher is the origin read-through. Typically a *fetch.Coalescing so
@@ -120,13 +123,14 @@ type Options struct {
 
 // Engine serves object byte ranges from cache with origin read-through.
 type Engine struct {
-	borrowed leaseLoads
-	origins  leaseLoads
-	metadata *fetch.Coalescing
-	cfg      chunk.Config
-	store    store.Store
-	fetcher  fetch.Fetcher
-	ns       string
+	borrowed     leaseLoads
+	origins      leaseLoads
+	metadata     *fetch.Coalescing
+	cfg          chunk.Config
+	digestLayout chunk.DigestLayout
+	store        store.Store
+	fetcher      fetch.Fetcher
+	ns           string
 
 	// P2P (optional)
 	cluster    cluster.Provider
@@ -176,6 +180,9 @@ func New(opt Options) (*Engine, error) {
 	if err := opt.Chunk.Validate(); err != nil {
 		return nil, err
 	}
+	if opt.DigestLayout != chunk.LayoutDistribution && opt.DigestLayout != chunk.LayoutOCIOnly {
+		return nil, errors.New("engine: invalid digest layout")
+	}
 	if !opt.Role.Valid() {
 		return nil, errors.New("engine: invalid node role")
 	}
@@ -220,6 +227,7 @@ func New(opt Options) (*Engine, error) {
 	}
 	e := &Engine{
 		cfg:            opt.Chunk,
+		digestLayout:   opt.DigestLayout,
 		store:          opt.Store,
 		fetcher:        opt.Fetcher,
 		ns:             ns,
@@ -383,6 +391,11 @@ func (e *Engine) relayableBlockIndex(b uint64) bool {
 	return b <= uint64(e.cfg.MaxBlockIndex())
 }
 
+func (e *Engine) objectID(url string) string {
+	id, _ := chunk.ObjectIDLayout(url, e.digestLayout)
+	return id
+}
+
 // relayableRequest checks requester-supplied addressing before cache lookup or
 // parent/origin I/O. A key and Origin URL are independent wire fields: comparing
 // a held block against an unrelated URL's geometry would blame an honest peer.
@@ -394,7 +407,7 @@ func (e *Engine) relayableRequest(req peer.BlockRequest) bool {
 	if req.URL == "" {
 		return true
 	}
-	oid, _ := chunk.ObjectID(req.URL)
+	oid := e.objectID(req.URL)
 	want := chunk.ChunkKey(e.ns, oid, e.cfg.ChunkOfBlock(int64(req.Key.Block)))
 	return req.Key.Chunk == want
 }

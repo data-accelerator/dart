@@ -185,7 +185,7 @@ func (e *Engine) peerRead(ctx context.Context, req peer.BlockRequest, owned bool
 		return store.Lease{}, false, nil
 	}
 
-	oid, _ := chunk.ObjectID(req.URL)
+	oid := e.objectID(req.URL)
 	if owned {
 		var data []byte
 		data, err = e.block(ctx, req.URL, oid, size, int64(req.Key.Block), req.Hop)

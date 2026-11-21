@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/hashring"
 )
 
@@ -66,7 +65,7 @@ func (t originTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if view == nil {
 		return nil, errNoRoot
 	}
-	oid, _ := chunk.ObjectID(req.URL.String())
+	oid := e.objectID(req.URL.String())
 	roots := hashring.Rank(e.fileKey(oid), view.Roots())
 	var last error = errNoRoot
 	seen := make(map[string]bool)
