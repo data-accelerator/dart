@@ -108,6 +108,7 @@ type Seeder struct {
 	port      portSelector
 	factory   informers.SharedInformerFactory
 	informer  cache.SharedIndexInformer
+	handler   cache.ResourceEventHandlerRegistration
 
 	mu     sync.RWMutex // guards addrs
 	addrs  []string     // sorted; the last recomputed snapshot
@@ -138,15 +139,17 @@ func newSeeder(client kubernetes.Interface, namespace, service string, port port
 	// deleted — recomputes the whole snapshot. EndpointSlice sets are small (one
 	// slice per ~100 endpoints), so a full recompute per event is the simple and
 	// obviously-correct option.
-	if _, err := s.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	handler, err := s.informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(any) { s.recompute() },
 		UpdateFunc: func(_, _ any) { s.recompute() },
 		DeleteFunc: func(any) { s.recompute() },
-	}); err != nil {
+	})
+	if err != nil {
 		// AddEventHandler only errors when the informer is already stopped; that
 		// cannot happen here, so this is a programming error.
 		panic(fmt.Sprintf("k8s seeder: AddEventHandler: %v", err))
 	}
+	s.handler = handler
 	return s
 }
 
@@ -154,10 +157,11 @@ func newSeeder(client kubernetes.Interface, namespace, service string, port port
 // it via the DiscoveryScheme lifecycle convention.
 func (s *Seeder) Run(ctx context.Context) {
 	s.factory.Start(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), s.informer.HasSynced) {
+	if !cache.WaitForCacheSync(ctx.Done(), s.handler.HasSynced) {
 		return // ctx cancelled before the first list completed
 	}
-	s.recompute()
+	// The event handler publishes snapshots in order. Its sync barrier includes
+	// delivery of the initial list, so startup need not publish a second copy.
 	s.synced.Store(true)
 	<-ctx.Done()
 }
