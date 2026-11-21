@@ -237,8 +237,8 @@ resources, registry upstream).
 
 For heterogeneous supply/compute groups, the chart also supports `role` and a
 shared `discovery.serviceName`, with exactly one release creating that Service.
-Use v0.4.1 or compatible source builds to include the stale-membership fix.
-Upgrade every observer; see [patch upgrade guidance](./docs/k8s.md#upgrading-from-v040-to-v041). Upgrading
+Use v0.4.2 for the cache identity and EndpointSlice startup fixes. Clusters using
+`-oci-digest-only` must upgrade together; see the [v0.4.2 upgrade guidance](./docs/k8s.md#upgrading-from-v041-to-v042). Upgrading
 from v0.3.0 requires draining traffic and replacing all peers together, even for
 all-ordinary clusters. See [the discovery/deployment contract](./docs/k8s.md#heterogeneous-node-groups)
 for group selectors, stable identities and coordinated-upgrade requirements.

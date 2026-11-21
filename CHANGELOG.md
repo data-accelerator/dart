@@ -7,6 +7,28 @@ every release's upgrade notes.
 
 ## [Unreleased]
 
+## [v0.4.2] — 2026-11-21
+
+### Fixed
+
+- Honor `-oci-digest-only` throughout block caching and peer routing. Distinct immutable objects with Distribution-shaped paths now retain separate URL identities in this mode (#112, #121).
+- Preserve ordered content codings and the origin's content type when forwarding a response from an origin that ignores Range (#113, #119).
+- Bound a credential-refusal retry by the backend flight limit and the caller's deadline and cancellation (#114, #120).
+- Serialize concurrent owned/borrowed disk publication for the same block so it occupies one budget (#115, #122).
+- Wait for the EndpointSlice handler to publish its initial snapshot. Startup can no longer overwrite a newer address update (#116, #123).
+
+### Performance
+
+- Hybrid RAM hits check disk membership without waiting for slot I/O, while retaining class-aware admission accounting (#117, #124).
+- Converged peers can exchange just the responder's self-report using an optional v2 roster digest. Missing or differing digests receive the full roster. Direct probes, expiry and identity confirmation continue as before (#118, #125, ADR-0015).
+
+### Upgrade notes
+
+- With the default digest layout, v0.4.1 nodes can roll to v0.4.2. `Hash64`, HRW scores, `ChunkKey` construction and placement epoch framing are unchanged.
+- **Clusters using `-oci-digest-only` must upgrade all participating nodes together.** The fix changes the object identity supplied to block placement for Distribution-shaped origin paths. Drain reads, stop the old peers, then start the new version with the same flag on every peer. Use the same coordinated procedure for rollback. Caches start cold.
+- Upgrades from v0.3.x still require coordinated replacement across the peer v1/v2 boundary.
+- Helm chart 0.4.2 targets appVersion v0.4.2. Build your images from the release tag, then set `image.repository` and `image.tag=v0.4.2`. The chart defaults to `dev` for local source builds.
+
 ## [v0.4.1] — 2026-11-20
 
 ### Fixed
