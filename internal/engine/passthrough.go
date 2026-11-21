@@ -39,11 +39,11 @@ func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r 
 	// Entity headers only: hop-by-hop headers are net/http's business, and the
 	// rest (Date, Server, ...) the origin's values would misrepresent us.
 	for _, k := range []string{
-		"Content-Type", "Content-Length", "Content-Range",
+		"Content-Type", "Content-Length", "Content-Range", "Content-Encoding",
 		"ETag", "Last-Modified", "Cache-Control", "Accept-Ranges",
 	} {
-		if v := resp.Header.Get(k); v != "" {
-			w.Header().Set(k, v)
+		for _, v := range resp.Header.Values(k) {
+			w.Header().Add(k, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)

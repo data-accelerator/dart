@@ -72,6 +72,8 @@ func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
 	var sawRange string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawRange = r.Header.Get("Range")
+		w.Header().Add("Content-Encoding", "deflate")
+		w.Header().Add("Content-Encoding", "gzip")
 		w.WriteHeader(http.StatusOK)
 		w.Write(content)
 	}))
@@ -88,6 +90,9 @@ func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	resp := rec.Result()
+	if got := strings.Join(resp.Header.Values("Content-Encoding"), ","); got != "deflate,gzip" {
+		t.Fatalf("content encodings = %q, want deflate,gzip in origin order", got)
+	}
 	if sawRange != "bytes=10-19" {
 		t.Errorf("origin saw Range %q, want bytes=10-19", sawRange)
 	}

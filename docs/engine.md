@@ -513,7 +513,7 @@ Another endpoint for the same digest can still use the cache and P2P:
 
 
 - the client's `Range` header is forwarded, and the origin's status, entity
-  headers (`Content-Type`/`Content-Length`/`Content-Range`/`ETag`/
+  headers (`Content-Encoding`/`Content-Type`/`Content-Length`/`Content-Range`/`ETag`/
   `Last-Modified`/`Cache-Control`/`Accept-Ranges`) and body are streamed back
   **verbatim** — the client sees exactly what talking to the origin directly
   would produce;
