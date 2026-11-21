@@ -152,6 +152,9 @@ caller-cancellation and credential-refusal retry guarantees. Probe results
 have the same `Range`/error semantics and are not retained after completion;
 its shared bytes have the same ownership rules as `Fetch`.
 
+A joiner retry gets a fresh backend deadline bounded by the effective flight limit
+and by the caller’s own deadline and cancellation.
+
 If the inner fetcher implements `Prober`, both the shared request and an
 authorization-refusal retry delegate to its `Probe`, preserving endpoint
 isolation through nested coalescing wrappers. Otherwise the inner fetcher
