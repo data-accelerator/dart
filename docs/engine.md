@@ -65,6 +65,7 @@ startup traffic and the additional control-plane request cost.
 ```go
 type Options struct {
     Chunk     chunk.Config   // grid; must be valid
+    DigestLayout chunk.DigestLayout // zero selects Distribution
     Store     store.Store    // block cache; required
     Fetcher   fetch.Fetcher  // origin read-through; required (typically *fetch.Coalescing)
     Namespace string         // chunk-key namespace; default "dart"
@@ -189,7 +190,8 @@ When the fetcher implements `fetch.Prober`, `Size` calls `Probe` so concurrent
 metadata flights also stay endpoint-scoped, even when block flights are keyed
 by digest. Custom fetchers without `Prober` receive `Fetch(ctx, url, 0, 0)` and
 must not coalesce these probes across endpoints. Blocks still use
-`chunk.ObjectID` and remain shared across origins. A metadata hit costs O(URL
+`chunk.ObjectIDLayout` with `Options.DigestLayout`. When that layout recognizes a
+digest, blocks remain shared across origins. A metadata hit costs O(URL
 length) key derivation and a map lookup; a miss adds one ranged GET.
 
 A `206` that hides the total (`Content-Range: bytes 0-0/*`) is a **probe
@@ -335,7 +337,7 @@ would charge this healthy relay on the requester's circuit breaker.
 
 **Origin/key consistency is checked at the same boundary.** When a request
 supplies `X-DART-Origin`, the source recomputes its expected chunk key from
-`(namespace, chunk.ObjectID(url), ChunkOfBlock(blockIndex))`. A different key
+`(namespace, configured object ID, ChunkOfBlock(blockIndex))`. A different key
 is a requester addressing error and is declined before local cache lookup,
 parent selection or any origin probe. This prevents an honest parent serving
 a requested cached block from being blamed for a different URL's geometry.
@@ -716,6 +718,7 @@ go test ./internal/engine/ -cover -count=1
 | **`TestRelayHopBoundary`** | **both peer-facing sources: hop == maxHop-1 still relays; hop == maxHop declines without touching the origin** |
 | `TestTreeMultiHopRelay` | 3-node fanout=1 chain: a tail request populates every node via the relay chain |
 | `TestWholeBlockRelayChainThroughEngines` | 3-node fanout=1 chain over complete-block peer servers: bytes intact, every node cached |
+| `TestRelayUsesConfiguredDigestLayout` | relay key validation and cold publication both honor the configured layout |
 | `TestRelayDeclinesInconsistentKeyURL` | buffered/streaming, warm/cold relays decline unrelated URLs, wrong chunk indices and namespaces without contacting origins/parents or tripping circuits; valid and cache-only reads still work |
 | `TestClassOfMatchesPlacement` | owned iff in HRW top-`Replicas`, else borrowed; `Replicas=3` makes all members owners |
 | `TestClassOfSingleNodeIsOwned` | without P2P everything cached is owned |

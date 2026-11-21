@@ -7,7 +7,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/data-accelerator/dart/internal/chunk"
 	"github.com/data-accelerator/dart/internal/store"
 )
 
@@ -58,7 +57,7 @@ type blockResult struct {
 // workers. It never allocates a future, channel or goroutine per covering block.
 // All workers join before pins and speculative reservations are released.
 func (e *Engine) serveBlocks(ctx context.Context, w io.Writer, url string, size, start, end int64) error {
-	objectID, _ := chunk.ObjectID(url)
+	objectID := e.objectID(url)
 	first, last := e.cfg.BlockIndex(start), e.cfg.BlockIndex(end)
 	if first == last || e.prefetchWindow == 1 {
 		for index := first; index <= last; index++ {

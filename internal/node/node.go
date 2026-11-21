@@ -625,7 +625,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 	engine.RegisterStoreMetrics(reg, st)
 	var trackerReg *tracker.Registry
 	eopt := engine.Options{
-		Chunk: cc, Store: st,
+		Chunk: cc, DigestLayout: layout, Store: st,
 		// Coalesce by content identity, not by URL: a presigned upstream is signed
 		// afresh per request, so URL-keyed dedup would let every client open its own
 		// origin fetch for the same block.
