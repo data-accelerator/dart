@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 // --- TinyLFU sketch ---
@@ -358,4 +359,48 @@ func TestTieredConcurrent(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+type pausedOwnedLookup struct {
+	budgetStore
+	checked, resume chan struct{}
+}
+
+func (p *pausedOwnedLookup) Has(k BlockKey) bool {
+	found := p.budgetStore.Has(k)
+	close(p.checked)
+	<-p.resume
+	return found
+}
+
+func TestConcurrentDiskPromotionOccupiesOneBudget(t *testing.T) {
+	s := openTiered(t, 4, 0.5)
+	owned := &pausedOwnedLookup{s.owned, make(chan struct{}), make(chan struct{})}
+	s.owned = owned
+	key := BlockKey{Chunk: 123}
+	put := func(c Class, result chan<- error) {
+		_, err := s.PutClass(key, []byte("immutable"), c)
+		result <- err
+	}
+	borrowedDone := make(chan error, 1)
+	go put(Borrowed, borrowedDone)
+	<-owned.checked
+	ownedDone := make(chan error, 1)
+	go put(Owned, ownedDone)
+	// On the broken path promotion finishes while the borrowed writer still
+	// holds a stale lookup. A serialized promotion must wait for its release.
+	var promotionErr error
+	select {
+	case promotionErr = <-ownedDone:
+		close(owned.resume)
+	case <-time.After(50 * time.Millisecond):
+		close(owned.resume)
+		promotionErr = <-ownedDone
+	}
+	if err := <-borrowedDone; err != nil || promotionErr != nil {
+		t.Fatalf("publication errors: borrowed=%v owned=%v", err, promotionErr)
+	}
+	if st := s.Stats(); st.OwnedBlocks != 1 || st.BorrowedBlocks != 0 {
+		t.Fatalf("same key occupies owned=%d borrowed=%d", st.OwnedBlocks, st.BorrowedBlocks)
+	}
 }
