@@ -169,7 +169,8 @@ them would fire the halving cadence (sized for the borrowed budget) far too
 often, decaying warm borrowed estimates to zero where a one-shot could evict
 them. A `Hybrid` mem-tier hit still feeds the backing estimator via `Touch`, so
 a hot key's estimate does not decay while mem serves its reads; `Touch` is
-class-aware and skips owned keys (owned blocks are mirrored into mem too, so a
+class-aware. Disk membership checks take only the index lock, which is released
+before slot reads or writes. The estimator still skips owned keys (owned blocks are mirrored into mem too, so a
 class-blind touch would feed owned traffic right back in). The TinyLFU
 comparison and the evicting `Put` run inside the borrowed store's own lock
 (`putIfAdmitted`), so the victim compared is exactly the victim evicted — no

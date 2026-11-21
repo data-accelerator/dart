@@ -88,13 +88,17 @@ type slotMeta struct {
 type DiskStore struct {
 	slotSize int64
 
-	mu    sync.Mutex
-	f     *os.File
-	index map[BlockKey]int      // key -> slot id
-	meta  []slotMeta            // per-slot metadata (len == Slots)
-	free  []int                 // free slot ids (stack)
-	lru   *list.List            // in-use slot ids, most-recent at Front
-	elem  map[int]*list.Element // slot id -> its LRU element
+	// mu serializes slot I/O, LRU changes and index updates. Index readers
+	// may instead take indexMu alone. Writers hold mu, then take indexMu
+	// only while mutating the map, never while accessing the file.
+	mu      sync.Mutex
+	indexMu sync.RWMutex
+	f       *os.File
+	index   map[BlockKey]int      // key -> slot id
+	meta    []slotMeta            // per-slot metadata (len == Slots)
+	free    []int                 // free slot ids (stack)
+	lru     *list.List            // in-use slot ids, most-recent at Front
+	elem    map[int]*list.Element // slot id -> its LRU element
 }
 
 var _ Store = (*DiskStore)(nil)
@@ -222,7 +226,9 @@ func (s *DiskStore) putIfAdmitted(k BlockKey, data []byte, admit func(victim Blo
 		return false, fmt.Errorf("store: write slot %d: %w", slot, err)
 	}
 	s.meta[slot] = slotMeta{key: k, length: int64(len(data)), inUse: true}
+	s.indexMu.Lock()
 	s.index[k] = slot
+	s.indexMu.Unlock()
 	s.elem[slot] = s.lru.PushFront(slot)
 	return true, nil
 }
@@ -240,15 +246,22 @@ func (s *DiskStore) acquireSlot() int {
 	slot := back.Value.(int)
 	s.lru.Remove(back)
 	delete(s.elem, slot)
-	delete(s.index, s.meta[slot].key)
+	s.removeIndex(s.meta[slot].key)
 	s.meta[slot].inUse = false
 	return slot
 }
 
+// removeIndex removes a key while the caller holds mu.
+func (s *DiskStore) removeIndex(k BlockKey) {
+	s.indexMu.Lock()
+	delete(s.index, k)
+	s.indexMu.Unlock()
+}
+
 // Has reports whether the block is cached, without affecting LRU order.
 func (s *DiskStore) Has(k BlockKey) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.indexMu.RLock()
+	defer s.indexMu.RUnlock()
 	_, ok := s.index[k]
 	return ok
 }
@@ -263,7 +276,7 @@ func (s *DiskStore) Delete(k BlockKey) bool {
 	}
 	s.lru.Remove(s.elem[slot])
 	delete(s.elem, slot)
-	delete(s.index, k)
+	s.removeIndex(k)
 	s.meta[slot].inUse = false
 	s.free = append(s.free, slot)
 	return true
