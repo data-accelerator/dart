@@ -385,6 +385,15 @@ func TestConcurrentDiskPromotionOccupiesOneBudget(t *testing.T) {
 	borrowedDone := make(chan error, 1)
 	go put(Borrowed, borrowedDone)
 	<-owned.checked
+	// The borrowed writer is the only writer so far. Check its publication
+	// lock now, so slow scheduling of the promotion cannot mask a missing lock.
+	writer := &s.diskWriters[keyHash(key)%uint64(len(s.diskWriters))]
+	if writer.TryLock() {
+		writer.Unlock()
+		close(owned.resume)
+		<-borrowedDone
+		t.Fatal("borrowed disk lookup did not hold the key's publication lock")
+	}
 	ownedDone := make(chan error, 1)
 	go put(Owned, ownedDone)
 	// On the broken path promotion finishes while the borrowed writer still
