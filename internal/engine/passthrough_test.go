@@ -72,6 +72,7 @@ func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
 	var sawRange string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawRange = r.Header.Get("Range")
+		w.Header().Set("Content-Type", "application/vnd.example.blob")
 		w.Header().Add("Content-Encoding", "deflate")
 		w.Header().Add("Content-Encoding", "gzip")
 		w.WriteHeader(http.StatusOK)
@@ -88,8 +89,12 @@ func TestPassthroughForwardsRangeVerbatim(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://dart/blob", nil)
 	req.Header.Set("Range", "bytes=10-19")
 	rec := httptest.NewRecorder()
+	rec.Header().Set("Content-Type", "application/octet-stream") // registry fallback
 	h.ServeHTTP(rec, req)
 	resp := rec.Result()
+	if values := resp.Header.Values("Content-Type"); len(values) != 1 || values[0] != "application/vnd.example.blob" {
+		t.Fatalf("origin content type did not replace the registry default: %v", values)
+	}
 	if got := strings.Join(resp.Header.Values("Content-Encoding"), ","); got != "deflate,gzip" {
 		t.Fatalf("content encodings = %q, want deflate,gzip in origin order", got)
 	}

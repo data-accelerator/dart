@@ -42,8 +42,11 @@ func (e *Engine) ServePassthrough(ctx context.Context, w http.ResponseWriter, r 
 		"Content-Type", "Content-Length", "Content-Range", "Content-Encoding",
 		"ETag", "Last-Modified", "Cache-Control", "Accept-Ranges",
 	} {
-		for _, v := range resp.Header.Values(k) {
-			w.Header().Add(k, v)
+		if values := resp.Header.Values(k); len(values) > 0 {
+			w.Header().Set(k, values[0])
+			for _, v := range values[1:] {
+				w.Header().Add(k, v)
+			}
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
