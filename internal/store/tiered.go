@@ -107,7 +107,9 @@ type Tiered struct {
 	memory   bool
 	slotSize int64
 
-	sk *sketch
+	// Serialize disk publication and removal for the same key across both budgets.
+	diskWriters [64]sync.Mutex
+	sk          *sketch
 
 	mu       sync.Mutex
 	rejected uint64
@@ -346,6 +348,9 @@ func (t *Tiered) PutClass(k BlockKey, data []byte, c Class) (bool, error) {
 		l.Release()
 		return err == nil, err
 	}
+	writer := &t.diskWriters[keyHash(k)%uint64(len(t.diskWriters))]
+	writer.Lock()
+	defer writer.Unlock()
 	if c == Owned {
 		if err := t.owned.Put(k, data); err != nil {
 			return false, err
@@ -396,6 +401,11 @@ func (t *Tiered) Has(k BlockKey) bool { return t.owned.Has(k) || t.borrowed.Has(
 
 // Delete removes the block from either budget.
 func (t *Tiered) Delete(k BlockKey) bool {
+	if !t.memory {
+		writer := &t.diskWriters[keyHash(k)%uint64(len(t.diskWriters))]
+		writer.Lock()
+		defer writer.Unlock()
+	}
 	d1 := t.owned.Delete(k)
 	d2 := t.borrowed.Delete(k)
 	return d1 || d2

@@ -181,7 +181,8 @@ concurrent Get/Delete/Put can reorder the LRU in between. `Put` (the plain
 are declined before migration; existing copies remain readable. For enabled classes, `PutClass(k, Owned)`
 drops any borrowed copy (promotion); `PutClass(k, Borrowed)` on an owned key
 keeps the owned copy and refreshes its recency (never shadows it). Re-putting an
-existing key refreshes recency in whichever budget holds it.
+existing key refreshes recency in whichever budget holds it. Concurrent disk
+writes and deletions for a key are serialized across both budgets.
 
 The estimator (`sketch.go`) is a 4-bit count-min sketch plus a doorkeeper bloom
 filter with periodic halving, so it tracks *recent* popularity and the long tail
