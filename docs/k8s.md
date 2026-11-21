@@ -92,6 +92,23 @@ Kubernetes node name, so these node pools must be disjoint: two DART instances o
 one node need distinct stable identities and a separately configured deployment.
 Do not attach legacy v1 nodes to the role-aware cluster during upgrade.
 
+### Upgrading from v0.4.1 to v0.4.2
+
+With the default digest layout, roll out the new images normally. The optional
+v2 roster digest allows mixed peers to exchange complete rosters during the
+rollout. Placement hashes, epoch framing and the forgetting interval are unchanged.
+
+If you set `-oci-digest-only`, drain client reads and stop every old peer before
+starting the upgraded supply and compute groups. Keep the flag consistent on
+all nodes. This release corrects the cache identity for Distribution-shaped
+paths in that mode. Roll back all participating peers together as well.
+After restart, check `/healthz`, `/admin/members` and representative artifact
+reads as the caches warm up.
+
+Build the images from tag v0.4.2 with `--build-arg VERSION=v0.4.2`. Use
+`--target dart-k8s` for EndpointSlice discovery. Deploy chart 0.4.2 with
+your image repository and `image.tag=v0.4.2`.
+
 ### Upgrading from v0.4.0 to v0.4.1
 
 Build images from tag v0.4.1 with `--build-arg VERSION=v0.4.1` (add
