@@ -342,15 +342,33 @@ type RosterServer struct {
     NodeID string
     Role cluster.Role
     Src func() Roster
+    Select func(digest string) Roster
     Learn func(id, addr string)
     LearnMember func(RosterMember)
 }
-// RosterServer.ServeHTTP answers GET RosterPath with Src() as JSON, and feeds
+// RosterServer.ServeHTTP serves the selected roster (or Src() as fallback) and feeds
 // the fetcher's self-identification headers to LearnMember (direct contact),
 // falling back to the legacy identity-only Learn callback when unset.
 func (c *Client) FetchRoster(ctx, addr, selfID, selfAddr string) (Roster, string, error)
 func (c *Client) FetchRosterMember(ctx context.Context, addr string, self RosterMember) (Roster, string, error)
 ```
+
+`FetchRosterWithDigest(ctx, addr, self, digest)` sends the optional
+`HeaderRosterDigest` (`X-DART-Roster-Digest`). The caller supplies the digest
+of its current published view. A server with a `Select` callback may answer a
+matching hint with a 200 JSON roster containing just its complete self entry.
+A missing or unknown hint returns the full roster. Older v2 servers ignore
+the hint and older v2 clients request the full response. The comparison is an
+optimization that preserves the direct-contact authority of ADR-0014.
+
+ADR-0015 specifies a versioned, address-sensitive validator independent of the
+placement epoch. Start the SHA-256 input with the ASCII bytes
+`dart-roster-v1` and one NUL. Take the wire members with nonempty addresses
+in increasing byte order of ID. For each, write the ID and address, each
+preceded by its byte length as a big-endian uint64, then write the
+big-endian IEEE-754 binary64 weight bits and the one-byte role. Prefix the
+lowercase hex SHA-256 result with `v1-`. One view supplies both the digest and
+the reply. A node that cannot compute this format can request a full roster.
 
 Membership rides the peer listener. Five properties are deliberate:
 

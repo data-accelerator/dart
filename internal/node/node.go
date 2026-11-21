@@ -681,14 +681,16 @@ func build(cfg config, out io.Writer) (*node, error) {
 				closer.Close()
 				return nil, err
 			}
+			fetcher := &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr, selfRole: cfg.role}
 			dyn = cluster.NewDynamicProvider(cluster.DynamicConfig{
 				Self:            cluster.Member{ID: cfg.selfID, Addr: selfAddr, Weight: 1, Role: cfg.role},
 				Seeder:          seeder,
-				Fetcher:         &rosterFetcher{c: pc, selfID: cfg.selfID, selfAddr: selfAddr, selfRole: cfg.role},
+				Fetcher:         fetcher,
 				RefreshInterval: cfg.discoverInterval,
 				ForgetAfter:     cfg.forgetAfter,
 				OnError:         newThrottledLogger(out),
 			})
+			fetcher.current = dyn.Current
 			eopt.Cluster = dyn
 		default:
 			members, err := parsePeers(cfg.peers)
@@ -774,7 +776,7 @@ func build(cfg config, out io.Writer) (*node, error) {
 			mux.Handle(RosterRoute, &peer.RosterServer{
 				NodeID: cfg.selfID,
 				Role:   cfg.role,
-				Src:    func() peer.Roster { return rosterOf(dyn) },
+				Select: func(digest string) peer.Roster { return selectRoster(dyn, digest) },
 				LearnMember: func(m peer.RosterMember) {
 					dyn.LearnMember(cluster.Member{ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: m.Role})
 				},

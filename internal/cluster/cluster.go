@@ -17,10 +17,13 @@
 package cluster
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"sort"
+	"sync"
 
 	"github.com/data-accelerator/dart/internal/hashring"
 )
@@ -157,12 +160,14 @@ type Member struct {
 // either return copies or return internal slices that MUST be treated as
 // read-only (documented per method). Construct one with NewView.
 type View struct {
-	roots   []hashring.Node
-	readers []hashring.Node
-	epoch   uint64
-	members []Member        // canonical: sorted by (ID,State,Weight,Role), unique ID
-	ready   []hashring.Node // precomputed Ready members (sorted by ID)
-	live    []hashring.Node // precomputed Ready+Suspect members (sorted by ID)
+	rosterOnce   sync.Once
+	rosterDigest string
+	roots        []hashring.Node
+	readers      []hashring.Node
+	epoch        uint64
+	members      []Member        // canonical: sorted by (ID,State,Weight,Role), unique ID
+	ready        []hashring.Node // precomputed Ready members (sorted by ID)
+	live         []hashring.Node // precomputed Ready+Suspect members (sorted by ID)
 }
 
 // NewView builds an immutable View from the given members. The input is copied
@@ -291,6 +296,32 @@ func fmix64(z uint64) uint64 {
 
 // Epoch returns the deterministic membership epoch.
 func (v *View) Epoch() uint64 { return v.epoch }
+
+// RosterDigest identifies the published wire members, including their addresses.
+// It is computed once per immutable view on first use by discovery. The
+// placement epoch intentionally excludes addresses and cannot serve this role.
+func (v *View) RosterDigest() string {
+	v.rosterOnce.Do(func() {
+		h := sha256.New()
+		h.Write([]byte("dart-roster-v1\x00"))
+		var word [8]byte
+		for _, m := range v.members {
+			if m.Addr == "" {
+				continue
+			} // addrless members are omitted from rosters
+			for _, field := range [...]string{m.ID, m.Addr} {
+				binary.BigEndian.PutUint64(word[:], uint64(len(field)))
+				h.Write(word[:])
+				h.Write([]byte(field))
+			}
+			binary.BigEndian.PutUint64(word[:], math.Float64bits(m.Weight))
+			h.Write(word[:])
+			h.Write([]byte{byte(m.Role)})
+		}
+		v.rosterDigest = "v1-" + hex.EncodeToString(h.Sum(nil))
+	})
+	return v.rosterDigest
+}
 
 // Len returns the number of members (all states).
 func (v *View) Len() int { return len(v.members) }

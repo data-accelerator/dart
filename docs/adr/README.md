@@ -138,3 +138,4 @@ acceptable in current law — it is a pointer, not a narrative.
 | [0012](./0012-publish-reader-growth-immediately.md) | Publish reader growth immediately and refresh on bounded demand | accepted |
 | [0013](./0013-settle-canceled-peer-requests-neutrally.md) | Settle canceled peer requests without inferring health | accepted |
 | [0014](./0014-confirm-discovered-members-directly.md) | Confirm discovered members directly before publication | accepted |
+| [0015](./0015-exchange-matching-rosters.md) | Exchange self reports when published wire rosters match | accepted |
