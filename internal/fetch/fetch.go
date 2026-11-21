@@ -574,7 +574,9 @@ func (c *Coalescing) fetch(ctx context.Context, key string, g *group, doFetch fu
 		}
 		g.release(key, flight)
 		if !lead && refused(err) && ctx.Err() == nil {
-			r, err = doFetch(ctx)
+			retryCtx, cancel := context.WithTimeout(ctx, c.FlightLimit())
+			r, err = doFetch(retryCtx)
+			cancel()
 			r.Coalesced = false
 		}
 		return r, err

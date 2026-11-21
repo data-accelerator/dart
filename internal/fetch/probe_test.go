@@ -177,6 +177,7 @@ func (f *probeOnlyFetcher) Probe(ctx context.Context, raw string) (Range, error)
 }
 
 func TestCoalescingProbeDelegatesRefusalRetry(t *testing.T) {
+	const limit = 5 * time.Second
 	started, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
@@ -191,13 +192,16 @@ func TestCoalescingProbeDelegatesRefusalRetry(t *testing.T) {
 				return Range{}, ctx.Err()
 			}
 		}
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > limit {
+			return Range{}, errors.New("retry lost its backend deadline")
+		}
 		if !strings.Contains(raw, "Signature=renewed") {
 			return Range{}, errors.New("retry lost the caller's credential")
 		}
 		return Range{Data: []byte("x"), Total: 4}, nil
 	}}
-	c := &Coalescing{F: f}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	c := &Coalescing{F: f, MaxFlight: limit}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	leader := make(chan error, 1)
 	go func() {
