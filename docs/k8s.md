@@ -161,8 +161,9 @@ func (s *Seeder) Seeds(ctx context.Context) ([]string, error)
 - Spec syntax: `<namespace>/<service>[/<port>]`; errors on missing segments, a
   numeric port outside 1–65535, or extra segments.
 - `Run` blocks until `ctx` is cancelled; `Seeds` only reads the cached snapshot
-  (never blocks on the API server) and before the first sync reports "nothing
-  found right now", which membership treats like a DNS miss: keep known peers.
+  (never blocks on the API server). Only the informer event handler publishes snapshots.
+  Readiness waits for that handler to process the initial list, including an empty list.
+  Before then, `Seeds` returns no addresses and membership retains its known peers.
 - `NewSeederWithClient` is how tests inject the fake clientset, and how an
   embedder with its own client lifecycle wires one in.
 

@@ -3,12 +3,14 @@ package k8s
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 )
 
 func TestParseSpec(t *testing.T) {
@@ -213,5 +215,54 @@ func TestSchemeShape(t *testing.T) {
 	}
 	if !strings.Contains(Scheme.Usage, "namespace") {
 		t.Errorf("Scheme.Usage = %q, want it to document the spec", Scheme.Usage)
+	}
+}
+
+// heldRegistration delays notification that the initial event callbacks finished.
+type heldRegistration struct {
+	cache.ResourceEventHandlerRegistration
+	checked chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *heldRegistration) HasSynced() bool {
+	r.once.Do(func() { close(r.checked) })
+	select {
+	case <-r.release:
+		return r.ResourceEventHandlerRegistration.HasSynced()
+	default:
+		return false
+	}
+}
+
+func TestStartupWaitsForInitialEndpointPublication(t *testing.T) {
+	initial := slice("initial", "dart", "peer", 9000, endpoint("10.0.0.1", nil))
+	s := newSeeder(fake.NewSimpleClientset(initial), "dart-system", "dart", portSelector{name: "peer"})
+	reg := &heldRegistration{ResourceEventHandlerRegistration: s.handler, checked: make(chan struct{}), release: make(chan struct{})}
+	s.handler = reg
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	done := make(chan struct{})
+	go func() { defer close(done); s.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-reg.checked:
+	case <-ctx.Done():
+		t.Fatal("startup did not wait for the registered handler")
+	}
+	if s.synced.Load() {
+		t.Fatal("reported ready before initial event publication")
+	}
+	close(reg.release)
+	for !s.synced.Load() {
+		select {
+		case <-ctx.Done():
+			t.Fatal("initial event publication never completed")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	addrs, err := s.Seeds(ctx)
+	if err != nil || len(addrs) != 1 || addrs[0] != "10.0.0.1:9000" {
+		t.Fatalf("initial seeds = %v, %v", addrs, err)
 	}
 }
