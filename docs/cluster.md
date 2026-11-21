@@ -104,6 +104,12 @@ v := cluster.NewView(members)
 owner := hashring.Rank(chunkKey, v.Ready())[0] // placement over Ready members
 ```
 
+`(*View).RosterDigest() string` computes a discovery validator on first use.
+It includes every addressable member's ID, address, weight and role in
+canonical order. Only the placement epoch is used for routing decisions.
+The wire encoding and compatibility rules are in [peer.md §3.7](./peer.md#37-membership-exchange-get-peerv2roster)
+and [ADR-0015](./adr/0015-exchange-matching-rosters.md).
+
 ### 3.3.1 `func ValidMemberID(s string) bool`
 
 Established by [ADR-0002](./adr/0002-visible-ascii-member-ids.md).
@@ -311,6 +317,9 @@ go test ./internal/cluster/ -cover -count=1
 ```
 
 ### Test list (property each guards)
+
+`TestRosterDigest` pins the wire digest to an independently computed golden
+value and checks both address sensitivity and independence of local state.
 
 | Test | Property guarded |
 |---|---|

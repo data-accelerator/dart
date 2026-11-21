@@ -28,6 +28,10 @@ const HeaderPeerRole = "X-DART-Peer-Role"
 // HeaderPeerWeight carries the caller's placement weight in roster exchange.
 const HeaderPeerWeight = "X-DART-Peer-Weight"
 
+// HeaderRosterDigest advertises the caller's current published roster. A match
+// permits the server to return only its complete self-report.
+const HeaderRosterDigest = "X-DART-Roster-Digest"
+
 // maxRosterBody bounds a roster response. A roster is small — a few tens of bytes
 // per member — and this exists so a misbehaving or hostile peer cannot make us
 // allocate without limit. 4 MiB is room for well over 10k members.
@@ -66,8 +70,11 @@ type RosterServer struct {
 	NodeID string
 	// Role is used for self-identification when Src omits the local entry.
 	Role cluster.Role
-	// Src returns the roster to serve. Required.
+	// Src returns the complete roster when Select is unset.
 	Src func() Roster
+	// Select returns a full roster for an absent or unmatched digest. On a
+	// match it may return just the responding node, including its metadata.
+	Select func(digest string) Roster
 	// Learn, if set, is called with a caller's identity and advertised address.
 	//
 	// This makes the exchange bidirectional, which is not optional. A node whose
@@ -86,7 +93,7 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "roster is read-only", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.Src == nil {
+	if s.Src == nil && s.Select == nil {
 		http.Error(w, "no roster source", http.StatusInternalServerError)
 		return
 	}
@@ -119,7 +126,12 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.Learn(id, addr)
 		}
 	}
-	roster := s.Src()
+	var roster Roster
+	if s.Select != nil {
+		roster = s.Select(r.Header.Get(HeaderRosterDigest))
+	} else {
+		roster = s.Src()
+	}
 	selfRole := s.Role
 	for _, m := range roster.Members {
 		if !m.Role.Valid() {
@@ -144,6 +156,7 @@ func (s *RosterServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set(HeaderNode, s.NodeID)
 	}
 	w.Header().Set(HeaderEpoch, roster.Epoch)
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	_, _ = w.Write(body)
@@ -181,6 +194,13 @@ func (c *Client) FetchRoster(ctx context.Context, addr, selfID, selfAddr string)
 // FetchRosterMember exchanges a complete self-report with a role-aware peer.
 // It preserves FetchRoster's discovery admission and bounded request lifetime.
 func (c *Client) FetchRosterMember(ctx context.Context, addr string, self RosterMember) (Roster, string, error) {
+	return c.FetchRosterWithDigest(ctx, addr, self, "")
+}
+
+// FetchRosterWithDigest permits omission of already-known third-party members.
+// The digest must identify the caller's current published view. An empty value
+// requests a full roster.
+func (c *Client) FetchRosterWithDigest(ctx context.Context, addr string, self RosterMember, digest string) (Roster, string, error) {
 	if !self.Role.Valid() {
 		return Roster{}, "", fmt.Errorf("peer: invalid self role %d", self.Role)
 	}
@@ -197,6 +217,9 @@ func (c *Client) FetchRosterMember(ctx context.Context, addr string, self Roster
 	if err != nil {
 		c.record(addr, permit, outcomeSoftFail)
 		return Roster{}, "", err
+	}
+	if digest != "" {
+		req.Header.Set(HeaderRosterDigest, digest)
 	}
 	if selfID != "" {
 		req.Header.Set(HeaderNode, selfID)

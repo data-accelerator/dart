@@ -144,6 +144,10 @@ const RosterRoute = peer.RosterPath
 The exact path the roster server is mounted on (no trailing slash, so a
 `ServeMux` does not shadow the `/peer/` block routes).
 
+Dynamic discovery includes the digest of the caller's current published view in
+each outbound exchange. On a digest match the server returns its full self
+entry. See [ADR-0015](./adr/0015-exchange-matching-rosters.md).
+
 ## 4. Invariants & Guarantees
 
 - **What a binary accepts is enumerable**: `-discover`'s help text is rendered
@@ -217,6 +221,11 @@ go test ./internal/node/ -race -count=1
 ```
 
 ### Test list (property each guards)
+
+`TestConditionalRosterOverHTTP` checks compact and full responses over TCP,
+address-only changes, caller restarts, bidirectional contact and v2 fallback.
+`BenchmarkConvergedRoster` compares pooled full and matching exchanges at
+8, 64 and 256 members and measures request plus response HTTP bytes.
 
 `TestDiscoveryIdentityReplacementOverHTTP` exercises roster response identity,
 wire decoding and dynamic admission together: AZ replaced by B expires despite

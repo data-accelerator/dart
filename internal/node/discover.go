@@ -27,10 +27,15 @@ type rosterFetcher struct {
 	selfID   string
 	selfAddr string
 	selfRole cluster.Role
+	current  func() *cluster.View
 }
 
 func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster.Member, string, error) {
-	r, responder, err := f.c.FetchRosterMember(ctx, addr, peer.RosterMember{ID: f.selfID, Addr: f.selfAddr, Weight: 1, Role: f.selfRole})
+	var digest string
+	if f.current != nil {
+		digest = f.current().RosterDigest()
+	}
+	r, responder, err := f.c.FetchRosterWithDigest(ctx, addr, peer.RosterMember{ID: f.selfID, Addr: f.selfAddr, Weight: 1, Role: f.selfRole}, digest)
 	if err != nil {
 		return nil, "", err
 	}
@@ -52,8 +57,17 @@ func (f *rosterFetcher) FetchRoster(ctx context.Context, addr string) ([]cluster
 }
 
 // rosterOf renders a provider's current membership for the wire.
-func rosterOf(d *cluster.DynamicProvider) peer.Roster {
+func rosterOf(d *cluster.DynamicProvider) peer.Roster { return selectRoster(d, "") }
+
+// Take one immutable view for both comparison and reply. A compact reply still
+// carries a fresh, complete direct self-report, even at a recycled endpoint.
+func selectRoster(d *cluster.DynamicProvider, digest string) peer.Roster {
 	v := d.Current()
+	if digest != "" && digest == v.RosterDigest() {
+		if m, ok := v.Get(d.Self().ID); ok && m.Addr != "" {
+			return peer.Roster{Epoch: strconv.FormatUint(v.Epoch(), 10), Members: []peer.RosterMember{wireMember(m)}}
+		}
+	}
 	out := peer.Roster{
 		Epoch:   strconv.FormatUint(v.Epoch(), 10),
 		Members: make([]peer.RosterMember, 0, v.Len()),
@@ -62,11 +76,13 @@ func rosterOf(d *cluster.DynamicProvider) peer.Roster {
 		if m.Addr == "" {
 			continue // nothing a caller could do with it
 		}
-		out.Members = append(out.Members, peer.RosterMember{
-			ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: m.Role,
-		})
+		out.Members = append(out.Members, wireMember(m))
 	}
 	return out
+}
+
+func wireMember(m cluster.Member) peer.RosterMember {
+	return peer.RosterMember{ID: m.ID, Addr: m.Addr, Weight: m.Weight, Role: m.Role}
 }
 
 // advertisedAddr determines the address peers should use to reach this node.
