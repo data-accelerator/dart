@@ -3,12 +3,14 @@ package node
 import (
 	"context"
 	"fmt"
-	"github.com/data-accelerator/dart/internal/cluster"
-	"github.com/data-accelerator/dart/internal/peer"
 	"net"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/data-accelerator/dart/internal/cluster"
+	"github.com/data-accelerator/dart/internal/peer"
 )
 
 func TestConditionalRosterOverHTTP(t *testing.T) {
@@ -138,5 +140,68 @@ func BenchmarkConvergedRoster(b *testing.B) {
 				b.ReportMetric(float64(in.Load()+out.Load())/float64(b.N), "wire-B/op")
 			})
 		}
+	}
+}
+
+// The observer only receives outbound replies. Inbound liveness credit from a
+// peer would mask a compact reply that omitted the responder's self-report.
+func TestCompactRosterKeepsLiveRespondersAndExpiresDepartures(t *testing.T) {
+	ctx := context.Background()
+	observer := cluster.Member{ID: "observer", Addr: "observer:9000", Weight: 1}
+	b := httptest.NewUnstartedServer(nil)
+	c := httptest.NewUnstartedServer(nil)
+	second := cluster.Member{ID: "b", Addr: b.Listener.Addr().String(), Weight: 1}
+	third := cluster.Member{ID: "c", Addr: c.Listener.Addr().String(), Weight: 1}
+	start := func(srv *httptest.Server, self, other cluster.Member) *atomic.Int32 {
+		sender := cluster.NewDynamicProvider(cluster.DynamicConfig{Self: self, Seeder: cluster.StaticSeeder{}})
+		sender.LearnMember(observer)
+		sender.LearnMember(other)
+		sender.Refresh(ctx)
+		var compact atomic.Int32
+		srv.Config.Handler = &peer.RosterServer{NodeID: self.ID, Select: func(digest string) peer.Roster {
+			r := selectRoster(sender, digest)
+			if len(r.Members) == 1 {
+				compact.Add(1)
+			}
+			return r
+		}}
+		srv.Start()
+		t.Cleanup(srv.Close)
+		return &compact
+	}
+	bCompact := start(b, second, third)
+	cCompact := start(c, third, second)
+	now := time.Unix(100, 0)
+	const forget = 3 * time.Second
+	f := &rosterFetcher{c: peer.NewClient(), selfID: observer.ID, selfAddr: observer.Addr}
+	t.Cleanup(f.c.HTTP.CloseIdleConnections)
+	d := cluster.NewDynamicProvider(cluster.DynamicConfig{
+		Self: observer, Seeder: cluster.StaticSeeder{second.Addr, third.Addr}, Fetcher: f,
+		Now: func() time.Time { return now }, ForgetAfter: forget,
+	})
+	f.current = d.Current
+	if v := d.Refresh(ctx); v.Len() != 3 {
+		t.Fatalf("initial view = %v", v.Members())
+	}
+	for i := 0; i < 8; i++ {
+		now = now.Add(time.Second)
+		v := d.Refresh(ctx)
+		if v.Len() != 3 {
+			t.Fatalf("live responder expired at step %d: %v", i, v.Members())
+		}
+	}
+	if bCompact.Load() != 8 || cCompact.Load() != 8 {
+		t.Fatalf("expected eight compact replies per peer, got %d and %d", bCompact.Load(), cCompact.Load())
+	}
+	c.Close()
+	now = now.Add(forget + time.Second)
+	for i := 0; i < 3; i++ {
+		// b continues to advertise c. Once the views differ, its full reply
+		// may rediscover c as a candidate, but cannot confirm it.
+		v := d.Refresh(ctx)
+		if _, ok := v.Get(second.ID); !ok || v.Len() != 2 {
+			t.Fatalf("post-departure view = %v", v.Members())
+		}
+		now = now.Add(time.Second)
 	}
 }
